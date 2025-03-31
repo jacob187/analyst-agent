@@ -1,0 +1,15 @@
+# Python 
+__pycache__/
+*.py[cod]
+.python-version
+.pytest_cache
+
+
+# Vitual Environment
+.venv/
+.env
+
+# IDE
+.idea/
+.DS_Store
+.vscode/
