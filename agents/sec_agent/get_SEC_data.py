@@ -14,7 +14,6 @@ class SECDataRetrieval:
             print(f"Failed to initialize company in SECDataRetrieval: {e}")
             raise
         self.tenk = self._fetch_company_tenk_filing()
-        print(type(self.tenk))
 
     # Private method for internal use
     def _fetch_company_tenk_filing(self):
