@@ -66,7 +66,7 @@ class SECDocumentProcessor:
         elif "OPENAI_API_KEY" not in os.environ:
             raise ValueError("OpenAI API key must be provided")
 
-        self.llm = ChatOpenAI(temperature=0.1)
+        self.llm = ChatOpenAI(temperature=0.1, model="gpt-4o-mini-2024-07-18")
 
         # Initialize output parsers
         self.mda_parser = PydanticOutputParser(pydantic_object=MDnAAnalysis)
@@ -239,7 +239,9 @@ class SECAgent:
         # Step 1: Get the SEC data
         mda_text = self.data_retriever.extract_management_discussion()
         risk_text = self.data_retriever.extract_risk_factors()
-        balance_sheets = self.data_retriever.extract_balance_sheet_as_str()
+
+        # Use the new JSON-serializable method for balance sheets
+        balance_sheets = self.data_retriever.extract_balance_sheet_as_json()
 
         # Step 2: Process the data
         mda_analysis = self.document_processor.analyze_mda(self.ticker, mda_text)
@@ -253,7 +255,7 @@ class SECAgent:
             "analysis_date": datetime.now().isoformat(),
             "management_discussion": mda_analysis.model_dump(),
             "risk_factors": risk_analysis.model_dump(),
-            "balance_sheets": balance_sheets,
+            "balance_sheets": balance_sheets,  # Now contains properly structured JSON
         }
 
         # Step 4: Read existing data first
@@ -304,7 +306,6 @@ def main():
 
     # Generate a markdown report
     analysis = agent.get_analysis()
-    print(analysis)
     if not analysis:
         print("No analysis data found for ticker.")
         return
