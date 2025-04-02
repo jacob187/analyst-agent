@@ -251,37 +251,47 @@ class SECAgent:
         combined_analysis = {
             "ticker": self.ticker,
             "analysis_date": datetime.now().isoformat(),
-            "management_discussion": mda_analysis.dict(),
-            "risk_factors": risk_analysis.dict(),
-            "balance_sheets": balance_sheets,  # Add balance sheet data directly without LLM processing
+            "management_discussion": mda_analysis.model_dump(),
+            "risk_factors": risk_analysis.model_dump(),
+            "balance_sheets": balance_sheets,
         }
 
-        # Step 4: Save to file using LocalLogger
-        self.logger.write_json(combined_analysis)
+        # Step 4: Read existing data first
+        try:
+            existing_data = self.logger.read_json()
+        except Exception as e:
+            print(f"Error reading existing data: {e}, creating new data structure")
+            existing_data = {}
+
+        # Step 5: Update with new analysis data using ticker as key
+        existing_data[self.ticker] = combined_analysis
+
+        # Step 6: Write the updated data back to the JSON file
+        self.logger.write_json(existing_data)
 
         print(f"Analysis for {self.ticker} completed and saved to file.")
 
     def get_analysis(self) -> Dict[str, Any]:
         """Retrieve the analysis from the JSON file."""
-        return self.logger.read_json()
+        try:
+            data = self.logger.read_json()
+            ticker_data = data.get(self.ticker, {})
+            if not ticker_data:
+                print(f"No data found for ticker {self.ticker}")
+            return ticker_data
+        except Exception as e:
+            print(f"Error retrieving analysis: {e}")
+            return {}
 
 
 def main():
     """Example usage of the SEC Agent."""
     import os
     from dotenv import load_dotenv
+    from pathlib import Path
 
     # Load environment variables
     load_dotenv()
-
-    # Create required directories
-    os.makedirs("../data", exist_ok=True)
-
-    # Initialize empty data file if it doesn't exist
-    data_file = "../data/data.json"
-    if not os.path.exists(data_file):
-        with open(data_file, "w") as f:
-            json.dump({}, f)
 
     # Get ticker from command line or use default
     import sys
@@ -294,6 +304,10 @@ def main():
 
     # Generate a markdown report
     analysis = agent.get_analysis()
+    print(analysis)
+    if not analysis:
+        print("No analysis data found for ticker.")
+        return
 
     # Create markdown report
     md_content = f"# SEC Analysis for {ticker}\n\n"
@@ -309,27 +323,25 @@ def main():
         f"\n**Sentiment:** {mda['sentiment_score']} - {mda['sentiment_analysis']}\n\n"
     )
 
-    if mda.get("comparison"):
-        md_content += "**10-K vs 10-Q Comparison:**\n"
-        md_content += f"{mda['comparison']}\n\n"
-
     md_content += "## Risk Factor Analysis\n\n"
     risk = analysis["risk_factors"]
     md_content += f"**Summary:** {risk['summary']}\n\n"
     md_content += "**Key Risks:**\n"
     for point in risk["key_risks"]:
         md_content += f"- {point}\n"
-    md_content += f"\n**Risk Severity:** {risk['sentiment_score']} - {risk['sentiment_analysis']}\n\n"
+    md_content += f"\n**Risk Severity:** {risk['sentiment_score']} - {risk['sentiment_analysis']}\n"
 
-    if risk.get("comparison"):
-        md_content += "**10-K vs 10-Q Risk Comparison:**\n"
-        md_content += f"{risk['comparison']}\n\n"
+    # Get the project root directory for saving the file
+    root_dir = Path(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+    data_dir = root_dir / "data"
+    os.makedirs(data_dir, exist_ok=True)
 
-    # Save markdown report
-    with open(f"{ticker}_report.md", "w") as f:
+    # Save markdown report in the data directory
+    report_path = data_dir / f"{ticker}_analysis.md"
+    with open(report_path, "w") as f:
         f.write(md_content)
 
-    print(f"Analysis complete! Report saved to {ticker}_report.md")
+    print(f"Analysis complete! Report saved to {report_path}")
 
 
 if __name__ == "__main__":
