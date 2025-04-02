@@ -1,7 +1,6 @@
 from edgar import Company, set_identity
 from dotenv import load_dotenv
 import os
-import pandas as pd
 
 
 class SECDataRetrieval:
@@ -14,19 +13,28 @@ class SECDataRetrieval:
             print(f"Failed to initialize company in SECDataRetrieval: {e}")
             raise
         self.tenk = self._fetch_company_tenk_filing()
+        self.tenq = self._fetch_company_tenq_filing()
 
     # Private method for internal use
     def _fetch_company_tenk_filing(self):
-        return self.company.get_filings(form="10-K").latest().obj()
+        return self.company.latest(form="10-K").obj()
 
-    def extract_balance_sheet_as_dataframe(self) -> pd.DataFrame:
-        return self.tenk.financials.get_balance_sheet().get_dataframe()
+    def _fetch_company_tenq_filing(self):
+        return self.company.latest(form="10-Q").obj()
+
+    def extract_balance_sheet_as_str(self) -> dict[str, str]:
+        return {
+            "tenk": self.tenk.financials.get_balance_sheet()
+            .get_dataframe()
+            .to_string(),
+            "tenq": self.tenq.financials.get_balance_sheet()
+            .get_dataframe()
+            .to_string(),
+        }
 
     def extract_risk_factors(self) -> str:
+        """Extract risk factors from 10-K filing only."""
         return self.tenk.risk_factors
-
-    def extract_balance_sheet_str(self) -> str:
-        return self.extract_balance_sheet_as_dataframe().to_string()
 
     def extract_management_discussion(self) -> str:
         return self.tenk.management_discussion
