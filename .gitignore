@@ -16,5 +16,4 @@ __pycache__/
 
 # Project specific
 /data/
-*.md
 .windsurfrules
