@@ -10,18 +10,42 @@ class SECDataRetrieval:
         set_identity(os.getenv("SEC_HEADER"))
         try:
             self.company = Company(ticker)
+            try:
+                self.tenk = self._fetch_company_tenk_filing()
+            except ValueError as e:
+                print(f"Warning: {e}")
+                self.tenk = None
+
+            try:
+                self.tenq = self._fetch_company_tenq_filing()
+            except ValueError as e:
+                print(f"Warning: {e}")
+                self.tenq = None
+
+            # If both are None, we can't proceed
+            if self.tenk is None and self.tenq is None:
+                raise ValueError(
+                    f"No SEC filings found for ticker {ticker}. Please verify the ticker symbol."
+                )
+
         except Exception as e:
             print(f"Failed to initialize company in SECDataRetrieval: {e}")
             raise
-        self.tenk = self._fetch_company_tenk_filing()
-        self.tenq = self._fetch_company_tenq_filing()
 
     # Private method for internal use
     def _fetch_company_tenk_filing(self):
-        return self.company.latest(form="10-K").obj()
+        filing = self.company.latest(form="10-K")
+        if filing is None:
+            print(f"No 10-K filing found for {self.company.name}")
+            return None
+        return filing.obj()
 
     def _fetch_company_tenq_filing(self):
-        return self.company.latest(form="10-Q").obj()
+        filing = self.company.latest(form="10-Q")
+        if filing is None:
+            print(f"No 10-Q filing found for {self.company.name}")
+            return None
+        return filing.obj()
 
     def extract_balance_sheet_as_str(self) -> dict[str, str]:
         return {
