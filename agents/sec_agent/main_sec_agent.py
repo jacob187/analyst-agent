@@ -24,7 +24,6 @@ class SentimentAnalysis(BaseModel):
 class MDnAAnalysis(BaseModel):
     """Full analysis for Management Discussion and Analysis"""
 
-    ticker: str = Field(description="Company ticker symbol")
     summary: str = Field(description="Concise summary of the MD&A section")
     key_points: List[str] = Field(description="List of key points from MD&A")
     financial_highlights: List[str] = Field(
@@ -41,7 +40,6 @@ class MDnAAnalysis(BaseModel):
 class RiskFactorAnalysis(BaseModel):
     """Full analysis for Risk Factors section"""
 
-    ticker: str = Field(description="Company ticker symbol")
     summary: str = Field(description="Concise summary of risk factors")
     key_risks: List[str] = Field(description="List of key risk factors")
     risk_categories: Dict[str, List[str]] = Field(
@@ -57,7 +55,6 @@ class RiskFactorAnalysis(BaseModel):
 class BalanceSheetAnalysis(BaseModel):
     """Full analysis for Balance Sheet section"""
 
-    ticker: str = Field(description="Company ticker symbol")
     summary: str = Field(description="Concise summary of balance sheet")
     key_metrics: List[str] = Field(description="List of key metrics from balance sheet")
     liquidity_analysis: str = Field(description="Liquidity analysis of balance sheet")
@@ -233,7 +230,6 @@ class SECDocumentProcessor:
             print(f"Error processing balance sheet: {e}")
             # Return fallback values
             return BalanceSheetAnalysis(
-                ticker=ticker,
                 summary="Error analyzing balance sheet section.",
                 key_metrics=["Unable to extract key metrics."],
                 liquidity_analysis="Unable to extract liquidity analysis.",
@@ -292,7 +288,6 @@ class SECDocumentProcessor:
             print(f"Error processing MD&A: {e}")
             # Return fallback values
             return MDnAAnalysis(
-                ticker=ticker,
                 summary="Error analyzing MD&A section.",
                 key_points=["Unable to extract key points."],
                 financial_highlights=["Unable to extract financial highlights."],
@@ -335,7 +330,6 @@ class SECDocumentProcessor:
             print(f"Error processing risk factors: {e}")
             # Return fallback values
             return RiskFactorAnalysis(
-                ticker=ticker,
                 summary="Error analyzing risk factors.",
                 key_risks=["Unable to extract key risks."],
                 risk_categories={"General": ["Unable to categorize risks."]},
@@ -446,6 +440,17 @@ def main():
     md_content += "**Key Points:**\n\n"
     for point in mda["key_points"]:
         md_content += f"- {point}\n"
+
+    # Add financial highlights section
+    if "financial_highlights" in mda and mda["financial_highlights"]:
+        md_content += "\n**Financial Highlights:**\n\n"
+        for highlight in mda["financial_highlights"]:
+            md_content += f"- {highlight}\n"
+
+    # Add future outlook section
+    if "future_outlook" in mda and mda["future_outlook"]:
+        md_content += f"\n**Future Outlook:** {mda['future_outlook']}\n"
+
     md_content += (
         f"\n**Sentiment:** {mda['sentiment_score']} - {mda['sentiment_analysis']}\n\n"
     )
@@ -456,13 +461,22 @@ def main():
     md_content += "**Key Risks:**\n\n"
     for point in risk["key_risks"]:
         md_content += f"- {point}\n"
+
+    # Add risk categories section
+    if "risk_categories" in risk and risk["risk_categories"]:
+        md_content += "\n**Risk Categories:**\n"
+        for category, risks in risk["risk_categories"].items():
+            md_content += f"\n### {category}\n"
+            for r in risks:
+                md_content += f"- {r}\n"
+
     md_content += f"\n**Risk Severity:** {risk['sentiment_score']} - {risk['sentiment_analysis']}\n"
 
-    md_content += "## Balance Sheet Analysis\n\n"
+    md_content += "\n## Balance Sheet Analysis\n\n"
     balance_sheet = analysis["balance_sheet_analysis"]
     md_content += f"**Summary:** {balance_sheet['summary']}\n\n"
     md_content += "**Key Metrics:**\n\n"
-    for point in balance_sheet["key_metrics"]:  # Changed from key_points to key_metrics
+    for point in balance_sheet["key_metrics"]:
         md_content += f"- {point}\n"
 
     # Add the new fields from the updated model
