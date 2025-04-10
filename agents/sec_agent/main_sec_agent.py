@@ -84,7 +84,7 @@ class SECDocumentProcessor:
 
         user_template = """Analyze the following MD&A section from {ticker}'s 10-K SEC filing:
         
-        {mda_text}... [truncated for brevity]
+        {mda_text}
         
         Follow this JSON schema EXACTLY and fill in the values with your analysis:
         {format_instructions}
@@ -100,7 +100,7 @@ class SECDocumentProcessor:
 
         return prompt.partial(
             ticker=ticker,
-            mda_text=mda_text[:3000],
+            mda_text=mda_text,
             format_instructions=self.mda_parser.get_format_instructions(),
         )
 
@@ -118,7 +118,7 @@ class SECDocumentProcessor:
 
         user_template = """Analyze the following Risk Factors section from {ticker}'s 10-K SEC filing:
         
-        {risk_text}... [truncated for brevity]
+        {risk_text}
         
         Follow this JSON schema EXACTLY and fill in the values with your analysis:
         {format_instructions}
@@ -134,7 +134,7 @@ class SECDocumentProcessor:
 
         return prompt.partial(
             ticker=ticker,
-            risk_text=risk_text[:3000],
+            risk_text=risk_text,
             format_instructions=self.risk_parser.get_format_instructions(),
         )
 
@@ -317,7 +317,7 @@ def main():
     md_content += "## Management Discussion Analysis\n\n"
     mda = analysis["management_discussion"]
     md_content += f"**Summary:** {mda['summary']}\n\n"
-    md_content += "**Key Points:**\n"
+    md_content += "**Key Points:**\n\n"
     for point in mda["key_points"]:
         md_content += f"- {point}\n"
     md_content += (
@@ -327,7 +327,7 @@ def main():
     md_content += "## Risk Factor Analysis\n\n"
     risk = analysis["risk_factors"]
     md_content += f"**Summary:** {risk['summary']}\n\n"
-    md_content += "**Key Risks:**\n"
+    md_content += "**Key Risks:**\n\n"
     for point in risk["key_risks"]:
         md_content += f"- {point}\n"
     md_content += f"\n**Risk Severity:** {risk['sentiment_score']} - {risk['sentiment_analysis']}\n"
