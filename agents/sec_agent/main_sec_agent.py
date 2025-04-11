@@ -240,20 +240,6 @@ class SECDocumentProcessor:
                 comparison="Unable to compare 10-K and 10-Q.",
             )
 
-    #             ticker: str = Field(description="Company ticker symbol")
-    # summary: str = Field(description="Concise summary of balance sheet")
-    # key_metrics: List[str] = Field(description="List of key metrics from balance sheet")
-    # liquidity_analysis: str = Field(description="Liquidity analysis of balance sheet")
-    # solvency_analysis: str = Field(description="Solvency analysis of balance sheet")
-    # growth_trends: str = Field(description="Growth trends in balance sheet")
-    # financial_highlights: List[str] = Field(
-    #     description="Key data in the balance sheet that has larger impact with respect to the other data"
-    # )
-    # red_flags: List[str] = Field(description="Red flags in the balance sheet")
-    # comparison: Optional[str] = Field(
-    #     None, description="Comparison between 10-K and 10-Q if both are available"
-    # )
-
     def analyze_mda(self, ticker: str, mda_text: str) -> MDnAAnalysis:
         """Analyze the Management Discussion section from 10-K."""
         prompt = self.generate_mda_prompt(ticker, mda_text)
