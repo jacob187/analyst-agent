@@ -464,7 +464,7 @@ def main():
 
     # Add risk categories section
     if "risk_categories" in risk and risk["risk_categories"]:
-        md_content += "\n**Risk Categories:**\n"
+        md_content += "\n**Risk Categories:**\n\n"
         for category, risks in risk["risk_categories"].items():
             md_content += f"\n### {category}\n"
             for r in risks:
