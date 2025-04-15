@@ -200,127 +200,63 @@ class SECDocumentProcessor:
     ) -> BalanceSheetAnalysis:
         prompt = self.generate_balance_sheet_prompt(ticker, tenk, tenq)
         try:
-            # Maintain the Langchain chain approach
-            chain = prompt | self.llm
-            response = chain.invoke({})
-
-            # Process the response content
-            content = response.content
-
-            # Try to parse as JSON directly
-            import json
-
-            try:
-                # First attempt: direct JSON parsing
-                data = json.loads(content)
-                return BalanceSheetAnalysis(**data)
-            except json.JSONDecodeError:
-                # Second attempt: extract JSON from markdown code blocks
-                import re
-
-                json_match = re.search(
-                    r"```(?:json)?\s*(.*?)\s*```", content, re.DOTALL
-                )
-                if json_match:
-                    json_str = json_match.group(1)
-                    data = json.loads(json_str)
-                    return BalanceSheetAnalysis(**data)
-                raise ValueError(f"Could not extract valid JSON from LLM response")
+            # Use the Langchain chain approach
+            chain = prompt | self.llm | self.balance_sheet_parser
+            return chain.invoke({})
         except Exception as e:
             print(f"Error processing balance sheet: {e}")
             # Return fallback values
             return BalanceSheetAnalysis(
+                ticker=ticker,
                 summary="Error analyzing balance sheet section.",
                 key_metrics=["Unable to extract key metrics."],
-                liquidity_analysis="Unable to extract liquidity analysis.",
-                solvency_analysis="Unable to extract solvency analysis.",
-                growth_trends="Unable to extract growth trends.",
-                red_flags=["Unable to extract red flags."],
+                liquidity_analysis="Analysis unavailable due to processing error.",
+                solvency_analysis="Analysis unavailable due to processing error.",
+                growth_trends="Analysis unavailable due to processing error.",
                 financial_highlights=["Unable to extract financial highlights."],
-                comparison="Unable to compare 10-K and 10-Q.",
+                red_flags=["Data processing error."],
+                comparison=None,
             )
 
     def analyze_mda(self, ticker: str, mda_text: str) -> MDnAAnalysis:
         """Analyze the Management Discussion section from 10-K."""
         prompt = self.generate_mda_prompt(ticker, mda_text)
         try:
-            # Maintain the Langchain chain approach
-            chain = prompt | self.llm
-            response = chain.invoke({})
-
-            # Process the response content
-            content = response.content
-
-            # Try to parse as JSON directly
-            import json
-
-            try:
-                # First attempt: direct JSON parsing
-                data = json.loads(content)
-                return MDnAAnalysis(**data)
-            except json.JSONDecodeError:
-                # Second attempt: extract JSON from markdown code blocks
-                import re
-
-                json_match = re.search(
-                    r"```(?:json)?\s*(.*?)\s*```", content, re.DOTALL
-                )
-                if json_match:
-                    json_str = json_match.group(1)
-                    data = json.loads(json_str)
-                    return MDnAAnalysis(**data)
-                raise ValueError(f"Could not extract valid JSON from LLM response")
+            # Use the Langchain chain approach
+            chain = prompt | self.llm | self.mda_parser
+            return chain.invoke({})
         except Exception as e:
             print(f"Error processing MD&A: {e}")
             # Return fallback values
             return MDnAAnalysis(
+                ticker=ticker,
                 summary="Error analyzing MD&A section.",
                 key_points=["Unable to extract key points."],
                 financial_highlights=["Unable to extract financial highlights."],
-                future_outlook="Unable to determine future outlook.",
+                future_outlook="Analysis unavailable due to processing error.",
                 sentiment_score=0.0,
-                sentiment_analysis="Unable to determine sentiment.",
+                sentiment_analysis="Analysis unavailable due to processing error.",
+                comparison=None,
             )
 
     def analyze_risk_factors(self, ticker: str, risk_text: str) -> RiskFactorAnalysis:
         """Analyze the Risk Factors section from 10-K."""
         prompt = self.generate_risk_factors_prompt(ticker, risk_text)
         try:
-            # Maintain the Langchain chain approach
-            chain = prompt | self.llm
-            response = chain.invoke({})
-
-            # Process the response content
-            content = response.content
-
-            # Try to parse as JSON directly
-            import json
-
-            try:
-                # First attempt: direct JSON parsing
-                data = json.loads(content)
-                return RiskFactorAnalysis(**data)
-            except json.JSONDecodeError:
-                # Second attempt: extract JSON from markdown code blocks
-                import re
-
-                json_match = re.search(
-                    r"```(?:json)?\s*(.*?)\s*```", content, re.DOTALL
-                )
-                if json_match:
-                    json_str = json_match.group(1)
-                    data = json.loads(json_str)
-                    return RiskFactorAnalysis(**data)
-                raise ValueError(f"Could not extract valid JSON from LLM response")
+            # Use the Langchain chain approach
+            chain = prompt | self.llm | self.risk_parser
+            return chain.invoke({})
         except Exception as e:
-            print(f"Error processing risk factors: {e}")
+            print(f"Error processing Risk Factors: {e}")
             # Return fallback values
             return RiskFactorAnalysis(
-                summary="Error analyzing risk factors.",
+                ticker=ticker,
+                summary="Error analyzing Risk Factors section.",
                 key_risks=["Unable to extract key risks."],
-                risk_categories={"General": ["Unable to categorize risks."]},
+                risk_categories={"Processing Error": ["Unable to categorize risks."]},
                 sentiment_score=0.0,
-                sentiment_analysis="Unable to determine risk severity.",
+                sentiment_analysis="Analysis unavailable due to processing error.",
+                comparison=None,
             )
 
 
@@ -395,6 +331,7 @@ class SECAgent:
 def main():
     """Example usage of the SEC Agent."""
     import os
+    import sys
     from dotenv import load_dotenv
     from pathlib import Path
 
@@ -402,11 +339,9 @@ def main():
     load_dotenv()
 
     # Get ticker from command line or use default
-    import sys
-
     ticker = sys.argv[1] if len(sys.argv) > 1 else "AAPL"
 
-    print(f"Analyzing {ticker}...")
+    # Create and run agent
     agent = SECAgent(ticker)
     agent.process_and_save()
 
