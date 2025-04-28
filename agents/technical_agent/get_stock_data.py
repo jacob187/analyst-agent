@@ -23,36 +23,34 @@ class YahooFinanceDataRetrieval:
         try:
             income_stmt = self.yf_ticker.income_stmt
             balance_sheet = self.yf_ticker.balance_sheet
-            cash_flow = self.yf_ticker.cashflow
-            quarterly_income = self.yf_ticker.quarterly_income_stmt
-            quarterly_balance = self.yf_ticker.quarterly_balance_sheet
-            quarterly_cash_flow = self.yf_ticker.quarterly_cashflow
+            # cash_flow = self.yf_ticker.cashflow # Removed annual cash flow
+            # quarterly_income = self.yf_ticker.quarterly_income_stmt # Removed quarterly
+            # quarterly_balance = self.yf_ticker.quarterly_balance_sheet # Removed quarterly
+            # quarterly_cash_flow = self.yf_ticker.quarterly_cashflow # Removed quarterly
         except Exception as e:
             print(f"Error retrieving financial data for {self.ticker}: {e}")
             return {}
 
-        # Convert DataFrames to JSON-serializable format
+        # Convert remaining DataFrames to JSON-serializable format
         financials = {
             "income_stmt": self._dataframe_to_dict(income_stmt),
             "balance_sheet": self._dataframe_to_dict(balance_sheet),
-            "cash_flow": self._dataframe_to_dict(cash_flow),
-            "quarterly_income_stmt": self._dataframe_to_dict(quarterly_income),
-            "quarterly_balance_sheet": self._dataframe_to_dict(quarterly_balance),
-            "quarterly_cashflow": self._dataframe_to_dict(quarterly_cash_flow),
+            # "cash_flow": self._dataframe_to_dict(cash_flow),
+            # "quarterly_income_stmt": self._dataframe_to_dict(quarterly_income),
+            # "quarterly_balance_sheet": self._dataframe_to_dict(quarterly_balance),
+            # "quarterly_cashflow": self._dataframe_to_dict(quarterly_cash_flow),
         }
 
         # Read existing data from logger
         data = self.logger.read_json()
 
-        # Add or update data for this ticker
-        if self.ticker not in data:
-            data[self.ticker] = {}
-
-        if "technical_agent" not in data[self.ticker]:
-            data[self.ticker]["technical_agent"] = {}
-
-        data[self.ticker]["technical_agent"]["financials"] = financials
-        data[self.ticker]["technical_agent"][
+        # Add or update data for this ticker under 'technical_data'
+        data[self.ticker] = data.get(self.ticker, {})  # Ensure ticker key exists
+        data[self.ticker]["technical_data"] = data[self.ticker].get(
+            "technical_data", {}
+        )  # Ensure technical_data key exists
+        data[self.ticker]["technical_data"]["financials"] = financials
+        data[self.ticker]["technical_data"][
             "last_updated"
         ] = pd.Timestamp.now().isoformat()
 
@@ -98,15 +96,13 @@ class YahooFinanceDataRetrieval:
             # Read existing data from logger
             data = self.logger.read_json()
 
-            # Add or update data for this ticker
-            if self.ticker not in data:
-                data[self.ticker] = {}
-
-            if "technical_agent" not in data[self.ticker]:
-                data[self.ticker]["technical_agent"] = {}
-
-            data[self.ticker]["technical_agent"]["info"] = info
-            data[self.ticker]["technical_agent"][
+            # Add or update data for this ticker under 'technical_data'
+            data[self.ticker] = data.get(self.ticker, {})  # Ensure ticker key exists
+            data[self.ticker]["technical_data"] = data[self.ticker].get(
+                "technical_data", {}
+            )  # Ensure technical_data key exists
+            data[self.ticker]["technical_data"]["info"] = info
+            data[self.ticker]["technical_data"][
                 "last_updated"
             ] = pd.Timestamp.now().isoformat()
 
