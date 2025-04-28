@@ -99,7 +99,6 @@ class TechnicalIndicators:
             "MA_10": close.rolling(window=10).mean().iloc[-1],
             "MA_20": close.rolling(window=20).mean().iloc[-1],
             "MA_50": close.rolling(window=50).mean().iloc[-1],
-            "MA_200": close.rolling(window=200).mean().iloc[-1],
             "latest_close": close.iloc[-1],
             "trend_50_200": (
                 "bullish"
