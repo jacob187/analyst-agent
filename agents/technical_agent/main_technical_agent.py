@@ -85,15 +85,14 @@ class TechnicalAgent:
             # Step 4: Save ONLY the analysis summary
             data = self.logger.read_json()
 
-            # Ensure ticker and technical_agent keys exist
-            if self.ticker not in data:
-                data[self.ticker] = {}
+            # Ensure ticker and keys exist
+            data[self.ticker] = data.get(self.ticker, {})  # Ensure ticker key exists
+            data[self.ticker]["technical_analysis"] = data[self.ticker].get(
+                "technical_analysis", {}
+            )  # Ensure technical_analysis key exists
 
-            if "technical_agent" not in data[self.ticker]:
-                data[self.ticker]["technical_agent"] = {}
-
-            # Save the analysis summary
-            data[self.ticker]["technical_agent"]["analysis"] = {
+            # Save the analysis summary under technical_analysis -> analysis
+            data[self.ticker]["technical_analysis"]["analysis"] = {
                 "summary": analysis_summary,
                 "timestamp": datetime.now().isoformat(),
             }
@@ -110,19 +109,18 @@ class TechnicalAgent:
         Get the technical analysis results for the ticker.
 
         Returns:
-            A dictionary containing the technical analysis
+            A dictionary containing the technical analysis summary
         """
         data = self.logger.read_json()
-        if (
-            self.ticker not in data
-            or "technical_agent" not in data[self.ticker]
-            or "analysis" not in data[self.ticker]["technical_agent"]
-        ):
+        # Adjust path to retrieve the analysis summary
+        analysis_data = (
+            data.get(self.ticker, {}).get("technical_analysis", {}).get("analysis", {})
+        )
+        if not analysis_data:
             raise ValueError(
-                f"No technical analysis found for {self.ticker}. Run process_and_save first."
+                f"No technical analysis summary found for {self.ticker}. Run process_and_save first."
             )
-
-        return data[self.ticker]["technical_agent"]["analysis"]
+        return analysis_data
 
     def _generate_analysis_summary(self, indicators: Dict[str, Any]) -> Dict[str, Any]:
         """
