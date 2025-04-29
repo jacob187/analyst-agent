@@ -307,8 +307,11 @@ class SECAgent:
             print(f"Error reading existing data: {e}, creating new data structure")
             existing_data = {}
 
-        # Step 5: Update with new analysis data using ticker as key
-        existing_data[self.ticker] = combined_analysis
+        # Step 5: Update with new analysis data under the "sec_data" key
+        existing_data[self.ticker] = existing_data.get(
+            self.ticker, {}
+        )  # Ensure ticker key exists
+        existing_data[self.ticker]["sec_data"] = combined_analysis
 
         # Step 6: Write the updated data back to the JSON file
         self.logger.write_json(existing_data)
@@ -316,12 +319,13 @@ class SECAgent:
         print(f"Analysis for {self.ticker} completed and saved to file.")
 
     def get_analysis(self) -> Dict[str, Any]:
-        """Retrieve the analysis from the JSON file."""
+        """Retrieve the SEC analysis from the JSON file."""
         try:
             data = self.logger.read_json()
-            ticker_data = data.get(self.ticker, {})
+            # Retrieve data from the 'sec_data' key
+            ticker_data = data.get(self.ticker, {}).get("sec_data", {})
             if not ticker_data:
-                print(f"No data found for ticker {self.ticker}")
+                print(f"No SEC data found for ticker {self.ticker}")
             return ticker_data
         except Exception as e:
             print(f"Error retrieving analysis: {e}")
