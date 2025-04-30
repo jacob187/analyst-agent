@@ -316,7 +316,7 @@ class SECAgent:
         # Step 6: Write the updated data back to the JSON file
         self.logger.write_json(existing_data)
 
-        print(f"Analysis for {self.ticker} completed and saved to file.")
+        print(f"SEC analysis for {self.ticker} completed and saved to file.")
 
     def get_analysis(self) -> Dict[str, Any]:
         """Retrieve the SEC analysis from the JSON file."""
