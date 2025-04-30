@@ -143,11 +143,16 @@ class TechnicalAgent:
         if "moving_averages" in indicators:
             ma = indicators["moving_averages"]
             summary["price_indicators"]["current_price"] = ma["latest_close"]
-            summary["price_indicators"]["ma_50"] = ma["MA_50"]
-            summary["price_indicators"]["ma_200"] = ma["MA_200"]
-            summary["price_indicators"]["golden_cross"] = (
-                ma["trend_50_200"] == "bullish"
-            )
+            summary["price_indicators"]["ma_50"] = ma.get("MA_50", None)
+            summary["price_indicators"]["ma_200"] = ma.get("MA_200", None)
+
+            # Only check for golden cross if MA_200 exists
+            if "MA_200" in ma and "trend_50_200" in ma:
+                summary["price_indicators"]["golden_cross"] = (
+                    ma["trend_50_200"] == "bullish"
+                )
+            else:
+                summary["price_indicators"]["golden_cross"] = None
 
         # Bollinger Bands
         if "bollinger_bands" in indicators:
@@ -189,10 +194,14 @@ class TechnicalAgent:
         # Check MA trend
         if (
             "moving_averages" in indicators
+            and "trend_50_200" in indicators["moving_averages"]
             and indicators["moving_averages"]["trend_50_200"] == "bullish"
         ):
             bullish_signals += 1
-        else:
+        elif (
+            "moving_averages" in indicators
+            and "trend_50_200" in indicators["moving_averages"]
+        ):
             bearish_signals += 1
 
         # Check RSI

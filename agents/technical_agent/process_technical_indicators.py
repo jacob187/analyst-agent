@@ -98,15 +98,22 @@ class TechnicalIndicators:
             "MA_5": close.rolling(window=5).mean().iloc[-1],
             "MA_10": close.rolling(window=10).mean().iloc[-1],
             "MA_20": close.rolling(window=20).mean().iloc[-1],
-            "MA_50": close.rolling(window=50).mean().iloc[-1],
             "latest_close": close.iloc[-1],
-            "trend_50_200": (
-                "bullish"
-                if close.rolling(window=50).mean().iloc[-1]
-                > close.rolling(window=200).mean().iloc[-1]
-                else "bearish"
-            ),
         }
+
+        # Add MA_50 if we have enough data
+        if len(close) >= 50:
+            result["MA_50"] = close.rolling(window=50).mean().iloc[-1]
+
+        # Add MA_200 and trend only if we have enough data
+        if len(close) >= 200:
+            result["MA_200"] = close.rolling(window=200).mean().iloc[-1]
+            # Only calculate trend if we have both MAs
+            if "MA_50" in result:
+                result["trend_50_200"] = (
+                    "bullish" if result["MA_50"] > result["MA_200"] else "bearish"
+                )
+
         return result
 
     def _calculate_rsi(self, df: pd.DataFrame, periods: int = 14) -> Dict[str, Any]:
