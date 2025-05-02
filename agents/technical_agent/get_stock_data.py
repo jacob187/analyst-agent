@@ -3,68 +3,69 @@ import pandas as pd
 import json
 from typing import Dict, Any, Optional
 
-from database.local_logger import LocalLogger
-
 
 class YahooFinanceDataRetrieval:
+    """Class to retrieve financial data using yfinance. Does NOT handle saving."""
+
     def __init__(self, ticker: str):
         self.ticker = ticker
         self.yf_ticker = yf.Ticker(ticker)
-        self.logger = LocalLogger()
+
+    def _dataframe_to_dict(self, df: Optional[pd.DataFrame]) -> Dict[str, Any]:
+        """
+        Convert a DataFrame to a JSON-serializable dictionary.
+        Handles NaNs and Timestamps.
+
+        Args:
+            df: DataFrame to convert
+
+        Returns:
+            Dictionary representation of the DataFrame, or empty dict if input is None/empty.
+        """
+        if df is None or df.empty:
+            return {}
+        try:
+            # Convert Timestamp index to string if it's a DatetimeIndex
+            if isinstance(df.index, pd.DatetimeIndex):
+                df.index = df.index.strftime("%Y-%m-%dT%H:%M:%S.%f")  # ISO format
+            # Replace NaN/NaT with None for JSON compatibility
+            df_serializable = df.where(pd.notnull(df), None)
+            # Use pandas built-in JSON conversion which handles many types
+            json_str = df_serializable.to_json(
+                orient="split", date_format="iso", default_handler=str
+            )
+            return json.loads(json_str)
+        except Exception as e:
+            print(f"Error converting DataFrame to dict for {self.ticker}: {e}")
+            return {}
 
     def get_financials(self) -> Dict[str, Any]:
         """
-        Retrieve financial statements from Yahoo Finance and save them using LocalLogger.
+        Retrieve annual income statement and balance sheet from Yahoo Finance.
 
         Returns:
-            Dict containing all financial data
+            Dict containing financial statement data, or empty dict on error.
         """
-        # Retrieve financial data
         try:
             income_stmt = self.yf_ticker.income_stmt
             balance_sheet = self.yf_ticker.balance_sheet
-            # cash_flow = self.yf_ticker.cashflow # Removed annual cash flow
-            # quarterly_income = self.yf_ticker.quarterly_income_stmt # Removed quarterly
-            # quarterly_balance = self.yf_ticker.quarterly_balance_sheet # Removed quarterly
-            # quarterly_cash_flow = self.yf_ticker.quarterly_cashflow # Removed quarterly
         except Exception as e:
             print(f"Error retrieving financial data for {self.ticker}: {e}")
             return {}
 
-        # Convert remaining DataFrames to JSON-serializable format
+        # Convert DataFrames to JSON-serializable format
         financials = {
             "income_stmt": self._dataframe_to_dict(income_stmt),
             "balance_sheet": self._dataframe_to_dict(balance_sheet),
-            # "cash_flow": self._dataframe_to_dict(cash_flow),
-            # "quarterly_income_stmt": self._dataframe_to_dict(quarterly_income),
-            # "quarterly_balance_sheet": self._dataframe_to_dict(quarterly_balance),
-            # "quarterly_cashflow": self._dataframe_to_dict(quarterly_cash_flow),
         }
+        return financials  # Return fetched data, don't save
 
-        # Read existing data from logger
-        data = self.logger.read_json()
-
-        # Add or update data for this ticker under 'technical_data'
-        data[self.ticker] = data.get(self.ticker, {})  # Ensure ticker key exists
-        data[self.ticker]["technical_data"] = data[self.ticker].get(
-            "technical_data", {}
-        )  # Ensure technical_data key exists
-        data[self.ticker]["technical_data"]["financials"] = financials
-        data[self.ticker]["technical_data"][
-            "last_updated"
-        ] = pd.Timestamp.now().isoformat()
-
-        # Save updated data
-        self.logger.write_json(data)
-
-        return financials
-
-    def get_historical_prices(self, period: str = "3mo") -> Optional[pd.DataFrame]:
+    def get_historical_prices(self, period: str = "1y") -> Optional[pd.DataFrame]:
         """
         Get historical price data for the ticker.
 
         Args:
-            period: Time period to retrieve (e.g., 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max)
+            period: Time period to retrieve (e.g., "1y", "3mo")
 
         Returns:
             DataFrame containing historical price data, or None if an error occurs.
@@ -76,59 +77,60 @@ class YahooFinanceDataRetrieval:
                     f"Warning: No historical price data retrieved for {self.ticker} for period {period}"
                 )
                 return None
-            # We no longer save the raw price data here.
-            # It will be processed in memory.
-            return hist
+            return hist  # Return fetched data, don't save
         except Exception as e:
             print(f"Error retrieving historical prices for {self.ticker}: {e}")
             return None
 
     def get_info(self) -> Dict[str, Any]:
         """
-        Get company information.
+        Get company information from Yahoo Finance.
 
         Returns:
-            Dict containing company information
+            Dict containing company information, or empty dict on error.
         """
         try:
             info = self.yf_ticker.info
+            # Clean up non-serializable types if necessary (though yfinance often handles this)
+            serializable_info = {}
+            for key, value in info.items():
+                if (
+                    isinstance(value, (int, float, str, bool, list, dict))
+                    or value is None
+                ):
+                    serializable_info[key] = value
+                elif isinstance(value, pd.Timestamp):
+                    serializable_info[key] = value.isoformat()
+                else:
+                    # Attempt to convert other types to string, log if needed
+                    try:
+                        serializable_info[key] = str(value)
+                    except:
+                        print(
+                            f"Warning: Could not serialize key '{key}' of type {type(value)} for {self.ticker}. Skipping."
+                        )
 
-            # Read existing data from logger
-            data = self.logger.read_json()
-
-            # Add or update data for this ticker under 'technical_data'
-            data[self.ticker] = data.get(self.ticker, {})  # Ensure ticker key exists
-            data[self.ticker]["technical_data"] = data[self.ticker].get(
-                "technical_data", {}
-            )  # Ensure technical_data key exists
-            data[self.ticker]["technical_data"]["info"] = info
-            data[self.ticker]["technical_data"][
-                "last_updated"
-            ] = pd.Timestamp.now().isoformat()
-
-            # Save updated data
-            self.logger.write_json(data)
-
-            return info
+            return serializable_info  # Return fetched data, don't save
         except Exception as e:
             print(f"Error retrieving company info for {self.ticker}: {e}")
             return {}
 
-    def _dataframe_to_dict(self, df: Optional[pd.DataFrame]) -> Dict[str, Any]:
-        """
-        Convert a DataFrame to a JSON-serializable dictionary.
 
-        Args:
-            df: DataFrame to convert
+# Removed _dataframe_to_dict as it's primarily for saving to JSON directly
+# which is no longer done here. The new _dataframe_to_dict handles NaN/Timestamp better for general use.
 
-        Returns:
-            Dictionary representation of the DataFrame
-        """
-        if df is None or df.empty:
-            return {}
+# Example usage (optional - for testing the fetcher)
+if __name__ == "__main__":
+    retriever = YahooFinanceDataRetrieval("AAPL")
+    info_data = retriever.get_info()
+    financial_data = retriever.get_financials()
+    hist_data = retriever.get_historical_prices(period="1y")
 
-        try:
-            return json.loads(df.to_json(date_format="iso", orient="split"))
-        except Exception as e:
-            print(f"Error converting DataFrame to dict: {e}")
-            return {}
+    if info_data:
+        print("Info retrieved.")  # print(f"Info: {json.dumps(info_data, indent=2)}")
+    if financial_data:
+        print(
+            "Financials retrieved."
+        )  # print(f"Financials: {json.dumps(financial_data, indent=2)}")
+    if hist_data is not None:
+        print(f"Historical prices retrieved ({len(hist_data)} rows).")
