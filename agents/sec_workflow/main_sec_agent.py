@@ -7,7 +7,7 @@ from langchain.prompts import ChatPromptTemplate
 from langchain.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
 
-from agents.sec_agent.get_SEC_data import SECDataRetrieval
+from agents.sec_workflow.get_SEC_data import SECDataRetrieval
 from database.local_logger import LocalLogger
 
 
