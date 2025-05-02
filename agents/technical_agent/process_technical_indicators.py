@@ -64,16 +64,6 @@ class TechnicalIndicators:
         else:
             indicators["financial_metrics"] = {}
 
-        # We no longer save the intermediate indicators dict here.
-        # The main agent will save the final analysis summary.
-
-        # data = self.logger.read_json()
-        # data[self.ticker]["technical_agent"]["indicators"] = indicators
-        # data[self.ticker]["technical_agent"][
-        #     "last_updated"
-        # ] = pd.Timestamp.now().isoformat()
-        # self.logger.write_json(data)
-
         return indicators
 
     def _dict_to_dataframe(self, data: Dict[str, Any]) -> pd.DataFrame:
@@ -98,6 +88,7 @@ class TechnicalIndicators:
             "MA_5": close.rolling(window=5).mean().iloc[-1],
             "MA_10": close.rolling(window=10).mean().iloc[-1],
             "MA_20": close.rolling(window=20).mean().iloc[-1],
+            "MA_200": close.rolling(window=200).mean().iloc[-1],
             "latest_close": close.iloc[-1],
         }
 
