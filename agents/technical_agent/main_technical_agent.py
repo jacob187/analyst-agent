@@ -3,106 +3,127 @@ import os
 from datetime import datetime
 import json
 
+import pandas as pd  # Import pandas for slicing
+from rich import print as rprint  # Import rich print
+
 from agents.technical_agent.get_stock_data import YahooFinanceDataRetrieval
 from agents.technical_agent.process_technical_indicators import TechnicalIndicators
 from database.local_logger import LocalLogger
 
 
 class TechnicalAgent:
-    """Main technical agent that orchestrates the retrieval and analysis of stock data."""
+    """Orchestrates retrieval, processing, and saving of technical stock data."""
 
     def __init__(self, ticker: str):
         """Initialize the technical agent for a specific ticker."""
         self.ticker = ticker
+        # Instantiate components
         self.data_retriever = YahooFinanceDataRetrieval(ticker)
         self.indicator_processor = TechnicalIndicators(ticker)
+        # Instantiate logger ONCE here
         self.logger = LocalLogger()
 
     def process_and_save(self) -> None:
         """
-        Process the stock data and save the results.
-
-        This is the main method that orchestrates the workflow:
-        1. Retrieve stock data (prices, financials, info)
-        2. Calculate technical indicators
-        3. Save all data to storage
+        Orchestrates the workflow:
+        1. Fetch all necessary raw data (1y prices, financials, info).
+        2. Calculate technical indicators using 1y prices.
+        3. Generate analysis summary.
+        4. Read existing data from storage.
+        5. Prepare the complete data structure for the ticker (incl. sliced 3mo prices).
+        6. Save the updated structure back to storage.
         """
         try:
-            print(f"Starting technical analysis for {self.ticker}")
+            print(f"Starting technical analysis orchestration for {self.ticker}")
 
-            # Step 1: Retrieve data
-            print(f"Retrieving data for {self.ticker}...")
-            # Get 3 months of historical data as a DataFrame
-            hist_df = self.data_retriever.get_historical_prices(period="3mo")
-            # Get financials and info (still saved to JSON by retriever)
-            self.data_retriever.get_financials()
-            self.data_retriever.get_info()
+            # --- Step 1: Fetch Raw Data ---
+            print(f"Retrieving raw data for {self.ticker}...")
+            info_data = self.data_retriever.get_info()
+            financials_data = self.data_retriever.get_financials()
+            # Fetch 1 year of historical data for calculations
+            hist_df_1y = self.data_retriever.get_historical_prices(period="1y")
 
-            # Check if we got price data
-            if hist_df is None or hist_df.empty:
+            # --- Error Handling: Check if essential data was retrieved ---
+            if hist_df_1y is None or hist_df_1y.empty:
                 print(
-                    f"Skipping indicator calculation and analysis for {self.ticker} due to missing price data."
+                    f"ERROR: Failed to retrieve 1y historical price data for {self.ticker}. Aborting technical analysis."
                 )
-                # Optionally, save a note that analysis failed or is incomplete
-                data = self.logger.read_json()
-                if self.ticker not in data:
-                    data[self.ticker] = {}
-                if "technical_agent" not in data[self.ticker]:
-                    data[self.ticker]["technical_agent"] = {}
-                data[self.ticker]["technical_agent"]["analysis"] = {
-                    "summary": {"error": "Failed to retrieve historical price data"},
-                    "timestamp": datetime.now().isoformat(),
-                }
-                self.logger.write_json(data)
-                return  # Exit processing for this ticker
+                # Optionally log this specific failure, but don't save incomplete analysis
+                return  # Stop processing for this ticker
+            if not info_data:
+                print(
+                    f"Warning: Failed to retrieve company info for {self.ticker}. Proceeding without it."
+                )
+            if not financials_data:
+                print(
+                    f"Warning: Failed to retrieve financials data for {self.ticker}. Proceeding without it."
+                )
 
-            # Step 2: Calculate indicators (pass DataFrame)
-            print(f"Calculating technical indicators for {self.ticker}...")
-            indicators = self.indicator_processor.calculate_all_indicators(hist_df)
+            # --- Step 2: Calculate Indicators ---
+            print(
+                f"Calculating technical indicators for {self.ticker} using 1y data..."
+            )
+            indicators = self.indicator_processor.calculate_all_indicators(hist_df_1y)
+            # rprint("Calculated Indicators:", indicators) # Optional: use rich print for debug
 
-            # Check if indicator calculation produced results
             if not indicators:
                 print(
-                    f"Skipping analysis summary for {self.ticker} due to empty indicators."
+                    f"ERROR: Indicator calculation failed for {self.ticker}. Aborting technical analysis."
                 )
-                # Optionally save a note
-                data = self.logger.read_json()
-                if self.ticker not in data:
-                    data[self.ticker] = {}
-                if "technical_agent" not in data[self.ticker]:
-                    data[self.ticker]["technical_agent"] = {}
-                data[self.ticker]["technical_agent"]["analysis"] = {
-                    "summary": {"error": "Failed to calculate technical indicators"},
-                    "timestamp": datetime.now().isoformat(),
-                }
-                self.logger.write_json(data)
+                # Optionally log this specific failure
                 return
 
-            # Step 3: Generate technical analysis summary
+            # --- Step 3: Generate Analysis Summary ---
             print(f"Generating technical analysis summary for {self.ticker}...")
             analysis_summary = self._generate_analysis_summary(indicators)
 
-            # Step 4: Save ONLY the analysis summary
-            data = self.logger.read_json()
+            # --- Step 4 & 5: Prepare Data and Save ---
+            print(f"Preparing and saving all technical data for {self.ticker}...")
+            try:
+                # Read existing data ONCE
+                all_data = self.logger.read_json()
+            except FileNotFoundError:
+                all_data = {}
+                print("Data file not found, creating a new one.")
 
-            # Ensure ticker and keys exist
-            data[self.ticker] = data.get(self.ticker, {})  # Ensure ticker key exists
-            data[self.ticker]["technical_analysis"] = data[self.ticker].get(
-                "technical_analysis", {}
-            )  # Ensure technical_analysis key exists
+            # Get or create ticker entry
+            ticker_data = all_data.setdefault(self.ticker, {})
 
-            # Save the analysis summary under technical_analysis -> analysis
-            data[self.ticker]["technical_analysis"]["analysis"] = {
+            # --- Prepare technical_data section ---
+            tech_data_section = ticker_data.setdefault("technical_data", {})
+            tech_data_section["info"] = info_data
+            tech_data_section["financials"] = financials_data
+
+            # Slice the last 3 months (approx 63 trading days) for saving
+            # Use .tail() for robustness if exact date slicing is complex
+            hist_df_3mo = hist_df_1y.tail(63)  # Adjust number if needed
+            tech_data_section["short_term_prices"] = (
+                self.data_retriever._dataframe_to_dict(hist_df_3mo)
+            )
+            tech_data_section["last_updated"] = datetime.now().isoformat()
+
+            # --- Prepare technical_analysis section ---
+            tech_analysis_section = ticker_data.setdefault("technical_analysis", {})
+            tech_analysis_section["analysis"] = {
                 "summary": analysis_summary,
                 "timestamp": datetime.now().isoformat(),
+                "error": False,  # Indicate success
             }
+            tech_analysis_section["last_updated"] = datetime.now().isoformat()
 
-            self.logger.write_json(data)
-            print(f"Technical analysis for {self.ticker} completed and saved")
+            # --- Step 6: Write updated data ONCE ---
+            self.logger.write_json(all_data)
+
+            print(
+                f"Technical analysis orchestration for {self.ticker} completed and saved."
+            )
 
         except Exception as e:
-            print(f"Error in technical agent processing: {e}")
-            raise
+            # Log the error appropriately
+            print(f"Error during technical agent orchestration for {self.ticker}: {e}")
+            # Consider how to handle partial failures - maybe save an error state?
+            # For now, just print and potentially re-raise
+            raise  # Or handle more gracefully
 
     def get_analysis(self) -> Dict[str, Any]:
         """
@@ -145,14 +166,6 @@ class TechnicalAgent:
             summary["price_indicators"]["current_price"] = ma["latest_close"]
             summary["price_indicators"]["ma_50"] = ma.get("MA_50", None)
             summary["price_indicators"]["ma_200"] = ma.get("MA_200", None)
-
-            # Only check for golden cross if MA_200 exists
-            if "MA_200" in ma and "trend_50_200" in ma:
-                summary["price_indicators"]["golden_cross"] = (
-                    ma["trend_50_200"] == "bullish"
-                )
-            else:
-                summary["price_indicators"]["golden_cross"] = None
 
         # Bollinger Bands
         if "bollinger_bands" in indicators:
