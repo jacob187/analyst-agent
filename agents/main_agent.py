@@ -1,7 +1,7 @@
 # Entry point for main agent
 import sys
 from agents.sec_workflow.main_sec_workflow import SECAgent
-from agents.technical_agent.main_technical_agent import TechnicalAgent
+from agents.technical_workflow.main_technical_workflow import TechnicalAgent
 
 
 class MainAgent:

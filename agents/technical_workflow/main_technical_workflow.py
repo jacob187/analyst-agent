@@ -1,13 +1,9 @@
 from typing import Dict, Any, List, Optional
-import os
 from datetime import datetime
 import json
 
-import pandas as pd  # Import pandas for slicing
-from rich import print as rprint  # Import rich print
-
-from agents.technical_agent.get_stock_data import YahooFinanceDataRetrieval
-from agents.technical_agent.process_technical_indicators import TechnicalIndicators
+from agents.technical_workflow.get_stock_data import YahooFinanceDataRetrieval
+from agents.technical_workflow.process_technical_indicators import TechnicalIndicators
 from database.local_logger import LocalLogger
 
 
