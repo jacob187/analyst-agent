@@ -1,5 +1,5 @@
 import sys
-from agents.sec_agent.get_SEC_data import SECDataRetrieval
+from agents.sec_workflow.get_SEC_data import SECDataRetrieval
 
 
 def main():
