@@ -116,17 +116,8 @@ class TechnicalAgent:
 
         except Exception as e:
             print(f"Error during technical agent orchestration for {self.ticker}: {e}")
-            # Optionally, save an error state to your JSON here if desired
-            # ticker_data = all_data.setdefault(self.ticker, {})
-            # tech_analysis_section = ticker_data.setdefault("technical_analysis", {})
-            # tech_analysis_section["analysis"] = {
-            #     "summary": {"error_message": str(e)},
-            #     "timestamp": datetime.now().isoformat(),
-            #     "error": True,
-            # }
-            # tech_analysis_section["last_updated"] = datetime.now().isoformat()
-            # self.logger.write_json(all_data)
-            return False  # <<< CRUCIAL: Return False on any exception
+
+            return False
 
     def get_analysis(self) -> Dict[str, Any]:
         """
@@ -202,46 +193,6 @@ class TechnicalAgent:
         # Financial metrics
         if "financial_metrics" in indicators:
             summary["financial_metrics"] = indicators["financial_metrics"]
-
-        # Determine overall signal based on multiple indicators
-        bullish_signals = 0
-        bearish_signals = 0
-
-        # Check MA trend
-        if (
-            "moving_averages" in indicators
-            and "trend_50_200" in indicators["moving_averages"]
-            and indicators["moving_averages"]["trend_50_200"] == "bullish"
-        ):
-            bullish_signals += 1
-        elif (
-            "moving_averages" in indicators
-            and "trend_50_200" in indicators["moving_averages"]
-        ):
-            bearish_signals += 1
-
-        # Check RSI
-        if "rsi" in indicators:
-            rsi_signal = indicators["rsi"]["signal"]
-            if rsi_signal == "oversold":
-                bullish_signals += 1
-            elif rsi_signal == "overbought":
-                bearish_signals += 1
-
-        # Check MACD
-        if "macd" in indicators:
-            if indicators["macd"]["signal"] == "bullish":
-                bullish_signals += 1
-            else:
-                bearish_signals += 1
-
-        # Determine overall signal
-        if bullish_signals > bearish_signals:
-            summary["overall_signal"] = "bullish"
-        elif bearish_signals > bullish_signals:
-            summary["overall_signal"] = "bearish"
-        else:
-            summary["overall_signal"] = "neutral"
 
         return summary
 
