@@ -116,10 +116,6 @@ class YahooFinanceDataRetrieval:
             return {}
 
 
-# Removed _dataframe_to_dict as it's primarily for saving to JSON directly
-# which is no longer done here. The new _dataframe_to_dict handles NaN/Timestamp better for general use.
-
-# Example usage (optional - for testing the fetcher)
 if __name__ == "__main__":
     retriever = YahooFinanceDataRetrieval("AAPL")
     info_data = retriever.get_info()
