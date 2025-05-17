@@ -6,7 +6,6 @@ An AI-powered financial analysis system that retrieves, processes, and analyzes 
 
 - **SEC Filings Analysis**: Extracts and analyzes Management Discussion & Analysis, Risk Factors, and Balance Sheets
 - **Technical Analysis**: Calculates technical indicators like RSI, MACD, moving averages, and more
-- **Combined Recommendations**: Generates buy/hold/sell recommendations based on both fundamental and technical analysis
 - **Structured Data**: Uses structured JSON format for all data storage and retrieval
 - **Modular Architecture**: Follows SOLID principles with clear separation of concerns
 
@@ -35,7 +34,7 @@ SEC_HEADER="your-name your@email.com"  # Required for SEC Edgar API
 Run a complete analysis for a stock:
 
 ```bash
-poetry run python main.py TICKER
+poetry run python agents/main_agent.py TICKER
 ```
 
 Replace `TICKER` with the stock symbol you want to analyze (e.g., AAPL, MSFT, NVDA).
@@ -43,13 +42,13 @@ Replace `TICKER` with the stock symbol you want to analyze (e.g., AAPL, MSFT, NV
 ### Run Only SEC Analysis
 
 ```bash
-poetry run python main.py TICKER --sec-only
+poetry run python agents TICKER
 ```
 
 ### Run Only Technical Analysis
 
 ```bash
-poetry run python main.py TICKER --tech-only
+poetry run python agents/technical_workflow/main_technical_workflow.py TICKER
 ```
 
 ### Output
@@ -84,7 +83,7 @@ Retrieves and analyzes market data from Yahoo Finance:
 
 ### Analyst Agent
 
-Combines outputs from SEC and Technical agents to provide comprehensive analysis:
+In development. Will combine outputs from SEC and Technical agents to provide comprehensive analysis:
 
 - Weighs both fundamental and technical factors
 - Generates a final recommendation
