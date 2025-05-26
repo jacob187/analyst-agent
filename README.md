@@ -23,7 +23,7 @@ poetry install
 4. Create a `.env` file with your API keys:
 
 ```
-OPENAI_API_KEY=your_openai_api_key
+GOOGLE_API_KEY=your_google_api_key
 SEC_HEADER="your-name your@email.com"  # Required for SEC Edgar API
 ```
 
