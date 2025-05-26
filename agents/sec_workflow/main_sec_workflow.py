@@ -1,8 +1,7 @@
 from typing import Dict, List, Optional, Any
 import os
 from datetime import datetime
-import json
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import ChatPromptTemplate
 from langchain.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
@@ -74,12 +73,15 @@ class SECDocumentProcessor:
 
     def __init__(self, api_key: Optional[str] = None):
         """Initialize with OpenAI API key."""
-        if api_key:
-            os.environ["OPENAI_API_KEY"] = api_key
-        elif "OPENAI_API_KEY" not in os.environ:
-            raise ValueError("OpenAI API key must be provided")
 
-        self.llm = ChatOpenAI(temperature=0.1, model="gpt-4o-mini-2024-07-18")
+        if "GOOGLE_API_KEY" not in os.environ:
+            raise ValueError(
+                "Google API key must be set as an environment variable (GOOGLE_API_KEY)."
+            )
+
+        self.llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash-preview-05-20", api_key=os.environ["GOOGLE_API_KEY"]
+        )
 
         # Initialize output parsers
         self.mda_parser = PydanticOutputParser(pydantic_object=MDnAAnalysis)
