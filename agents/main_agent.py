@@ -1,12 +1,12 @@
 # Entry point for main agent
 import sys
-from agents.sec_workflow.main_sec_workflow import SECAgent
+from agents.sec_workflow.main_sec_workflow import SECWorkflow
 from agents.technical_workflow.main_technical_workflow import TechnicalAgent
 
 
 class MainAgent:
     def __init__(self, ticker: str):
-        self.sec_agent = SECAgent(ticker)
+        self.sec_agent = SECWorkflow(ticker)
         self.technical_agent = TechnicalAgent(ticker)
 
     def process_and_save(self):
