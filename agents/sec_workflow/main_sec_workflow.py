@@ -106,7 +106,7 @@ def main():
     ticker = sys.argv[1] if len(sys.argv) > 1 else "AAPL"
 
     # Create and run agent
-    agent = SECAgent(ticker)
+    agent = SECWorkflow(ticker)
     agent.process_and_save()
 
     # Generate a markdown report
