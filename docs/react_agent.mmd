@@ -1,0 +1,18 @@
+graph TD;
+  Agent["ReAct Agent"]
+  Agent --> "get_raw_risk_factors"
+  "get_raw_risk_factors" --> Agent
+  Agent --> "get_risk_factors_summary"
+  "get_risk_factors_summary" --> Agent
+  Agent --> "get_raw_management_discussion"
+  "get_raw_management_discussion" --> Agent
+  Agent --> "get_mda_summary"
+  "get_mda_summary" --> Agent
+  Agent --> "get_raw_balance_sheets"
+  "get_raw_balance_sheets" --> Agent
+  Agent --> "get_balance_sheet_summary"
+  "get_balance_sheet_summary" --> Agent
+  Agent --> "get_complete_10k_text"
+  "get_complete_10k_text" --> Agent
+  Agent --> "get_all_summaries"
+  "get_all_summaries" --> Agent
