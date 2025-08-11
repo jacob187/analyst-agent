@@ -83,11 +83,12 @@ Retrieves and analyzes market data from Yahoo Finance:
 
 ### Analyst Agent
 
-In development. Will combine outputs from SEC and Technical agents to provide comprehensive analysis:
+- There is support for a ReAct agent that uses the SEC tools in `agents/tools/sec_tools`
+- To interact with the graph run the CLI application:
 
-- Weighs both fundamental and technical factors
-- Generates a final recommendation
-- Provides reasoning for the recommendation
+```bash
+poetry run python cli/sec_langgraph_cli.py
+```
 
 ## License
 
