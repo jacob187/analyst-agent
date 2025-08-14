@@ -27,6 +27,10 @@ class MDnAAnalysis(BaseModel):
     future_outlook: str = Field(description="Management's outlook for the future")
     sentiment_score: float = Field(description="Overall sentiment score")
     sentiment_analysis: str = Field(description="Detailed sentiment explanation")
+    form_type: str = Field(description="Form type (10-K or 10-Q)")
+    filing_metadata: Optional[Dict[str, str]] = Field(
+        None, description="Filing metadata including dates and periods"
+    )
     comparison: Optional[str] = Field(
         None, description="Comparison between 10-K and 10-Q if both are available"
     )
@@ -42,6 +46,10 @@ class RiskFactorAnalysis(BaseModel):
     )
     sentiment_score: float = Field(description="Overall risk severity score")
     sentiment_analysis: str = Field(description="Detailed risk assessment explanation")
+    form_type: str = Field(description="Form type (10-K or 10-Q)")
+    filing_metadata: Optional[Dict[str, str]] = Field(
+        None, description="Filing metadata including dates and periods"
+    )
     comparison: Optional[str] = Field(
         None, description="Comparison between 10-K and 10-Q if both are available"
     )
@@ -79,24 +87,38 @@ class SECDocumentProcessor:
             pydantic_object=BalanceSheetAnalysis
         )
 
-    def generate_mda_prompt(self, ticker: str, mda_text: str) -> ChatPromptTemplate:
-        """Generate a prompt for analyzing Management Discussion and Analysis from 10-K only."""
-        system_message = """You are a financial expert analyzing the Management Discussion and Analysis (MD&A) 
-        section of SEC filings. Provide a comprehensive analysis including a summary, key points, 
+    def generate_mda_prompt(
+        self, ticker: str, mda_data: Dict[str, Any]
+    ) -> ChatPromptTemplate:
+        """Generate a prompt for analyzing Management Discussion and Analysis from specified form."""
+        form_type = mda_data.get("metadata", {}).get("form", "Unknown")
+
+        system_message = f"""You are a financial expert analyzing the Management Discussion and Analysis (MD&A) 
+        section from a {form_type} SEC filing. Provide a comprehensive analysis including a summary, key points, 
         financial highlights, future outlook, and sentiment analysis.
         
-        IMPORTANT: You must respond with a properly formatted JSON object that matches the schema exactly.
+        IMPORTANT: Include the form type and filing metadata in your analysis to provide proper provenance.
+        You must respond with a properly formatted JSON object that matches the schema exactly.
         DO NOT return the schema definition - fill in actual values based on your analysis.
         """
 
-        user_template = """Analyze the following MD&A section from {ticker}'s 10-K SEC filing:
+        filing_info = mda_data.get("metadata", {})
+        filing_date = filing_info.get("filing_date", "Unknown")
+        period = filing_info.get("period_of_report", "Unknown")
+
+        user_template = """Analyze the following MD&A section from {ticker}'s {form_type} SEC filing:
         
+        Filing Date: {filing_date}
+        Period of Report: {period}
+        
+        MD&A Content:
         {mda_text}
         
         Follow this JSON schema EXACTLY and fill in the values with your analysis:
         {format_instructions}
         
-        Your response should be a valid JSON object with real values, not placeholders or field descriptions."""
+        Your response should be a valid JSON object with real values, not placeholders or field descriptions.
+        Make sure to include the form_type and filing_metadata fields with the provided information."""
 
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -107,30 +129,48 @@ class SECDocumentProcessor:
 
         return prompt.partial(
             ticker=ticker,
-            mda_text=mda_text,
+            form_type=form_type,
+            filing_date=filing_date,
+            period=period,
+            mda_text=mda_data.get("text", ""),
             format_instructions=self.mda_parser.get_format_instructions(),
         )
 
     def generate_risk_factors_prompt(
-        self, ticker: str, risk_text: str
+        self, ticker: str, risk_data: Dict[str, Any]
     ) -> ChatPromptTemplate:
-        """Generate a prompt for analyzing Risk Factors from 10-K only."""
-        system_message = """You are a financial risk analyst examining the Risk Factors section of SEC filings.
+        """Generate a prompt for analyzing Risk Factors from specified form."""
+        form_type = risk_data.get("metadata", {}).get("form", "Unknown")
+
+        system_message = f"""You are a financial risk analyst examining the Risk Factors section from a {form_type} SEC filing.
         Provide a comprehensive analysis including a summary, key risks, risk categorization,
         and an overall assessment of risk severity.
         
-        IMPORTANT: You must respond with a properly formatted JSON object that matches the schema exactly.
+        Note: If this is a 10-Q filing, Risk Factors may only include material changes since the last 10-K,
+        or may not be present at all if there are no material changes.
+        
+        IMPORTANT: Include the form type and filing metadata in your analysis to provide proper provenance.
+        You must respond with a properly formatted JSON object that matches the schema exactly.
         DO NOT return the schema definition - fill in actual values based on your analysis.
         """
 
-        user_template = """Analyze the following Risk Factors section from {ticker}'s 10-K SEC filing:
+        filing_info = risk_data.get("metadata", {})
+        filing_date = filing_info.get("filing_date", "Unknown")
+        period = filing_info.get("period_of_report", "Unknown")
+
+        user_template = """Analyze the following Risk Factors section from {ticker}'s {form_type} SEC filing:
         
+        Filing Date: {filing_date}
+        Period of Report: {period}
+        
+        Risk Factors Content:
         {risk_text}
         
         Follow this JSON schema EXACTLY and fill in the values with your analysis:
         {format_instructions}
         
-        Your response should be a valid JSON object with real values, not placeholders or field descriptions."""
+        Your response should be a valid JSON object with real values, not placeholders or field descriptions.
+        Make sure to include the form_type and filing_metadata fields with the provided information."""
 
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -141,7 +181,10 @@ class SECDocumentProcessor:
 
         return prompt.partial(
             ticker=ticker,
-            risk_text=risk_text,
+            form_type=form_type,
+            filing_date=filing_date,
+            period=period,
+            risk_text=risk_data.get("text", ""),
             format_instructions=self.risk_parser.get_format_instructions(),
         )
 
@@ -209,9 +252,9 @@ class SECDocumentProcessor:
                 comparison=None,
             )
 
-    def analyze_mda(self, ticker: str, mda_text: str) -> MDnAAnalysis:
-        """Analyze the Management Discussion section from 10-K."""
-        prompt = self.generate_mda_prompt(ticker, mda_text)
+    def analyze_mda(self, ticker: str, mda_data: Dict[str, Any]) -> MDnAAnalysis:
+        """Analyze the Management Discussion section from specified form."""
+        prompt = self.generate_mda_prompt(ticker, mda_data)
         try:
             # Use the Langchain chain approach
             chain = prompt | self.llm | self.mda_parser
@@ -220,19 +263,22 @@ class SECDocumentProcessor:
             print(f"Error processing MD&A: {e}")
             # Return fallback values
             return MDnAAnalysis(
-                ticker=ticker,
                 summary="Error analyzing MD&A section.",
                 key_points=["Unable to extract key points."],
                 financial_highlights=["Unable to extract financial highlights."],
                 future_outlook="Analysis unavailable due to processing error.",
                 sentiment_score=0.0,
                 sentiment_analysis="Analysis unavailable due to processing error.",
+                form_type=mda_data.get("metadata", {}).get("form", "Unknown"),
+                filing_metadata=mda_data.get("metadata", {}),
                 comparison=None,
             )
 
-    def analyze_risk_factors(self, ticker: str, risk_text: str) -> RiskFactorAnalysis:
-        """Analyze the Risk Factors section from 10-K."""
-        prompt = self.generate_risk_factors_prompt(ticker, risk_text)
+    def analyze_risk_factors(
+        self, ticker: str, risk_data: Dict[str, Any]
+    ) -> RiskFactorAnalysis:
+        """Analyze the Risk Factors section from specified form."""
+        prompt = self.generate_risk_factors_prompt(ticker, risk_data)
         try:
             # Use the Langchain chain approach
             chain = prompt | self.llm | self.risk_parser
@@ -241,11 +287,12 @@ class SECDocumentProcessor:
             print(f"Error processing Risk Factors: {e}")
             # Return fallback values
             return RiskFactorAnalysis(
-                ticker=ticker,
                 summary="Error analyzing Risk Factors section.",
                 key_risks=["Unable to extract key risks."],
                 risk_categories={"Processing Error": ["Unable to categorize risks."]},
                 sentiment_score=0.0,
                 sentiment_analysis="Analysis unavailable due to processing error.",
+                form_type=risk_data.get("metadata", {}).get("form", "Unknown"),
+                filing_metadata=risk_data.get("metadata", {}),
                 comparison=None,
             )
