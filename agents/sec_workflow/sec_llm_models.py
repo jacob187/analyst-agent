@@ -97,7 +97,11 @@ class SECDocumentProcessor:
         section from a {form_type} SEC filing. Provide a comprehensive analysis including a summary, key points, 
         financial highlights, future outlook, and sentiment analysis.
         
-        IMPORTANT: Include the form type and filing metadata in your analysis to provide proper provenance.
+        IMPORTANT: 
+        - Include the form type and filing metadata in your analysis to provide proper provenance.
+        - If the provided content is minimal, empty, or just contains section headers, explicitly state this in your analysis.
+        - For 10-Q filings, focus on quarterly performance and changes since the previous period.
+        - If content is insufficient for meaningful analysis, clearly indicate this limitation.
         You must respond with a properly formatted JSON object that matches the schema exactly.
         DO NOT return the schema definition - fill in actual values based on your analysis.
         """
@@ -113,6 +117,11 @@ class SECDocumentProcessor:
         
         MD&A Content:
         {mda_text}
+        
+        ANALYSIS INSTRUCTIONS:
+        - If the content is minimal (less than 200 characters) or only contains section headers, clearly state this limitation.
+        - For 10-Q filings, focus on quarterly changes and developments.
+        - If meaningful analysis cannot be performed due to insufficient content, explain this in your summary.
         
         Follow this JSON schema EXACTLY and fill in the values with your analysis:
         {format_instructions}
@@ -146,10 +155,12 @@ class SECDocumentProcessor:
         Provide a comprehensive analysis including a summary, key risks, risk categorization,
         and an overall assessment of risk severity.
         
-        Note: If this is a 10-Q filing, Risk Factors may only include material changes since the last 10-K,
-        or may not be present at all if there are no material changes.
-        
-        IMPORTANT: Include the form type and filing metadata in your analysis to provide proper provenance.
+        IMPORTANT CONTEXT:
+        - If this is a 10-Q filing, Risk Factors may only include material changes since the last 10-K,
+          or may not be present at all if there are no material changes.
+        - If the provided content indicates "no material changes" or is minimal/empty, explicitly state this.
+        - For 10-Q filings with no risk factor updates, this is normal and should be noted as such.
+        - Include the form type and filing metadata in your analysis to provide proper provenance.
         You must respond with a properly formatted JSON object that matches the schema exactly.
         DO NOT return the schema definition - fill in actual values based on your analysis.
         """
@@ -165,6 +176,12 @@ class SECDocumentProcessor:
         
         Risk Factors Content:
         {risk_text}
+        
+        ANALYSIS INSTRUCTIONS:
+        - If the content indicates "no material changes" or is minimal, this is normal for 10-Q filings.
+        - For 10-Q with no risk factor updates, provide analysis explaining this is standard practice.
+        - If content is insufficient for risk categorization, explain this limitation clearly.
+        - Focus on any new or changed risks if this is a 10-Q filing.
         
         Follow this JSON schema EXACTLY and fill in the values with your analysis:
         {format_instructions}
