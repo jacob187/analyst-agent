@@ -151,7 +151,7 @@ class SECDataRetrieval:
             text = None
             found = False
 
-            # Use the known attributes from our test
+            # Use only the known working attributes from EdgarTools
             if form == "10-K":
                 if item == "1A":
                     if hasattr(filing_obj, "risk_factors"):
@@ -163,15 +163,23 @@ class SECDataRetrieval:
                         found = True
             elif form == "10-Q":
                 # 10-Q objects don't have risk_factors or management_discussion as convenience properties
-                # We need to extract from the filing using the sections or items method
+                # Check if they exist and handle gracefully
                 if item == "1A":
-                    text = self._extract_10q_risk_factors()
-                    found = text is not None and len(text.strip()) > 0
+                    if hasattr(filing_obj, "risk_factors"):
+                        text = filing_obj.risk_factors
+                        found = True
+                    else:
+                        text = "Risk Factors section not available in 10-Q filing. This is common when there are no material changes to risk factors since the most recent 10-K filing."
+                        found = False
                 elif item == "2":
-                    text = self._extract_10q_management_discussion()
-                    found = text is not None and len(text.strip()) > 0
+                    if hasattr(filing_obj, "management_discussion"):
+                        text = filing_obj.management_discussion
+                        found = True
+                    else:
+                        text = "Management Discussion and Analysis section not available as a convenience property in this 10-Q filing."
+                        found = False
 
-            if not found or not text:
+            if not text:
                 text = (
                     f"Section Item {item} not found or not available in {form} filing"
                 )
@@ -189,78 +197,6 @@ class SECDataRetrieval:
                 "metadata": {},
                 "found": False,
             }
-
-    def _extract_10q_risk_factors(self) -> Optional[str]:
-        """
-        Extract Risk Factors from 10-Q filing using the filing's items or sections.
-        10-Q may not have Risk Factors if no material changes since last 10-K.
-        """
-        try:
-            filing = self.get_tenq_filing()
-
-            # Try to search for risk factors in the filing text
-            if hasattr(filing, "search"):
-                results = filing.search("Item 1A")
-                if results:
-                    # This is a simplified extraction - in practice you'd want more robust parsing
-                    full_text = filing.text()
-                    # Look for "Item 1A" section
-                    import re
-
-                    pattern = r"Item\s*1A\.?\s*Risk\s*Factors"
-                    match = re.search(pattern, full_text, re.IGNORECASE)
-                    if match:
-                        start = match.end()
-                        # Find next major item
-                        next_item = re.search(
-                            r"Item\s*[2-9][A-Z]?\.", full_text[start:], re.IGNORECASE
-                        )
-                        if next_item:
-                            end = start + next_item.start()
-                            return full_text[start:end].strip()
-                        else:
-                            # Take a reasonable chunk
-                            return full_text[start : start + 5000].strip()
-
-            return "Risk Factors section not found in 10-Q (may not be required if no material changes)"
-
-        except Exception as e:
-            print(f"Error extracting 10-Q risk factors: {e}")
-            return None
-
-    def _extract_10q_management_discussion(self) -> Optional[str]:
-        """
-        Extract Management Discussion and Analysis from 10-Q filing (Item 2).
-        """
-        try:
-            filing = self.get_tenq_filing()
-
-            # Try to search for MD&A in the filing text
-            if hasattr(filing, "search"):
-                full_text = filing.text()
-                # Look for "Item 2" section (MD&A in 10-Q)
-                import re
-
-                pattern = r"Item\s*2\.?\s*Management.s\s*Discussion"
-                match = re.search(pattern, full_text, re.IGNORECASE)
-                if match:
-                    start = match.end()
-                    # Find next major item
-                    next_item = re.search(
-                        r"Item\s*[3-9][A-Z]?\.", full_text[start:], re.IGNORECASE
-                    )
-                    if next_item:
-                        end = start + next_item.start()
-                        return full_text[start:end].strip()
-                    else:
-                        # Take a reasonable chunk
-                        return full_text[start : start + 10000].strip()
-
-            return "Management Discussion section not found in 10-Q"
-
-        except Exception as e:
-            print(f"Error extracting 10-Q management discussion: {e}")
-            return None
 
     # New form-specific methods with clear naming and provenance
     def get_mda_raw(self, form: Literal["10-K", "10-Q"] = "10-K") -> Dict[str, Any]:
