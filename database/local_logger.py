@@ -2,6 +2,7 @@ import json
 import os
 from typing import Dict, Any
 from pathlib import Path
+from datetime import datetime
 
 
 class LocalLogger:
@@ -19,7 +20,24 @@ class LocalLogger:
         os.makedirs(data_dir, exist_ok=True)
         # Set the absolute file path
         self.file_path = data_dir / "data.json"
-        print(f"LocalLogger initialized with file path: {self.file_path}")
+        self.log_file_path = data_dir / "agent_log.log"
+        print(f"LocalLogger initialized with data file: {self.file_path} and log file: {self.log_file_path}")
+
+    def log_message(self, level: str, message: str) -> None:
+        """
+        Log a timestamped message to the agent log file.
+
+        Args:
+            level: The log level (e.g., "INFO", "WARNING", "ERROR").
+            message: The message content to log.
+        """
+        timestamp = datetime.now().isoformat()
+        log_entry = f"[{timestamp}] [{level}] {message}"
+        try:
+            with open(self.log_file_path, "a") as f:
+                f.write(log_entry + "\n")
+        except Exception as e:
+            print(f"Error writing to log file {self.log_file_path}: {e}")
 
     def read_json(self) -> Dict[str, Any]:
         """

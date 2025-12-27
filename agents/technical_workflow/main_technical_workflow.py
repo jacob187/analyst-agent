@@ -33,53 +33,53 @@ class TechnicalAgent:
             bool: True if processing and saving were successful, False otherwise.
         """
         try:
-            print(f"Starting technical analysis orchestration for {self.ticker}")
+            self.logger.log_message("INFO", f"Starting technical analysis orchestration for {self.ticker}")
 
             # --- Step 1: Fetch Raw Data ---
-            print(f"Retrieving raw data for {self.ticker}...")
+            self.logger.log_message("INFO", f"Retrieving raw data for {self.ticker}...")
             info_data = self.data_retriever.get_info()
             financials_data = self.data_retriever.get_financials()
             hist_df_1y = self.data_retriever.get_historical_prices(period="1y")
 
             if hist_df_1y is None or hist_df_1y.empty:
-                print(
-                    f"ERROR: Failed to retrieve 1y historical price data for {self.ticker}. Aborting technical analysis."
+                self.logger.log_message("ERROR",
+                    f"Failed to retrieve 1y historical price data for {self.ticker}. Aborting technical analysis."
                 )
                 return False  # <<< CRUCIAL: Return False on failure
 
             if not info_data:
-                print(
-                    f"Warning: Failed to retrieve company info for {self.ticker}. Proceeding without it."
+                self.logger.log_message("WARNING",
+                    f"Failed to retrieve company info for {self.ticker}. Proceeding without it."
                 )
             if not financials_data:
-                print(
-                    f"Warning: Failed to retrieve financials data for {self.ticker}. Proceeding without it."
+                self.logger.log_message("WARNING",
+                    f"Failed to retrieve financials data for {self.ticker}. Proceeding without it."
                 )
 
             # --- Step 2: Calculate Indicators ---
-            print(
+            self.logger.log_message("INFO",
                 f"Calculating technical indicators for {self.ticker} using 1y data..."
             )
             indicators = self.indicator_processor.calculate_all_indicators(hist_df_1y)
 
             if not indicators:
-                print(
-                    f"ERROR: Indicator calculation failed for {self.ticker}. Aborting technical analysis."
+                self.logger.log_message("ERROR",
+                    f"Indicator calculation failed for {self.ticker}. Aborting technical analysis."
                 )
                 return False  # <<< CRUCIAL: Return False on failure
 
             # --- Step 3: Generate Analysis Summary ---
-            print(f"Generating technical analysis summary for {self.ticker}...")
+            self.logger.log_message("INFO", f"Generating technical analysis summary for {self.ticker}...")
             analysis_summary = self._generate_analysis_summary(indicators)
 
             # --- Step 4 & 5: Prepare Data and Save ---
-            print(f"Preparing and saving all technical data for {self.ticker}...")
+            self.logger.log_message("INFO", f"Preparing and saving all technical data for {self.ticker}...")
             try:
                 # Read existing data ONCE
                 all_data = self.logger.read_json()
             except FileNotFoundError:
                 all_data = {}
-                print("Data file not found, creating a new one.")
+                self.logger.log_message("INFO", "Data file not found, creating a new one.")
 
             # Get or create ticker entry
             ticker_data = all_data.setdefault(self.ticker, {})
@@ -109,13 +109,13 @@ class TechnicalAgent:
             # --- Step 6: Write updated data ONCE ---
             self.logger.write_json(all_data)
 
-            print(
+            self.logger.log_message("INFO",
                 f"Technical analysis orchestration for {self.ticker} completed and saved."
             )
             return True  # <<< CRUCIAL: Return True on success
 
         except Exception as e:
-            print(f"Error during technical agent orchestration for {self.ticker}: {e}")
+            self.logger.log_message("ERROR", f"Error during technical agent orchestration for {self.ticker}: {e}")
 
             return False
 
@@ -126,16 +126,23 @@ class TechnicalAgent:
         Returns:
             A dictionary containing the technical analysis summary
         """
-        data = self.logger.read_json()
-        # Adjust path to retrieve the analysis summary
-        analysis_data = (
-            data.get(self.ticker, {}).get("technical_analysis", {}).get("analysis", {})
-        )
-        if not analysis_data:
-            raise ValueError(
-                f"No technical analysis summary found for {self.ticker}. Run process_and_save first."
+        try:
+            data = self.logger.read_json()
+            # Adjust path to retrieve the analysis summary
+            analysis_data = (
+                data.get(self.ticker, {}).get("technical_analysis", {}).get("analysis", {})
             )
-        return analysis_data
+            if not analysis_data:
+                self.logger.log_message("WARNING",
+                    f"No technical analysis summary found for {self.ticker}. Run process_and_save first."
+                )
+                raise ValueError(
+                    f"No technical analysis summary found for {self.ticker}. Run process_and_save first."
+                )
+            return analysis_data
+        except Exception as e:
+            self.logger.log_message("ERROR", f"Error retrieving analysis for {self.ticker}: {e}")
+            raise
 
     def _generate_analysis_summary(self, indicators: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -201,8 +208,12 @@ def main():
     """Main function to run the technical agent for a given ticker."""
     import sys
 
+    # Initialize a logger for the main script in this module
+    main_logger = LocalLogger()
+    main_logger.log_message("INFO", "Starting TechnicalAgent main script.")
+
     if len(sys.argv) < 2:
-        print(
+        main_logger.log_message("ERROR",
             "Usage: python -m agents.technical_workflow.main_technical_workflow TICKER"
         )
         sys.exit(1)
@@ -216,16 +227,16 @@ def main():
         # Only attempt to get analysis if processing was successful
         try:
             analysis = agent.get_analysis()
-            print(f"\nTechnical Analysis Summary for {ticker}:")
-            print(json.dumps(analysis, indent=2))
+            main_logger.log_message("INFO", f"\nTechnical Analysis Summary for {ticker}:")
+            main_logger.log_message("INFO", json.dumps(analysis, indent=2))
         except ValueError as e:
             # This case should be less common if 'success' is true, but good for safety
-            print(
+            main_logger.log_message("ERROR",
                 f"Error retrieving analysis for {ticker} even after reported success: {e}"
             )
     else:
         # This message will now be printed if process_and_save returns False
-        print(
+        main_logger.log_message("ERROR",
             f"\nTechnical analysis for {ticker} could not be completed due to errors. No summary to display."
         )
 
