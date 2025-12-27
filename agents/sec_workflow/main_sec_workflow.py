@@ -23,84 +23,100 @@ class SECWorkflow:
             )
 
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash-preview-05-20", api_key=os.environ["GOOGLE_API_KEY"]
+            model="gemini-3-flash-preview", api_key=os.environ["GOOGLE_API_KEY"]
         )
         self.ticker = ticker
         self.data_retriever = SECDataRetrieval(ticker)
         self.document_processor = SECDocumentProcessor(llm)
         self.logger = LocalLogger()
 
-    def process_and_save(self) -> None:
+    def process_and_save(self) -> bool:
         """Process SEC data and save results to the JSON file."""
-        # Step 1: Get the SEC data with form-specific methods
-
-        # Get MD&A from both 10-K and 10-Q
-        mda_10k_data = self.data_retriever.get_mda_raw("10-K")
-        mda_10q_data = self.data_retriever.get_mda_raw("10-Q")
-
-        # Get Risk Factors from both 10-K and 10-Q
-        risk_10k_data = self.data_retriever.get_risk_factors_raw("10-K")
-        risk_10q_data = self.data_retriever.get_risk_factors_raw("10-Q")
-
-        # Use the new JSON-serializable method for balance sheets
-        balance_sheets = self.data_retriever.extract_balance_sheet_as_json()
-        tenk = balance_sheets["tenk"]
-        tenq = balance_sheets["tenq"]
-
-        # Step 2: Process the data with form-specific analysis
-        mda_10k_analysis = self.document_processor.analyze_mda(
-            self.ticker, mda_10k_data
-        )
-        mda_10q_analysis = self.document_processor.analyze_mda(
-            self.ticker, mda_10q_data
-        )
-
-        risk_10k_analysis = self.document_processor.analyze_risk_factors(
-            self.ticker, risk_10k_data
-        )
-        risk_10q_analysis = self.document_processor.analyze_risk_factors(
-            self.ticker, risk_10q_data
-        )
-
-        balance_sheet_analysis = self.document_processor.analyze_balance_sheet(
-            self.ticker, tenk, tenq
-        )
-
-        # Step 3: Combine results with form-specific sections
-        combined_analysis = {
-            "ticker": self.ticker,
-            "analysis_date": datetime.now().isoformat(),
-            "management_discussion_10k": mda_10k_analysis.model_dump(),
-            "management_discussion_10q": mda_10q_analysis.model_dump(),
-            "risk_factors_10k": risk_10k_analysis.model_dump(),
-            "risk_factors_10q": risk_10q_analysis.model_dump(),
-            "balance_sheet_analysis": balance_sheet_analysis.model_dump(),
-            "balance_sheets": balance_sheets,  # Now contains properly structured JSON with metadata
-            "raw_sections": {
-                "mda_10k": mda_10k_data,
-                "mda_10q": mda_10q_data,
-                "risk_10k": risk_10k_data,
-                "risk_10q": risk_10q_data,
-            },
-        }
-
-        # Step 4: Read existing data first
+        self.logger.log_message("INFO", f"Starting SEC analysis for {self.ticker}")
         try:
-            existing_data = self.logger.read_json()
+            # Step 1: Get the SEC data with form-specific methods
+
+            # Get MD&A from both 10-K and 10-Q
+            mda_10k_data = self.data_retriever.get_mda_raw("10-K")
+            self.logger.log_message("INFO", f"Retrieved 10-K MD&A data for {self.ticker}.")
+            mda_10q_data = self.data_retriever.get_mda_raw("10-Q")
+            self.logger.log_message("INFO", f"Retrieved 10-Q MD&A data for {self.ticker}.")
+
+            # Get Risk Factors from both 10-K and 10-Q
+            risk_10k_data = self.data_retriever.get_risk_factors_raw("10-K")
+            self.logger.log_message("INFO", f"Retrieved 10-K Risk Factors data for {self.ticker}.")
+            risk_10q_data = self.data_retriever.get_risk_factors_raw("10-Q")
+            self.logger.log_message("INFO", f"Retrieved 10-Q Risk Factors data for {self.ticker}.")
+
+            # Use the new JSON-serializable method for balance sheets
+            balance_sheets = self.data_retriever.extract_balance_sheet_as_json()
+            self.logger.log_message("INFO", f"Retrieved Balance Sheet data for {self.ticker}.")
+            tenk = balance_sheets["tenk"]
+            tenq = balance_sheets["tenq"]
+
+            # Step 2: Process the data with form-specific analysis
+            mda_10k_analysis = self.document_processor.analyze_mda(
+                self.ticker, mda_10k_data
+            )
+            self.logger.log_message("INFO", f"Analyzed 10-K MD&A for {self.ticker}.")
+            mda_10q_analysis = self.document_processor.analyze_mda(
+                self.ticker, mda_10q_data
+            )
+            self.logger.log_message("INFO", f"Analyzed 10-Q MD&A for {self.ticker}.")
+
+            risk_10k_analysis = self.document_processor.analyze_risk_factors(
+                self.ticker, risk_10k_data
+            )
+            self.logger.log_message("INFO", f"Analyzed 10-K Risk Factors for {self.ticker}.")
+            risk_10q_analysis = self.document_processor.analyze_risk_factors(
+                self.ticker, risk_10q_data
+            )
+            self.logger.log_message("INFO", f"Analyzed 10-Q Risk Factors for {self.ticker}.")
+
+            balance_sheet_analysis = self.document_processor.analyze_balance_sheet(
+                self.ticker, tenk, tenq
+            )
+            self.logger.log_message("INFO", f"Analyzed Balance Sheet for {self.ticker}.")
+
+            # Step 3: Combine results with form-specific sections
+            combined_analysis = {
+                "ticker": self.ticker,
+                "analysis_date": datetime.now().isoformat(),
+                "management_discussion_10k": mda_10k_analysis.model_dump(),
+                "management_discussion_10q": mda_10q_analysis.model_dump(),
+                "risk_factors_10k": risk_10k_analysis.model_dump(),
+                "risk_factors_10q": risk_10q_analysis.model_dump(),
+                "balance_sheet_analysis": balance_sheet_analysis.model_dump(),
+                "balance_sheets": balance_sheets,  # Now contains properly structured JSON with metadata
+                "raw_sections": {
+                    "mda_10k": mda_10k_data,
+                    "mda_10q": mda_10q_data,
+                    "risk_10k": risk_10k_data,
+                    "risk_10q": risk_10q_data,
+                },
+            }
+
+            # Step 4: Read existing data first
+            try:
+                existing_data = self.logger.read_json()
+                self.logger.log_message("INFO", "Existing data file read successfully.")
+            except Exception as e:
+                self.logger.log_message("ERROR", f"Error reading existing data: {e}, creating new data structure")
+                existing_data = {}
+
+            # Step 5: Update with new analysis data under the "sec_data" key
+            existing_data[self.ticker] = existing_data.get(
+                self.ticker, {}
+            )  # Ensure ticker key exists
+            existing_data[self.ticker]["sec_data"] = combined_analysis
+
+            # Step 6: Write the updated data back to the JSON file
+            self.logger.write_json(existing_data)
+            self.logger.log_message("INFO", f"SEC analysis for {self.ticker} completed and saved to file.")
+            return True
         except Exception as e:
-            print(f"Error reading existing data: {e}, creating new data structure")
-            existing_data = {}
-
-        # Step 5: Update with new analysis data under the "sec_data" key
-        existing_data[self.ticker] = existing_data.get(
-            self.ticker, {}
-        )  # Ensure ticker key exists
-        existing_data[self.ticker]["sec_data"] = combined_analysis
-
-        # Step 6: Write the updated data back to the JSON file
-        self.logger.write_json(existing_data)
-
-        print(f"SEC analysis for {self.ticker} completed and saved to file.")
+            self.logger.log_message("ERROR", f"Error during SEC analysis orchestration for {self.ticker}: {e}")
+            return False
 
     def get_analysis(self) -> Dict[str, Any]:
         """Retrieve the SEC analysis from the JSON file."""
@@ -109,10 +125,10 @@ class SECWorkflow:
             # Retrieve data from the 'sec_data' key
             ticker_data = data.get(self.ticker, {}).get("sec_data", {})
             if not ticker_data:
-                print(f"No SEC data found for ticker {self.ticker}")
+                self.logger.log_message("WARNING", f"No SEC data found for ticker {self.ticker}")
             return ticker_data
         except Exception as e:
-            print(f"Error retrieving analysis: {e}")
+            self.logger.log_message("ERROR", f"Error retrieving analysis for {self.ticker}: {e}")
             return {}
 
 
@@ -126,17 +142,25 @@ def main():
     # Load environment variables
     load_dotenv()
 
+    # Initialize a logger for the main script in this module
+    main_logger = LocalLogger()
+    main_logger.log_message("INFO", "Starting SECWorkflow main script.")
+
     # Get ticker from command line or use default
     ticker = sys.argv[1] if len(sys.argv) > 1 else "AAPL"
 
     # Create and run agent
     agent = SECWorkflow(ticker)
-    agent.process_and_save()
+    success = agent.process_and_save()
+
+    if not success:
+        main_logger.log_message("ERROR", f"SEC analysis for {ticker} could not be completed due to errors. No report will be generated.")
+        return
 
     # Generate a markdown report
     analysis = agent.get_analysis()
     if not analysis:
-        print("No analysis data found for ticker.")
+        main_logger.log_message("WARNING", "No analysis data found for ticker. Exiting.")
         return
 
     # Create markdown report
@@ -308,7 +332,7 @@ def main():
     with open(report_path, "w") as f:
         f.write(md_content)
 
-    print(f"Analysis complete! Report saved to {report_path}")
+    main_logger.log_message("INFO", f"Analysis complete! Report saved to {report_path}")
 
 
 if __name__ == "__main__":
