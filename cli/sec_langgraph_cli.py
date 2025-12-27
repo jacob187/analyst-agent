@@ -38,9 +38,8 @@ class SECLangGraphCLI:
         try:
             print("🔄 Initializing SEC LangGraph Agent...")
 
-            # Initialize LLM
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash-preview-05-20",
+                model="gemini-2.5-flash",
                 api_key=os.environ["GOOGLE_API_KEY"],
             )
 
@@ -209,7 +208,7 @@ class SECLangGraphCLI:
 
             # Get LLM from current agent
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash-preview-05-20",
+                model="gemini-2.5-flash",
                 api_key=os.environ["GOOGLE_API_KEY"],
             )
 
