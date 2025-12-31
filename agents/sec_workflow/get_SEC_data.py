@@ -4,6 +4,7 @@ import os
 import json
 from typing import Literal, Optional, Dict, Any
 from datetime import datetime
+from database.local_logger import LocalLogger
 
 
 class FilingMetadata:
@@ -47,7 +48,17 @@ class FilingMetadata:
 class SECDataRetrieval:
     def __init__(self, ticker: str):
         load_dotenv()
-        set_identity(os.getenv("SEC_HEADER"))
+        self.logger = LocalLogger()
+        sec_header = os.getenv("SEC_HEADER")
+        if not sec_header:
+            error_msg = (
+                "SEC_HEADER environment variable is not set. "
+                "Please set it in your .env file with your name and email. "
+                "Example: 'Your Name (your_email@example.com)'"
+            )
+            self.logger.log_message("ERROR", error_msg)
+            raise ValueError(error_msg)
+        set_identity(sec_header)
         try:
             self.ticker = ticker
             self.company = Company(ticker)
@@ -59,8 +70,34 @@ class SECDataRetrieval:
             self._tenk_metadata = None
             self._tenq_metadata = None
         except Exception as e:
-            print(f"Failed to initialize company in SECDataRetrieval: {e}")
+            error_msg = f"Failed to initialize company in SECDataRetrieval: {e}"
+            self.logger.log_message("ERROR", error_msg)
+            print(error_msg)
             raise
+
+    def check_filing_availability(self) -> Dict[str, Any]:
+        """Check what filings are available for this company.
+
+        Returns:
+            Dict with ticker, company_name, has_10k, and has_10q fields.
+        """
+        result = {
+            "ticker": self.ticker,
+            "company_name": self.company.name,
+            "has_10k": False,
+            "has_10q": False,
+        }
+        try:
+            filing_10k = self.company.latest(form="10-K")
+            result["has_10k"] = filing_10k is not None
+        except Exception:
+            pass
+        try:
+            filing_10q = self.company.latest(form="10-Q")
+            result["has_10q"] = filing_10q is not None
+        except Exception:
+            pass
+        return result
 
     # Lazy getters for filings (EntityFiling objects)
     def get_tenk_filing(self):
