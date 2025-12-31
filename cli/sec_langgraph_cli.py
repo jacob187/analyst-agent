@@ -7,7 +7,7 @@ import os
 import sys
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -48,16 +48,23 @@ class SECLangGraphCLI:
             if not ticker:
                 return False
 
-            # Create agent with tools for the ticker
-            self.agent, self.llm_id = create_sec_agent(llm, ticker)
+            # Set up memory for conversation persistence
+            memory = MemorySaver()
+
+            # Create agent with tools for the ticker, passing checkpointer
+            try:
+                self.agent, self.llm_id = create_sec_agent(
+                    llm, ticker, checkpointer=memory
+                )
+            except ValueError as e:
+                print(f"❌ {e}")
+                print("Please try a different ticker (e.g., AAPL, MSFT, GOOGL)")
+                return False
+
             self.current_ticker = ticker
 
-            # Set up memory configuration
-            memory = MemorySaver()
-            self.config = {
-                "configurable": {"thread_id": "sec_chat_session"},
-                "checkpointer": memory,
-            }
+            # Config only needs thread_id for memory (checkpointer is in agent)
+            self.config = {"configurable": {"thread_id": "sec_chat_session"}}
 
             print(f"✅ SEC Agent ready for {ticker}!")
             print(f"📊 Available tools: 8 SEC analysis tools")
@@ -212,15 +219,24 @@ class SECLangGraphCLI:
                 api_key=os.environ["GOOGLE_API_KEY"],
             )
 
-            # Create new agent for new ticker
-            self.agent, self.llm_id = create_sec_agent(llm, new_ticker.upper())
-            self.current_ticker = new_ticker.upper()
-
             # Reset memory for new company
             memory = MemorySaver()
+
+            # Create new agent for new ticker with checkpointer
+            try:
+                self.agent, self.llm_id = create_sec_agent(
+                    llm, new_ticker.upper(), checkpointer=memory
+                )
+            except ValueError as e:
+                print(f"❌ {e}")
+                print("Please try a different ticker")
+                return False
+
+            self.current_ticker = new_ticker.upper()
+
+            # Config only needs thread_id (checkpointer is in agent)
             self.config = {
-                "configurable": {"thread_id": f"sec_chat_{new_ticker.lower()}"},
-                "checkpointer": memory,
+                "configurable": {"thread_id": f"sec_chat_{new_ticker.lower()}"}
             }
 
             print(f"✅ Now analyzing {self.current_ticker}")
@@ -257,18 +273,8 @@ class SECLangGraphCLI:
         try:
             print("\n🤖 Thinking...")
 
-            # Create message for the agent, always include current ticker as context
-            # so the agent does not ask for the company again between turns.
-            messages = [
-                SystemMessage(
-                    content=(
-                        f"Current company ticker: {self.current_ticker}. "
-                        "Use the SEC tools to answer questions for this company. "
-                        "Do not ask for the company unless the user requests a switch."
-                    )
-                ),
-                HumanMessage(content=user_input),
-            ]
+            # Create message for the agent (system prompt is now in agent's state_modifier)
+            messages = [HumanMessage(content=user_input)]
 
             # Invoke the agent with memory
             result = self.agent.invoke({"messages": messages}, config=self.config)
