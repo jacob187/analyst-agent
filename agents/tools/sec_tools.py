@@ -13,10 +13,24 @@ _processed_cache: Dict[str, Dict[str, Any]] = {}
 
 
 def _get_shared_retriever(ticker: str) -> SECDataRetrieval:
-    """Get or create a shared SEC data retriever for the ticker."""
+    """Get or create a shared SEC data retriever for the ticker.
+
+    Validates that the company has 10-K filings available before proceeding.
+    Raises ValueError if no 10-K filing is found.
+    """
     if ticker not in _shared_retrievers:
         print(f"Making single SEC API call for {ticker}...")
-        _shared_retrievers[ticker] = SECDataRetrieval(ticker)
+        retriever = SECDataRetrieval(ticker)
+
+        # Validate that 10-K filings are available
+        availability = retriever.check_filing_availability()
+        if not availability["has_10k"]:
+            raise ValueError(
+                f"No 10-K filing found for {availability['company_name']} ({ticker}). "
+                f"This company may file different forms (e.g., N-CSR for investment trusts)."
+            )
+
+        _shared_retrievers[ticker] = retriever
         _processed_cache[ticker] = {}
     return _shared_retrievers[ticker]
 
@@ -45,7 +59,11 @@ def _tool_raw_risk_factors(ticker: str, llm: BaseChatModel) -> str:
     """Return raw Risk Factors text for the given ticker."""
     try:
         retriever = _get_shared_retriever(ticker)
-        return retriever.extract_risk_factors()
+        # Use the new dict-based method that includes metadata
+        result = retriever.get_risk_factors_raw("10-K")
+        if not result.get("found", False):
+            return f"Risk Factors section not found in 10-K filing for {ticker}."
+        return result.get("text", "No text available")
     except Exception as e:
         return f"Failed to retrieve risk factors for {ticker}: {e}"
 
@@ -57,8 +75,12 @@ def _tool_risk_factors_summary(ticker: str, llm: BaseChatModel) -> str:
         try:
             retriever = _get_shared_retriever(ticker)
             processor = _get_shared_processor(ticker, llm)
-            risk_text = retriever.extract_risk_factors()
-            analysis = processor.analyze_risk_factors(ticker, risk_text)
+            # Use the new dict-based method that includes metadata
+            risk_data = retriever.get_risk_factors_raw("10-K")
+            if not risk_data.get("found", False):
+                return f"Risk Factors section not found in 10-K filing for {ticker}."
+            # Pass the full dict to the analysis method
+            analysis = processor.analyze_risk_factors(ticker, risk_data)
             _processed_cache[ticker][cache_key] = analysis.model_dump()
         except Exception as e:
             return f"Failed to analyze risk factors for {ticker}: {e}"
@@ -66,11 +88,9 @@ def _tool_risk_factors_summary(ticker: str, llm: BaseChatModel) -> str:
     if isinstance(result, dict) and "error" not in result:
         sentiment = result.get("sentiment_score", "N/A")
         key_risks = result.get("key_risks", [])
-        summary = (
-            f"Risk Sentiment Score: {sentiment}/10\n\nTop Risk Factors:\n"
-            f"{_format_top_n(key_risks, 3)}"
-        )
-        return summary
+        summary = result.get("summary", "")
+        response = f"Risk Analysis Summary:\n{summary}\n\nRisk Severity Score: {sentiment}/10\n\nTop Risk Factors:\n{_format_top_n(key_risks, 3)}"
+        return response
     return str(result)
 
 
@@ -78,7 +98,11 @@ def _tool_raw_mda(ticker: str, llm: BaseChatModel) -> str:
     """Return raw MD&A text for the given ticker."""
     try:
         retriever = _get_shared_retriever(ticker)
-        return retriever.extract_management_discussion()
+        # Use the new dict-based method that includes metadata
+        result = retriever.get_mda_raw("10-K")
+        if not result.get("found", False):
+            return f"Management Discussion section not found in 10-K filing for {ticker}."
+        return result.get("text", "No text available")
     except Exception as e:
         return f"Failed to retrieve MD&A for {ticker}: {e}"
 
@@ -90,8 +114,12 @@ def _tool_mda_summary(ticker: str, llm: BaseChatModel) -> str:
         try:
             retriever = _get_shared_retriever(ticker)
             processor = _get_shared_processor(ticker, llm)
-            mda_text = retriever.extract_management_discussion()
-            analysis = processor.analyze_mda(ticker, mda_text)
+            # Use the new dict-based method that includes metadata
+            mda_data = retriever.get_mda_raw("10-K")
+            if not mda_data.get("found", False):
+                return f"Management Discussion section not found in 10-K filing for {ticker}."
+            # Pass the full dict to the analysis method
+            analysis = processor.analyze_mda(ticker, mda_data)
             _processed_cache[ticker][cache_key] = analysis.model_dump()
         except Exception as e:
             return f"Failed to analyze MD&A for {ticker}: {e}"
@@ -100,11 +128,13 @@ def _tool_mda_summary(ticker: str, llm: BaseChatModel) -> str:
         sentiment = result.get("sentiment_score", "N/A")
         outlook = result.get("future_outlook", "N/A")
         key_points = result.get("key_points", [])
-        summary = (
+        summary_text = result.get("summary", "")
+        response = (
+            f"MD&A Summary:\n{summary_text}\n\n"
             f"Management Sentiment: {sentiment}\n\n"
             f"Future Outlook: {outlook}\n\nKey Points:\n{_format_top_n(key_points, 3)}"
         )
-        return summary
+        return response
     return str(result)
 
 
@@ -152,14 +182,19 @@ def _tool_complete_10k_text(ticker: str, llm: BaseChatModel) -> str:
     """Return list of available major 10-K sections for the given ticker."""
     try:
         retriever = _get_shared_retriever(ticker)
-        result = {
-            "ticker": ticker,
-            "management_discussion": retriever.extract_management_discussion(),
-            "risk_factors": retriever.extract_risk_factors(),
-            "filing_type": "10-K comprehensive text",
-        }
-        sections = [key for key in result.keys() if key != "ticker"]
-        return f"Complete 10-K sections available: {', '.join(sections)}"
+        mda_data = retriever.get_mda_raw("10-K")
+        risk_data = retriever.get_risk_factors_raw("10-K")
+        
+        sections_available = []
+        if mda_data.get("found", False):
+            sections_available.append("Management Discussion & Analysis")
+        if risk_data.get("found", False):
+            sections_available.append("Risk Factors")
+        
+        if not sections_available:
+            return f"No 10-K sections found for {ticker}"
+        
+        return f"Complete 10-K sections available for {ticker}: {', '.join(sections_available)}"
     except Exception as e:
         return f"Failed to retrieve complete 10-K for {ticker}: {e}"
 
