@@ -15,18 +15,47 @@ class SECState(TypedDict):
     current_step: str
 
 
-def create_sec_agent(llm: BaseChatModel, ticker: str) -> Any:
+def create_sec_agent(llm: BaseChatModel, ticker: str, checkpointer=None) -> Any:
     """
     Create a ReAct agent with granular SEC tools.
     The agent can choose which specific tool to use based on the query.
+
+    Args:
+        llm: Language model for the agent
+        ticker: Company ticker symbol
+        checkpointer: Optional checkpointer for conversation memory
     """
     from agents.tools.sec_tools import create_sec_tools
 
     # Create tools using proper separation of concerns
     tools, llm_id = create_sec_tools(ticker, llm)
 
-    # Create a ReAct agent with the tools
-    agent = create_react_agent(llm, tools)
+    # System prompt that instructs the agent to use SEC tools
+    system_prompt = f"""You are an SEC filing analyst assistant for {ticker}.
+
+    You MUST use the available SEC tools to answer questions about this company.
+    DO NOT answer from your own knowledge - always use the tools to get accurate,
+    up-to-date information from SEC filings.
+
+    Available tools:
+    - get_risk_factors_summary: Get analyzed risk factors with sentiment scores
+    - get_raw_risk_factors: Get complete raw text of risk factors
+    - get_mda_summary: Get management discussion analysis
+    - get_raw_management_discussion: Get raw MD&A text
+    - get_balance_sheet_summary: Get financial health analysis
+    - get_raw_balance_sheets: Get balance sheet data
+    - get_complete_10k_text: Get available 10-K sections
+    - get_all_summaries: Get comprehensive overview
+
+    When the user asks about risks, financials, or management outlook, call the appropriate tool."""
+
+    # Create a ReAct agent with the tools, system prompt, and optional checkpointer
+    agent = create_react_agent(
+        llm,
+        tools,
+        prompt=system_prompt,
+        checkpointer=checkpointer,
+    )
 
     return agent, llm_id
 
