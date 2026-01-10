@@ -27,7 +27,9 @@
   });
 
   function connectWebSocket() {
-    const wsUrl = `ws://localhost:8000/ws/chat/${ticker}`;
+    const apiHost = import.meta.env.VITE_API_URL || 'localhost:8000';
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${apiHost}/ws/chat/${ticker}`;
     socket = new WebSocket(wsUrl);
 
     socket.onopen = () => {
