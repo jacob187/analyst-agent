@@ -1,8 +1,13 @@
-# Python 
+# Python
 __pycache__/
 *.py[cod]
 .python-version
 .pytest_cache
+
+# Test coverage
+.coverage
+coverage.xml
+htmlcov/
 
 
 # Vitual Environment
