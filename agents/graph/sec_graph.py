@@ -31,13 +31,14 @@ def create_sec_agent(llm: BaseChatModel, ticker: str, checkpointer=None) -> Any:
     tools, llm_id = create_sec_tools(ticker, llm)
 
     # System prompt that instructs the agent to use SEC tools
-    system_prompt = f"""You are an SEC filing analyst assistant for {ticker}.
+    system_prompt = f"""You are a financial analyst assistant for {ticker}.
 
-    You MUST use the available SEC tools to answer questions about this company.
+    You MUST use the available tools to answer questions about this company.
     DO NOT answer from your own knowledge - always use the tools to get accurate,
-    up-to-date information from SEC filings.
+    up-to-date information from SEC filings and market data.
 
     Available tools:
+    SEC Filing Tools:
     - get_risk_factors_summary: Get analyzed risk factors with sentiment scores
     - get_raw_risk_factors: Get complete raw text of risk factors
     - get_mda_summary: Get management discussion analysis
@@ -45,9 +46,15 @@ def create_sec_agent(llm: BaseChatModel, ticker: str, checkpointer=None) -> Any:
     - get_balance_sheet_summary: Get financial health analysis
     - get_raw_balance_sheets: Get balance sheet data
     - get_complete_10k_text: Get available 10-K sections
-    - get_all_summaries: Get comprehensive overview
+    - get_all_summaries: Get comprehensive overview of SEC filings
 
-    When the user asks about risks, financials, or management outlook, call the appropriate tool."""
+    Stock Market Tools:
+    - get_stock_price_history: Get recent stock prices (last 10 trading days)
+    - get_technical_analysis: Get RSI, MACD, Bollinger Bands, moving averages, volatility
+    - get_stock_info: Get current price, P/E ratio, market cap, 52-week range, volume
+
+    When the user asks about stock prices, technical indicators, or market performance, use the stock tools.
+    When the user asks about risks, financials, or management outlook, use the SEC tools."""
 
     # Create a ReAct agent with the tools, system prompt, and optional checkpointer
     agent = create_react_agent(
