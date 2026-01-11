@@ -11,8 +11,10 @@ services:
       - "${API_PORT:-8000}:8000"
     environment:
       - PYTHONPATH=/app
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-      - SEC_HEADER=${SEC_HEADER}
+      # API keys are now provided by users via the frontend
+      # These environment variables are optional for backward compatibility
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - SEC_HEADER=${SEC_HEADER:-}
     volumes:
       - ./api:/app/api
       - ./agents:/app/agents
@@ -38,8 +40,9 @@ services:
     container_name: analyst-agents
     environment:
       - PYTHONPATH=/app
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-      - SEC_HEADER=${SEC_HEADER}
+      # API keys are now provided by users via the frontend
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - SEC_HEADER=${SEC_HEADER:-}
     volumes:
       - ./agents:/app/agents
       - ./database:/app/database

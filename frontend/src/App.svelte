@@ -1,11 +1,25 @@
 <script lang="ts">
+  import ApiKeyInput from './lib/components/ApiKeyInput.svelte';
   import TickerInput from './lib/components/TickerInput.svelte';
   import ChatWindow from './lib/components/ChatWindow.svelte';
 
+  let googleApiKey: string | null = null;
+  let secHeader: string | null = null;
   let currentTicker: string | null = null;
+
+  function handleApiKeySubmit(event: CustomEvent<{ googleApiKey: string; secHeader: string }>) {
+    googleApiKey = event.detail.googleApiKey;
+    secHeader = event.detail.secHeader;
+  }
 
   function handleTickerSubmit(event: CustomEvent<string>) {
     currentTicker = event.detail;
+  }
+
+  function resetSession() {
+    currentTicker = null;
+    googleApiKey = null;
+    secHeader = null;
   }
 </script>
 
@@ -20,18 +34,16 @@
   </header>
 
   <main>
-    <div class="input-section">
-      <TickerInput on:submit={handleTickerSubmit} disabled={currentTicker !== null} />
-    </div>
-
-    {#if currentTicker}
-      <div class="chat-section">
-        <ChatWindow ticker={currentTicker} />
+    {#if !googleApiKey || !secHeader}
+      <!-- Step 1: API Key Configuration -->
+      <div class="config-section">
+        <ApiKeyInput on:submit={handleApiKeySubmit} />
       </div>
-      <button class="reset-btn" on:click={() => currentTicker = null}>
-        ← new ticker
-      </button>
-    {:else}
+    {:else if !currentTicker}
+      <!-- Step 2: Ticker Selection -->
+      <div class="input-section">
+        <TickerInput on:submit={handleTickerSubmit} disabled={false} />
+      </div>
       <div class="welcome">
         <div class="icon">📊</div>
         <h2>Enter a ticker symbol to begin</h2>
@@ -41,6 +53,26 @@
           <span>TSLA</span>
           <span>MSFT</span>
         </div>
+      </div>
+      <button class="reset-btn" on:click={resetSession}>
+        ← reconfigure API keys
+      </button>
+    {:else}
+      <!-- Step 3: Chat Interface -->
+      <div class="chat-section">
+        <ChatWindow
+          ticker={currentTicker}
+          googleApiKey={googleApiKey}
+          secHeader={secHeader}
+        />
+      </div>
+      <div class="actions-bar">
+        <button class="reset-btn" on:click={() => currentTicker = null}>
+          ← new ticker
+        </button>
+        <button class="reset-btn" on:click={resetSession}>
+          ← reconfigure
+        </button>
       </div>
     {/if}
   </main>
@@ -94,6 +126,11 @@
     gap: 1.5rem;
   }
 
+  .config-section {
+    width: 100%;
+    max-width: 600px;
+  }
+
   .input-section {
     width: 100%;
     max-width: 600px;
@@ -104,8 +141,13 @@
     min-height: 500px;
   }
 
+  .actions-bar {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
   .reset-btn {
-    align-self: flex-start;
     background: var(--bg-card);
     color: var(--text-dim);
     border: 1px solid var(--border);
