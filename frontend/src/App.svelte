@@ -2,10 +2,22 @@
   import ApiKeyInput from './lib/components/ApiKeyInput.svelte';
   import TickerInput from './lib/components/TickerInput.svelte';
   import ChatWindow from './lib/components/ChatWindow.svelte';
+  import AboutPage from './lib/components/about/AboutPage.svelte';
+
+  type Page = 'main' | 'about';
+  let currentPage: Page = 'main';
 
   let googleApiKey: string | null = null;
   let secHeader: string | null = null;
   let currentTicker: string | null = null;
+
+  function navigateToAbout() {
+    currentPage = 'about';
+  }
+
+  function navigateToMain() {
+    currentPage = 'main';
+  }
 
   function handleApiKeySubmit(event: CustomEvent<{ googleApiKey: string; secHeader: string }>) {
     googleApiKey = event.detail.googleApiKey;
@@ -25,16 +37,36 @@
 
 <div class="app-container">
   <header>
-    <div class="logo">
-      <span class="bracket">[</span>
-      <span class="title">ANALYST</span>
-      <span class="bracket">]</span>
+    <div class="header-content">
+      <button class="nav-link logo-link" on:click={navigateToMain}>
+        <span class="bracket">[</span>
+        <span class="title">ANALYST</span>
+        <span class="bracket">]</span>
+      </button>
+      <nav class="nav-links">
+        <button
+          class="nav-link"
+          class:active={currentPage === 'main'}
+          on:click={navigateToMain}
+        >
+          Terminal
+        </button>
+        <button
+          class="nav-link"
+          class:active={currentPage === 'about'}
+          on:click={navigateToAbout}
+        >
+          About
+        </button>
+      </nav>
     </div>
     <div class="subtitle">AI-Powered Financial Terminal</div>
   </header>
 
   <main>
-    {#if !googleApiKey || !secHeader}
+    {#if currentPage === 'about'}
+      <AboutPage on:back={navigateToMain} />
+    {:else if !googleApiKey || !secHeader}
       <!-- Step 1: API Key Configuration -->
       <div class="config-section">
         <ApiKeyInput on:submit={handleApiKeySubmit} />
@@ -117,6 +149,52 @@
     color: var(--text-dim);
     font-size: 0.9rem;
     letter-spacing: 0.05em;
+  }
+
+  .header-content {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+  }
+
+  .nav-links {
+    display: flex;
+    gap: 1.5rem;
+  }
+
+  .nav-link {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-family: inherit;
+    font-size: 0.9rem;
+    cursor: pointer;
+    padding: 0.3rem 0;
+    transition: color 0.2s;
+    letter-spacing: 0.05em;
+  }
+
+  .nav-link:hover {
+    color: var(--accent);
+  }
+
+  .nav-link.active {
+    color: var(--accent);
+    border-bottom: 1px solid var(--accent);
+  }
+
+  .logo-link {
+    font-size: 2rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    display: flex;
+    align-items: center;
+  }
+
+  .logo-link:hover .bracket,
+  .logo-link:hover .title {
+    color: var(--accent);
   }
 
   main {
@@ -225,6 +303,20 @@
 
     .logo {
       font-size: 1.5rem;
+    }
+
+    .logo-link {
+      font-size: 1.5rem;
+    }
+
+    .header-content {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.5rem;
+    }
+
+    .nav-links {
+      gap: 1rem;
     }
 
     .welcome {
