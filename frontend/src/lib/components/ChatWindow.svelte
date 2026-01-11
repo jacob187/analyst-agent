@@ -3,6 +3,8 @@
   import ChatMessage from './ChatMessage.svelte';
 
   export let ticker: string;
+  export let googleApiKey: string;
+  export let secHeader: string;
 
   interface Message {
     role: 'user' | 'assistant';
@@ -13,6 +15,7 @@
   let input = '';
   let socket: WebSocket | null = null;
   let connected = false;
+  let authenticated = false;
   let messagesContainer: HTMLElement;
 
   onMount(() => {
@@ -34,42 +37,79 @@
 
     socket.onopen = () => {
       connected = true;
-      messages = [{
-        role: 'assistant',
-        content: `Connected. Ready to analyze ${ticker}.`
-      }];
+      // Send authentication message first
+      socket?.send(JSON.stringify({
+        type: 'auth',
+        google_api_key: googleApiKey,
+        sec_header: secHeader
+      }));
     };
 
     socket.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      messages = [...messages, {
-        role: 'assistant',
-        content: data.message
-      }];
+
+      if (data.type === 'auth_success') {
+        authenticated = true;
+        messages = [{
+          role: 'assistant',
+          content: data.message
+        }];
+      } else if (data.type === 'system') {
+        messages = [...messages, {
+          role: 'assistant',
+          content: `[SYSTEM] ${data.message}`
+        }];
+      } else if (data.type === 'status') {
+        messages = [...messages, {
+          role: 'assistant',
+          content: `[STATUS] ${data.message}`
+        }];
+      } else if (data.type === 'response') {
+        messages = [...messages, {
+          role: 'assistant',
+          content: data.message
+        }];
+      } else if (data.type === 'error') {
+        messages = [...messages, {
+          role: 'assistant',
+          content: `[ERROR] ${data.message}`
+        }];
+      } else {
+        // Legacy format
+        messages = [...messages, {
+          role: 'assistant',
+          content: data.message || JSON.stringify(data)
+        }];
+      }
     };
 
     socket.onerror = () => {
       connected = false;
+      authenticated = false;
       messages = [...messages, {
         role: 'assistant',
-        content: 'Connection error. Is the API running?'
+        content: '[ERROR] Connection error. Is the API running?'
       }];
     };
 
     socket.onclose = () => {
       connected = false;
+      authenticated = false;
     };
   }
 
   function sendMessage() {
-    if (!input.trim() || !socket || !connected) return;
+    if (!input.trim() || !socket || !connected || !authenticated) return;
 
     messages = [...messages, {
       role: 'user',
       content: input
     }];
 
-    socket.send(input);
+    socket.send(JSON.stringify({
+      type: 'query',
+      message: input
+    }));
     input = '';
   }
 
