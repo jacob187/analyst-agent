@@ -2,15 +2,12 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Any, List, Optional
 
-from database.local_logger import LocalLogger
-
 
 class TechnicalIndicators:
     """Class to calculate technical indicators from stock data"""
 
     def __init__(self, ticker: str):
         self.ticker = ticker
-        self.logger = LocalLogger()
 
     def calculate_all_indicators(self, df: Optional[pd.DataFrame]) -> Dict[str, Any]:
         """Calculate all technical indicators from the provided DataFrame.
@@ -27,44 +24,13 @@ class TechnicalIndicators:
             )
             return {}
 
-        # Load fundamental data separately if needed for financial metrics
-        ticker_data = {}
-        try:
-            data = self.logger.read_json()
-            if self.ticker in data and "technical_agent" in data[self.ticker]:
-                ticker_data = data[self.ticker]["technical_agent"]
-        except Exception as e:
-            print(
-                f"Could not load existing data for {self.ticker} for financial metrics: {e}"
-            )
-
-        # Calculate indicators
-        indicators = {}
-
-        # Moving averages
-        indicators["moving_averages"] = self._calculate_moving_averages(df)
-
-        # RSI
-        indicators["rsi"] = self._calculate_rsi(df)
-
-        # MACD
-        indicators["macd"] = self._calculate_macd(df)
-
-        # Bollinger Bands
-        indicators["bollinger_bands"] = self._calculate_bollinger_bands(df)
-
-        # Volatility
-        indicators["volatility"] = self._calculate_volatility(df)
-
-        # Growth metrics from financials if available
-        if "financials" in ticker_data:
-            indicators["financial_metrics"] = self._calculate_financial_metrics(
-                ticker_data["financials"]
-            )
-        else:
-            indicators["financial_metrics"] = {}
-
-        return indicators
+        return {
+            "moving_averages": self._calculate_moving_averages(df),
+            "rsi": self._calculate_rsi(df),
+            "macd": self._calculate_macd(df),
+            "bollinger_bands": self._calculate_bollinger_bands(df),
+            "volatility": self._calculate_volatility(df),
+        }
 
     def _dict_to_dataframe(self, data: Dict[str, Any]) -> pd.DataFrame:
         """Convert dictionary data back to DataFrame"""
