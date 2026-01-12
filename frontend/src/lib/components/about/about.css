@@ -163,14 +163,25 @@
   font-size: 0.9rem;
 }
 
-/* Responsive */
+/* Tablet breakpoint */
 @media (max-width: 768px) {
   .about-page {
-    padding: 0 0.5rem 3rem 0.5rem;
+    padding: 0 0.5rem 2rem 0.5rem;
+  }
+
+  .back-btn {
+    margin-bottom: 1.5rem;
+    width: 100%;
+    text-align: center;
   }
 
   .section {
     padding: 1.5rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .section-title {
+    font-size: 1.15rem;
   }
 
   .ascii-art {
@@ -183,5 +194,99 @@
 
   .tech-grid {
     grid-template-columns: 1fr;
+  }
+
+  .tool-category {
+    padding: 1.2rem;
+  }
+
+  .tools-grid {
+    gap: 1.5rem;
+  }
+}
+
+/* Small mobile breakpoint */
+@media (max-width: 480px) {
+  .about-page {
+    padding: 0 0 1.5rem 0;
+  }
+
+  .back-btn {
+    padding: 0.5rem 1rem;
+    font-size: 0.8rem;
+    margin-bottom: 1rem;
+  }
+
+  .section {
+    padding: 1rem;
+    margin-bottom: 1rem;
+    border-radius: 6px;
+  }
+
+  .section-title {
+    font-size: 1.05rem;
+    padding-bottom: 0.6rem;
+    margin-bottom: 1rem;
+  }
+
+  .section-subtitle {
+    font-size: 0.9rem;
+  }
+
+  .section-text,
+  .section-desc {
+    font-size: 0.85rem;
+    line-height: 1.6;
+  }
+
+  .ascii-art {
+    font-size: 0.4rem;
+    line-height: 1.2;
+  }
+
+  .diagram {
+    padding: 0.4rem;
+    margin: 0.8rem 0;
+  }
+
+  .tools-grid {
+    gap: 1rem;
+  }
+
+  .tool-category {
+    padding: 1rem;
+  }
+
+  .tool-category-title {
+    font-size: 0.9rem;
+  }
+
+  .tool-category-desc {
+    font-size: 0.75rem;
+  }
+
+  .tool-card {
+    padding: 0.8rem;
+    margin-bottom: 0.6rem;
+  }
+
+  .tool-name {
+    font-size: 0.85rem;
+  }
+
+  .tool-desc {
+    font-size: 0.8rem;
+  }
+
+  .tech-item {
+    padding: 0.8rem;
+  }
+
+  .tech-label {
+    font-size: 0.7rem;
+  }
+
+  .tech-value {
+    font-size: 0.85rem;
   }
 }

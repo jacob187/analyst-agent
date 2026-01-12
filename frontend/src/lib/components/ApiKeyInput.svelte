@@ -238,4 +238,96 @@
   .help-item a:hover {
     text-decoration: underline;
   }
+
+  /* Tablet breakpoint */
+  @media (max-width: 768px) {
+    .api-key-input {
+      padding: 1.5rem;
+      max-width: 100%;
+    }
+
+    .header {
+      margin-bottom: 1.5rem;
+    }
+
+    .header h2 {
+      font-size: 1.2rem;
+    }
+
+    .actions {
+      flex-direction: column;
+      gap: 1rem;
+      align-items: stretch;
+    }
+
+    .show-keys {
+      justify-content: center;
+    }
+
+    .submit-btn {
+      width: 100%;
+      padding: 1rem 2rem;
+    }
+
+    input[type="text"],
+    input[type="password"] {
+      font-size: 16px; /* Prevents iOS zoom on focus */
+    }
+  }
+
+  /* Small mobile breakpoint */
+  @media (max-width: 480px) {
+    .api-key-input {
+      padding: 1rem;
+      border-radius: 6px;
+    }
+
+    .header {
+      margin-bottom: 1.2rem;
+    }
+
+    .header h2 {
+      font-size: 1.1rem;
+    }
+
+    .header p {
+      font-size: 0.8rem;
+    }
+
+    .input-group {
+      margin-bottom: 1.2rem;
+    }
+
+    .label-text {
+      font-size: 0.85rem;
+    }
+
+    .label-hint {
+      font-size: 0.7rem;
+    }
+
+    input[type="text"],
+    input[type="password"] {
+      padding: 0.7rem;
+    }
+
+    .actions {
+      margin-top: 1.5rem;
+      padding-top: 1.2rem;
+    }
+
+    .submit-btn {
+      padding: 0.9rem 1.5rem;
+      font-size: 0.85rem;
+    }
+
+    .help {
+      margin-top: 1.2rem;
+      padding-top: 1.2rem;
+    }
+
+    .help-item {
+      font-size: 0.75rem;
+    }
+  }
 </style>

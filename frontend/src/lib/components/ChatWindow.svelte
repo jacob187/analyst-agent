@@ -265,4 +265,74 @@
     opacity: 0.4;
     cursor: not-allowed;
   }
+
+  /* Tablet breakpoint */
+  @media (max-width: 768px) {
+    .header {
+      padding: 0.8rem 1rem;
+    }
+
+    .symbol {
+      font-size: 1.25rem;
+    }
+
+    .messages {
+      padding: 1rem;
+      min-height: 300px;
+    }
+
+    .input-area {
+      padding: 0.8rem 1rem;
+      flex-direction: column;
+    }
+
+    textarea {
+      font-size: 16px; /* Prevents iOS zoom on focus */
+    }
+
+    button {
+      width: 100%;
+      padding: 0.9rem 1.5rem;
+    }
+  }
+
+  /* Small mobile breakpoint */
+  @media (max-width: 480px) {
+    .header {
+      padding: 0.6rem 0.8rem;
+    }
+
+    .ticker-display {
+      gap: 0.6rem;
+    }
+
+    .symbol {
+      font-size: 1.1rem;
+    }
+
+    .status {
+      padding: 0.15rem 0.5rem;
+      font-size: 0.65rem;
+    }
+
+    .messages {
+      padding: 0.8rem;
+      min-height: 250px;
+    }
+
+    .input-area {
+      padding: 0.6rem 0.8rem;
+      gap: 0.6rem;
+    }
+
+    textarea {
+      padding: 0.7rem;
+      rows: 2;
+    }
+
+    button {
+      padding: 0.8rem 1rem;
+      font-size: 0.8rem;
+    }
+  }
 </style>

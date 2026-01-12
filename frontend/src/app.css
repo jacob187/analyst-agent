@@ -49,3 +49,25 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-muted);
 }
+
+/* Mobile-friendly touch targets */
+@media (max-width: 768px) {
+  button,
+  input[type="submit"],
+  .nav-link {
+    min-height: 44px; /* iOS recommended touch target */
+  }
+
+  /* Improve tap highlighting on mobile */
+  button,
+  a,
+  input,
+  textarea {
+    -webkit-tap-highlight-color: rgba(0, 212, 255, 0.1);
+  }
+}
+
+/* Prevent horizontal scroll on mobile */
+html, body {
+  overflow-x: hidden;
+}

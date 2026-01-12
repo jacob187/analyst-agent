@@ -102,4 +102,42 @@
     opacity: 0.4;
     cursor: not-allowed;
   }
+
+  /* Tablet breakpoint */
+  @media (max-width: 768px) {
+    .ticker-input {
+      flex-wrap: wrap;
+      padding: 0.8rem 1rem;
+    }
+
+    input {
+      font-size: 16px; /* Prevents iOS zoom on focus */
+      min-width: 0;
+    }
+
+    button {
+      padding: 0.5rem 1.2rem;
+    }
+  }
+
+  /* Small mobile breakpoint */
+  @media (max-width: 480px) {
+    .ticker-input {
+      gap: 0.6rem;
+      padding: 0.6rem 0.8rem;
+    }
+
+    .prompt {
+      font-size: 1rem;
+    }
+
+    input {
+      font-size: 16px;
+    }
+
+    button {
+      padding: 0.45rem 0.9rem;
+      font-size: 0.8rem;
+    }
+  }
 </style>

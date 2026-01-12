@@ -63,4 +63,33 @@
     background: var(--bg-card);
     border-left: 2px solid var(--success);
   }
+
+  /* Tablet breakpoint */
+  @media (max-width: 768px) {
+    .message {
+      margin-bottom: 1rem;
+    }
+
+    .content {
+      padding: 0.7rem 0.9rem;
+      font-size: 0.9rem;
+    }
+  }
+
+  /* Small mobile breakpoint */
+  @media (max-width: 480px) {
+    .message {
+      margin-bottom: 0.8rem;
+    }
+
+    .label {
+      font-size: 0.65rem;
+    }
+
+    .content {
+      padding: 0.6rem 0.8rem;
+      font-size: 0.85rem;
+      line-height: 1.4;
+    }
+  }
 </style>
