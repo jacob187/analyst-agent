@@ -18,6 +18,7 @@ COPY agents ./agents
 
 ENV PYTHONPATH=/app
 ENV PATH="/app/.venv/bin:$PATH"
+ENV PORT=8000
 EXPOSE 8000
 
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD uvicorn api.main:app --host 0.0.0.0 --port $PORT
