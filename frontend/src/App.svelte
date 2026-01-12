@@ -296,6 +296,7 @@
     font-size: 0.8rem;
   }
 
+  /* Tablet breakpoint */
   @media (max-width: 768px) {
     .app-container {
       padding: 1rem;
@@ -319,14 +320,118 @@
       gap: 1rem;
     }
 
+    .config-section,
+    .input-section {
+      max-width: 100%;
+    }
+
+    .chat-section {
+      min-height: 400px;
+    }
+
     .welcome {
       padding: 2rem 1rem;
+    }
+
+    .icon {
+      font-size: 3rem;
+    }
+
+    .welcome h2 {
+      font-size: 1.3rem;
+    }
+
+    .welcome p {
+      font-size: 0.9rem;
     }
 
     .examples {
       flex-direction: column;
       width: 100%;
       max-width: 300px;
+    }
+
+    .actions-bar {
+      flex-direction: column;
+    }
+
+    .reset-btn {
+      width: 100%;
+      text-align: center;
+    }
+  }
+
+  /* Small mobile breakpoint */
+  @media (max-width: 480px) {
+    .app-container {
+      padding: 0.8rem;
+    }
+
+    header {
+      margin-bottom: 1.5rem;
+    }
+
+    .logo-link {
+      font-size: 1.3rem;
+    }
+
+    .subtitle {
+      font-size: 0.75rem;
+    }
+
+    .nav-link {
+      font-size: 0.8rem;
+      padding: 0.2rem 0;
+    }
+
+    main {
+      gap: 1rem;
+    }
+
+    .chat-section {
+      min-height: 350px;
+    }
+
+    .welcome {
+      padding: 1.5rem 0.5rem;
+    }
+
+    .icon {
+      font-size: 2.5rem;
+      margin-bottom: 1rem;
+    }
+
+    .welcome h2 {
+      font-size: 1.1rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .welcome p {
+      font-size: 0.85rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .examples {
+      gap: 0.6rem;
+    }
+
+    .examples span {
+      padding: 0.4rem 0.8rem;
+      font-size: 0.85rem;
+    }
+
+    .reset-btn {
+      padding: 0.5rem 1rem;
+      font-size: 0.8rem;
+    }
+
+    footer {
+      margin-top: 1.5rem;
+      padding-top: 1rem;
+    }
+
+    .disclaimer {
+      font-size: 0.7rem;
     }
   }
 </style>
