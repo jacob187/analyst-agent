@@ -7,37 +7,34 @@ authors = [
 ]
 license = {text = "MIT"}
 readme = "README.md"
-requires-python = ">=3.12,<4.0"
+requires-python = ">=3.12"
 
 dependencies = [
-    "edgartools>=3.14.2,<4.0.0",
-    "python-dotenv (>=1.1.0,<2.0.0)",
-    "langchain (>=0.3.22,<0.4.0)",
-    "langchain-community (>=0.3.20,<0.4.0)",
-    "langchain-openai (>=0.3.11,<0.4.0)",
-    "yfinance (>=0.2.55,<0.3.0)",
-    "pytest (>=8.3.5,<9.0.0)",
-    "langchain-google-genai (>=2.1.4,<3.0.0)",
-    "langgraph (>=0.6.4,<0.7.0)",
-    "mcp>=1.1.2",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "edgartools>=3.14.2",
+    "python-dotenv>=1.1.0",
+    "langchain>=0.3.22",
+    "langchain-community>=0.3.20",
+    "langchain-openai>=0.3.11",
+    "langchain-google-genai>=2.1.4",
+    "langgraph>=0.6.4",
+    "yfinance>=0.2.55",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.1.0",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "pytest>=8.3.5",
     "pytest-cov>=6.0.0",
     "pytest-asyncio>=0.24.0",
     "pytest-mock>=3.14.0",
-    "responses>=0.25.3",
-    "freezegun>=1.5.1",
 ]
 
-[tool.poetry]
-packages = [
-    {include = "database"}
-]  # Fixed to match your actual directory structure
-
 [build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-pythonpath = ["."]
+[tool.hatch.build.targets.wheel]
+packages = ["api", "agents", "database"]
