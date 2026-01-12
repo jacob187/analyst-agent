@@ -1,15 +1,16 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
 
-  const dispatch = createEventDispatcher<{ submit: { googleApiKey: string; secHeader: string } }>();
+  const dispatch = createEventDispatcher<{ submit: { googleApiKey: string; secHeader: string; tavilyApiKey: string } }>();
 
   let googleApiKey = '';
   let secHeader = '';
+  let tavilyApiKey = '';
   let showKeys = false;
 
   function handleSubmit() {
     if (googleApiKey.trim() && secHeader.trim()) {
-      dispatch('submit', { googleApiKey, secHeader });
+      dispatch('submit', { googleApiKey, secHeader, tavilyApiKey });
     }
   }
 
@@ -61,6 +62,23 @@
     </div>
   </div>
 
+  <div class="input-group optional">
+    <label for="tavily-api-key">
+      <span class="label-text">Tavily API Key <span class="optional-badge">Optional</span></span>
+      <span class="label-hint">Enables web research, news, and competitor analysis</span>
+    </label>
+    <div class="input-wrapper">
+      <input
+        id="tavily-api-key"
+        type={showKeys ? 'text' : 'password'}
+        bind:value={tavilyApiKey}
+        on:keydown={handleKeydown}
+        placeholder="tvly-..."
+        autocomplete="off"
+      />
+    </div>
+  </div>
+
   <div class="actions">
     <label class="show-keys">
       <input type="checkbox" bind:checked={showKeys} />
@@ -87,6 +105,12 @@
       <strong>SEC requires</strong> a valid email in the User-Agent header per their
       <a href="https://www.sec.gov/os/webmaster-faq#code-support" target="_blank" rel="noopener">
         fair access policy
+      </a>
+    </div>
+    <div class="help-item">
+      <strong>Tavily API Key (optional):</strong> Enables deep web research at
+      <a href="https://app.tavily.com/sign-in" target="_blank" rel="noopener">
+        Tavily
       </a>
     </div>
   </div>
@@ -137,6 +161,24 @@
   .label-hint {
     color: var(--text-muted);
     font-size: 0.75rem;
+  }
+
+  .optional-badge {
+    background: rgba(0, 255, 157, 0.15);
+    color: var(--accent);
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-left: 0.4rem;
+  }
+
+  .input-group.optional {
+    opacity: 0.9;
+    border-left: 2px solid var(--border);
+    padding-left: 1rem;
   }
 
   .input-wrapper {

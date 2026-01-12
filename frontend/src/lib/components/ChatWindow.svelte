@@ -5,6 +5,7 @@
   export let ticker: string;
   export let googleApiKey: string;
   export let secHeader: string;
+  export let tavilyApiKey: string = '';
 
   interface Message {
     role: 'user' | 'assistant';
@@ -38,11 +39,15 @@
     socket.onopen = () => {
       connected = true;
       // Send authentication message first
-      socket?.send(JSON.stringify({
+      const authPayload: Record<string, string> = {
         type: 'auth',
         google_api_key: googleApiKey,
         sec_header: secHeader
-      }));
+      };
+      if (tavilyApiKey.trim()) {
+        authPayload.tavily_api_key = tavilyApiKey;
+      }
+      socket?.send(JSON.stringify(authPayload));
     };
 
     socket.onmessage = (event) => {
