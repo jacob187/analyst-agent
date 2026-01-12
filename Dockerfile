@@ -1,3 +1,6 @@
+# Railway-compatible Dockerfile for API service
+# Build from repo root to access all directories
+
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -20,10 +23,10 @@ RUN pip install --no-cache-dir \
     langgraph>=0.6.4 \
     yfinance>=0.2.55
 
-# Copy application code
-COPY . /app/api
-COPY ../agents /app/agents
-COPY ../database /app/database
+# Copy application code from repo root
+COPY api /app/api
+COPY agents /app/agents
+COPY database /app/database
 
 ENV PYTHONPATH=/app
 
