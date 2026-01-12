@@ -1,10 +1,8 @@
 from edgar import Company, set_identity
-from dotenv import load_dotenv
 import os
 import json
 from typing import Literal, Optional, Dict, Any
 from datetime import datetime
-from database.local_logger import LocalLogger
 
 
 class FilingMetadata:
@@ -47,33 +45,19 @@ class FilingMetadata:
 
 class SECDataRetrieval:
     def __init__(self, ticker: str):
-        load_dotenv()
-        self.logger = LocalLogger()
         sec_header = os.getenv("SEC_HEADER")
         if not sec_header:
-            error_msg = (
-                "SEC_HEADER environment variable is not set. "
-                "Please set it in your .env file with your name and email. "
-                "Example: 'Your Name (your_email@example.com)'"
-            )
-            self.logger.log_message("ERROR", error_msg)
-            raise ValueError(error_msg)
+            raise ValueError("SEC_HEADER environment variable is not set")
         set_identity(sec_header)
-        try:
-            self.ticker = ticker
-            self.company = Company(ticker)
-            # Lazy caches
-            self._tenk_filing = None
-            self._tenq_filing = None
-            self._tenk_obj = None
-            self._tenq_obj = None
-            self._tenk_metadata = None
-            self._tenq_metadata = None
-        except Exception as e:
-            error_msg = f"Failed to initialize company in SECDataRetrieval: {e}"
-            self.logger.log_message("ERROR", error_msg)
-            print(error_msg)
-            raise
+        self.ticker = ticker
+        self.company = Company(ticker)
+        # Lazy caches
+        self._tenk_filing = None
+        self._tenq_filing = None
+        self._tenk_obj = None
+        self._tenq_obj = None
+        self._tenk_metadata = None
+        self._tenq_metadata = None
 
     def check_filing_availability(self) -> Dict[str, Any]:
         """Check what filings are available for this company.
