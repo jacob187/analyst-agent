@@ -9,6 +9,7 @@
 
   let googleApiKey: string | null = null;
   let secHeader: string | null = null;
+  let tavilyApiKey: string = '';
   let currentTicker: string | null = null;
 
   function navigateToAbout() {
@@ -19,9 +20,10 @@
     currentPage = 'main';
   }
 
-  function handleApiKeySubmit(event: CustomEvent<{ googleApiKey: string; secHeader: string }>) {
+  function handleApiKeySubmit(event: CustomEvent<{ googleApiKey: string; secHeader: string; tavilyApiKey: string }>) {
     googleApiKey = event.detail.googleApiKey;
     secHeader = event.detail.secHeader;
+    tavilyApiKey = event.detail.tavilyApiKey || '';
   }
 
   function handleTickerSubmit(event: CustomEvent<string>) {
@@ -32,6 +34,7 @@
     currentTicker = null;
     googleApiKey = null;
     secHeader = null;
+    tavilyApiKey = '';
   }
 </script>
 
@@ -96,6 +99,7 @@
           ticker={currentTicker}
           googleApiKey={googleApiKey}
           secHeader={secHeader}
+          tavilyApiKey={tavilyApiKey}
         />
       </div>
       <div class="actions-bar">

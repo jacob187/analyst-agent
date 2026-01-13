@@ -1,4 +1,4 @@
-from typing import Dict, Any, TypedDict, Annotated
+from typing import Dict, Any, TypedDict, Annotated, Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
@@ -15,20 +15,49 @@ class SECState(TypedDict):
     current_step: str
 
 
-def create_sec_agent(llm: BaseChatModel, ticker: str, checkpointer=None) -> Any:
+def create_sec_agent(
+    llm: BaseChatModel,
+    ticker: str,
+    checkpointer=None,
+    tavily_api_key: Optional[str] = None,
+) -> Any:
     """
-    Create a ReAct agent with granular SEC tools.
+    Create a ReAct agent with granular SEC tools and optional research tools.
     The agent can choose which specific tool to use based on the query.
 
     Args:
         llm: Language model for the agent
         ticker: Company ticker symbol
         checkpointer: Optional checkpointer for conversation memory
+        tavily_api_key: Optional Tavily API key for web research tools
     """
     from agents.tools.sec_tools import create_sec_tools
 
-    # Create tools using proper separation of concerns
+    # Create SEC tools using proper separation of concerns
     tools, llm_id = create_sec_tools(ticker, llm)
+
+    # Add research tools if Tavily API key is provided
+    research_tools_section = ""
+    if tavily_api_key:
+        from agents.tools.research_tools import create_research_tools
+
+        research_tools = create_research_tools(ticker, tavily_api_key)
+        tools.extend(research_tools)
+        research_tools_section = """
+
+    Web Research Tools (Tavily):
+    - web_search: Search the web for current information about the company
+    - deep_research: Perform comprehensive research on a specific topic (use for complex questions)
+    - get_company_news: Get the latest news and developments
+    - analyze_competitors: Research competitors and market positioning
+    - get_industry_trends: Research industry trends and outlook
+
+    Use research tools when you need:
+    - Current news or recent events not in SEC filings
+    - Competitor analysis and market positioning
+    - Industry trends and market outlook
+    - Real-time information beyond what's in official filings
+    - Verification of information from multiple sources"""
 
     # System prompt that instructs the agent to use SEC tools
     system_prompt = f"""You are a financial analyst assistant for {ticker}.
@@ -51,10 +80,11 @@ def create_sec_agent(llm: BaseChatModel, ticker: str, checkpointer=None) -> Any:
     Stock Market Tools:
     - get_stock_price_history: Get recent stock prices (last 10 trading days)
     - get_technical_analysis: Get RSI, MACD, Bollinger Bands, moving averages, volatility
-    - get_stock_info: Get current price, P/E ratio, market cap, 52-week range, volume
+    - get_stock_info: Get current price, P/E ratio, market cap, 52-week range, volume{research_tools_section}
 
     When the user asks about stock prices, technical indicators, or market performance, use the stock tools.
-    When the user asks about risks, financials, or management outlook, use the SEC tools."""
+    When the user asks about risks, financials, or management outlook, use the SEC tools.
+    When the user asks about news, competitors, industry trends, or needs current information, use the research tools."""
 
     # Create a ReAct agent with the tools, system prompt, and optional checkpointer
     agent = create_react_agent(
@@ -136,16 +166,23 @@ def initialize_sec_tools_for_ticker(ticker: str, llm: BaseChatModel) -> Dict[str
     }
 
 
-def create_sec_qa_agent(ticker: str, llm: BaseChatModel) -> Any:
+def create_sec_qa_agent(
+    ticker: str,
+    llm: BaseChatModel,
+    tavily_api_key: Optional[str] = None,
+) -> Any:
     """
     Create a Q&A agent that can answer questions about SEC filings using granular tools.
 
     Args:
         ticker: Company ticker symbol
         llm: Language model for processing
+        tavily_api_key: Optional Tavily API key for web research tools
 
     Returns:
         Configured agent that can answer SEC-related questions
     """
-    agent, tools_factory = create_sec_agent(llm, ticker)
+    agent, tools_factory = create_sec_agent(
+        llm, ticker, tavily_api_key=tavily_api_key
+    )
     return agent
