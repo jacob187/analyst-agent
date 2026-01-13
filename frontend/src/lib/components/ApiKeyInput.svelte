@@ -24,7 +24,7 @@
 <div class="api-key-input">
   <div class="header">
     <h2>Configure API Access</h2>
-    <p>Your keys are only sent to your self-hosted backend. Never stored.</p>
+    <p>Keys are encrypted in transit via HTTPS and used only for your session. Never stored.</p>
   </div>
 
   <div class="input-group">
