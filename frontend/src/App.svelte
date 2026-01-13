@@ -26,11 +26,11 @@
 <div class="app-container">
   <header>
     <div class="header-content">
-      <button class="nav-link logo-link" on:click={navigateToMain}>
+      <div class="logo">
         <span class="bracket">[</span>
         <span class="title">ANALYST</span>
         <span class="bracket">]</span>
-      </button>
+      </div>
     </div>
     <div class="subtitle">AI-Powered Financial Terminal</div>
   </header>
@@ -126,35 +126,6 @@
     align-items: center;
     justify-content: space-between;
     margin-bottom: 0.5rem;
-  }
-
-  .nav-link {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font-family: inherit;
-    font-size: 0.9rem;
-    cursor: pointer;
-    padding: 0.3rem 0;
-    transition: color 0.2s;
-    letter-spacing: 0.05em;
-  }
-
-  .nav-link:hover {
-    color: var(--accent);
-  }
-
-  .logo-link {
-    font-size: 2rem;
-    font-weight: 700;
-    letter-spacing: 0.1em;
-    display: flex;
-    align-items: center;
-  }
-
-  .logo-link:hover .bracket,
-  .logo-link:hover .title {
-    color: var(--accent);
   }
 
   main {
@@ -266,10 +237,6 @@
       font-size: 1.5rem;
     }
 
-    .logo-link {
-      font-size: 1.5rem;
-    }
-
     .header-content {
       flex-direction: column;
       align-items: flex-start;
@@ -327,17 +294,12 @@
       margin-bottom: 1.5rem;
     }
 
-    .logo-link {
+    .logo {
       font-size: 1.3rem;
     }
 
     .subtitle {
       font-size: 0.75rem;
-    }
-
-    .nav-link {
-      font-size: 0.8rem;
-      padding: 0.2rem 0;
     }
 
     main {
