@@ -38,6 +38,7 @@ async def chat(websocket: WebSocket, ticker: str):
 
         google_api_key = auth_message.get("google_api_key")
         sec_header = auth_message.get("sec_header")
+        tavily_api_key = auth_message.get("tavily_api_key")  # Optional
 
         if not google_api_key or not sec_header:
             await websocket.send_json({
@@ -50,10 +51,13 @@ async def chat(websocket: WebSocket, ticker: str):
         # Set environment variables for this session
         os.environ["GOOGLE_API_KEY"] = google_api_key
         os.environ["SEC_HEADER"] = sec_header
+        if tavily_api_key:
+            os.environ["TAVILY_API_KEY"] = tavily_api_key
 
+        research_status = "Web research enabled" if tavily_api_key else "Web research disabled (no Tavily API key)"
         await websocket.send_json({
             "type": "auth_success",
-            "message": f"Connected to {ticker}. Ready to analyze."
+            "message": f"Connected to {ticker}. {research_status}. Ready to analyze."
         })
 
         # Import and initialize LangGraph agent
@@ -67,11 +71,12 @@ async def chat(websocket: WebSocket, ticker: str):
                 temperature=0
             )
 
-            agent = create_sec_qa_agent(ticker, llm)
+            agent = create_sec_qa_agent(ticker, llm, tavily_api_key=tavily_api_key)
 
+            tools_count = "16 tools" if tavily_api_key else "11 tools"
             await websocket.send_json({
                 "type": "system",
-                "message": f"Agent initialized for {ticker}"
+                "message": f"Agent initialized for {ticker} with {tools_count}"
             })
 
         except Exception as e:
