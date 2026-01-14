@@ -1,12 +1,24 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 import sys
 import os
 import json
+import asyncio
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-app = FastAPI(title="Analyst Agent API")
+from api.db import init_db, close_db, create_session, save_message, get_sessions, get_session_messages
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: initialize database
+    await init_db()
+    yield
+    # Shutdown: close database connection
+    await close_db()
+
+app = FastAPI(title="Analyst Agent API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -19,6 +31,18 @@ app.add_middleware(
 @app.get("/health")
 def health():
     return {"status": "healthy"}
+
+@app.get("/sessions")
+async def list_sessions(limit: int = 50):
+    """List recent chat sessions."""
+    sessions = await get_sessions(limit)
+    return {"sessions": sessions}
+
+@app.get("/sessions/{session_id}/messages")
+async def get_messages(session_id: str):
+    """Get all messages for a session."""
+    messages = await get_session_messages(session_id)
+    return {"messages": messages}
 
 @app.websocket("/ws/chat/{ticker}")
 async def chat(websocket: WebSocket, ticker: str):
@@ -54,10 +78,14 @@ async def chat(websocket: WebSocket, ticker: str):
         if tavily_api_key:
             os.environ["TAVILY_API_KEY"] = tavily_api_key
 
+        # Create a new chat session
+        session_id = await create_session(ticker)
+
         research_status = "Web research enabled" if tavily_api_key else "Web research disabled (no Tavily API key)"
         await websocket.send_json({
             "type": "auth_success",
-            "message": f"Connected to {ticker}. {research_status}. Ready to analyze."
+            "message": f"Connected to {ticker}. {research_status}. Ready to analyze.",
+            "session_id": session_id
         })
 
         # Import and initialize LangGraph agent
@@ -95,6 +123,9 @@ async def chat(websocket: WebSocket, ticker: str):
                 if message.get("type") == "query":
                     user_query = message.get("message", "")
 
+                    # Save user message (fire-and-forget)
+                    asyncio.create_task(save_message(session_id, "user", user_query))
+
                     # Stream agent response
                     await websocket.send_json({
                         "type": "status",
@@ -110,6 +141,9 @@ async def chat(websocket: WebSocket, ticker: str):
                             response = result["messages"][-1].content
                         else:
                             response = str(result)
+
+                        # Save assistant response (fire-and-forget)
+                        asyncio.create_task(save_message(session_id, "assistant", response))
 
                         await websocket.send_json({
                             "type": "response",
