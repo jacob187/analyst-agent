@@ -1,93 +1,183 @@
 # Stock Analyst Agent
 
-An AI-powered financial analysis system that retrieves, processes, and analyzes financial data from multiple sources including SEC filings and market data.
+A full-stack AI-powered financial analysis application that combines SEC filings analysis, technical indicators, and real-time web research through an interactive chat interface.
+
+## Tech Stack
+
+### Frontend
+- **Svelte 5** - Reactive UI framework
+- **TypeScript** - Type-safe JavaScript
+- **Vite** - Build tool and dev server
+
+### Backend
+- **FastAPI** - Python async web framework
+- **WebSocket** - Real-time bidirectional communication
+- **LangGraph** - Graph-based AI agent orchestration
+- **LangChain** - LLM framework with Google Gemini
+
+### Data Sources
+- **SEC EDGAR** - 10-K and 10-Q filings via edgartools
+- **Yahoo Finance** - Market data and technical indicators
+- **Tavily** - Web research and news (optional)
 
 ## Features
 
-- **SEC Filings Analysis**: Extracts and analyzes Management Discussion & Analysis, Risk Factors, and Balance Sheets
-- **Technical Analysis**: Calculates technical indicators like RSI, MACD, moving averages, and more
-- **Structured Data**: Uses structured JSON format for all data storage and retrieval
-- **Modular Architecture**: Follows SOLID principles with clear separation of concerns
+- **Interactive Chat Interface**: Real-time WebSocket communication with AI agent
+- **SEC Filings Analysis**: Extracts and analyzes MD&A, Risk Factors, and Balance Sheets
+- **Technical Analysis**: RSI, MACD, Bollinger Bands, moving averages, and more
+- **Web Research**: Company news, competitor analysis, and industry trends (with Tavily)
+- **ReAct Agent Pattern**: Reason → Act → Observe → Synthesize workflow
+- **Smart Caching**: Minimizes redundant API calls for efficient data retrieval
 
 ## Installation
 
-1. Ensure you have Python 3.12+ installed
-2. Clone this repository
-3. Install dependencies:
+### Prerequisites
+- Python 3.12+
+- Node.js 20+
+- [uv](https://github.com/astral-sh/uv) (Python package manager)
+
+### Backend Setup
 
 ```bash
+# Install Python dependencies
+uv sync
+
+# Or using pip/poetry
 pip install poetry
 poetry install
 ```
 
-4. Create a `.env` file with your API keys:
-
-```
-GOOGLE_API_KEY=your_google_api_key
-SEC_HEADER="your-name your@email.com"  # Required for SEC Edgar API
-```
-
-## Usage
-
-### Basic Usage
-
-Run a complete analysis for a stock:
+### Frontend Setup
 
 ```bash
-poetry run python agents/main_agent.py TICKER
+cd frontend
+npm install
 ```
 
-Replace `TICKER` with the stock symbol you want to analyze (e.g., AAPL, MSFT, NVDA).
+## Running the Application
 
-### Run Only SEC Analysis
+### Option 1: Docker Compose (Recommended)
 
 ```bash
-poetry run python agents TICKER
+docker-compose up
 ```
 
-### Run Only Technical Analysis
+- API: http://localhost:8000
+- Frontend: http://localhost:3001
+
+### Option 2: Local Development
+
+Terminal 1 - Backend:
+```bash
+uvicorn api.main:app --host 0.0.0.0 --port 8000
+```
+
+Terminal 2 - Frontend:
+```bash
+cd frontend
+npm run dev
+```
+
+- API: http://localhost:8000
+- Frontend: http://localhost:5173
+
+### Frontend Commands
 
 ```bash
-poetry run python agents/technical_workflow/main_technical_workflow.py TICKER
+npm run dev      # Development server with hot reload
+npm run build    # Production build
+npm run preview  # Preview production build
+npm run check    # Type checking and linting
 ```
 
-### Output
+## API Endpoints
 
-The tool will generate a JSON output with the analysis results, including:
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check |
+| `/ws/chat/{ticker}` | WebSocket | Chat interface for stock analysis |
 
-- Fundamental analysis from SEC filings
-- Technical indicators and signals
-- Overall recommendation (buy/hold/sell)
-- Confidence level and key reasons for the recommendation
+### WebSocket Message Types
 
-All data is also stored in the `data/data.json` file for future reference.
+- `auth` - Authentication with API keys
+- `query` - User question about the stock
+- `response` - AI agent response
+- `status` - Agent status updates
+- `error` - Error messages
 
-## Components
+## Architecture
 
-### SEC Agent
+```
+┌─────────────────┐     WebSocket      ┌─────────────────┐
+│    Frontend     │◄──────────────────►│    FastAPI      │
+│    (Svelte)     │                    │    Backend      │
+└─────────────────┘                    └────────┬────────┘
+                                                │
+                                       ┌────────▼────────┐
+                                       │  LangGraph      │
+                                       │  ReAct Agent    │
+                                       └────────┬────────┘
+                                                │
+                    ┌───────────────────────────┼───────────────────────────┐
+                    │                           │                           │
+           ┌────────▼────────┐        ┌────────▼────────┐        ┌────────▼────────┐
+           │   SEC Tools     │        │  Stock Tools    │        │ Research Tools  │
+           │  (edgartools)   │        │  (yfinance)     │        │   (Tavily)      │
+           └─────────────────┘        └─────────────────┘        └─────────────────┘
+```
 
-Analyzes SEC filings (10-K and 10-Q) to extract critical financial information:
+## Available Tools
 
-- Extracts Management Discussion & Analysis
-- Extracts Risk Factors
-- Extracts Balance Sheets in structured JSON format
-- Analyzes text using LLMs to extract insights
+### SEC Filing Tools
+- `get_risk_factors_summary` - Analyzed risks with sentiment scores
+- `get_mda_summary` - MD&A analysis with outlook and key points
+- `get_balance_sheet_summary` - Financial health with red flags
+- `get_all_summaries` - Comprehensive overview
 
-### Technical Agent
+### Stock Market Tools
+- `get_stock_price_history` - Last 10 trading days OHLC data
+- `get_technical_analysis` - RSI, MACD, Bollinger Bands, moving averages
+- `get_stock_info` - Current price, P/E, market cap, 52-week range
 
-Retrieves and analyzes market data from Yahoo Finance:
+### Research Tools (Requires Tavily API Key)
+- `web_search` - General company information search
+- `deep_research` - Multi-source comprehensive research
+- `get_company_news` - Latest news and developments
+- `analyze_competitors` - Market positioning analysis
+- `get_industry_trends` - Industry outlook forecasts
 
-- Retrieves historical price data
-- Calculates technical indicators (RSI, MACD, etc.)
-- Provides market context to supplement fundamental analysis
+## CLI Usage
 
-### Analyst Agent
-
-- There is support for a ReAct agent that uses the SEC tools in `agents/tools/sec_tools`
-- To interact with the graph run the CLI application:
+For direct agent interaction without the web interface:
 
 ```bash
 poetry run python cli/sec_langgraph_cli.py
+```
+
+## Project Structure
+
+```
+analyst-agent/
+├── api/                    # FastAPI backend
+│   └── main.py            # WebSocket and HTTP endpoints
+├── agents/                 # AI agent implementation
+│   ├── tools/             # Tool definitions
+│   │   ├── sec_tools.py   # SEC filing tools
+│   │   ├── stock_tools.py # Market data tools
+│   │   └── research_tools.py # Tavily research tools
+│   └── sec_agent.py       # LangGraph ReAct agent
+├── frontend/              # Svelte frontend
+│   ├── src/
+│   │   ├── App.svelte     # Main application
+│   │   ├── ChatWindow.svelte
+│   │   ├── ApiKeyInput.svelte
+│   │   └── TickerInput.svelte
+│   └── package.json
+├── cli/                   # Command-line interface
+├── data/                  # Data storage
+├── docker-compose.yml
+├── Dockerfile
+└── pyproject.toml
 ```
 
 ## License
@@ -96,6 +186,9 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Acknowledgments
 
-- This project uses [Edgar Tools](https://github.com/dgunning/edgartools) for SEC filings retrieval
-- Market data is retrieved using [Yahoo Finance](https://pypi.org/project/yfinance/)
-- Language models are powered by OpenAI's API via [LangChain](https://python.langchain.com/)
+- [Edgar Tools](https://github.com/dgunning/edgartools) - SEC filings retrieval
+- [Yahoo Finance](https://pypi.org/project/yfinance/) - Market data
+- [LangChain](https://python.langchain.com/) - LLM orchestration
+- [LangGraph](https://langchain-ai.github.io/langgraph/) - Agent framework
+- [Tavily](https://tavily.com/) - Web research API
+- [Svelte](https://svelte.dev/) - Frontend framework
