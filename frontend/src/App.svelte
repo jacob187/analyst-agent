@@ -41,10 +41,11 @@
 <div class="app-container">
   <header>
     <div class="header-content">
-      <button class="nav-link logo-link" on:click={navigateToMain}>
+      <div class="logo">
         <span class="bracket">[</span>
         <span class="title">ANALYST</span>
         <span class="bracket">]</span>
+      </div>
       </button>
       <nav class="nav-links">
         <button
@@ -310,10 +311,6 @@
       font-size: 1.5rem;
     }
 
-    .logo-link {
-      font-size: 1.5rem;
-    }
-
     .header-content {
       flex-direction: column;
       align-items: flex-start;
@@ -375,17 +372,12 @@
       margin-bottom: 1.5rem;
     }
 
-    .logo-link {
+    .logo {
       font-size: 1.3rem;
     }
 
     .subtitle {
       font-size: 0.75rem;
-    }
-
-    .nav-link {
-      font-size: 0.8rem;
-      padding: 0.2rem 0;
     }
 
     main {
