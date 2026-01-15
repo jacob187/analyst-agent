@@ -46,7 +46,6 @@
         <span class="title">ANALYST</span>
         <span class="bracket">]</span>
       </div>
-      </button>
       <nav class="nav-links">
         <button
           class="nav-link"
