@@ -29,5 +29,17 @@
         </div>
       {/each}
     </div>
+
+    <div class="tool-category">
+      <h3 class="tool-category-title">{toolsContent.tavilyTools.category}</h3>
+      <p class="tool-category-desc">{toolsContent.tavilyTools.description}</p>
+
+      {#each toolsContent.tavilyTools.tools as tool}
+        <div class="tool-card">
+          <div class="tool-name">{tool.name}</div>
+          <div class="tool-desc">{tool.desc}</div>
+        </div>
+      {/each}
+    </div>
   </div>
 </section>

@@ -97,6 +97,33 @@ export const toolsContent = {
       },
     ],
   },
+
+  tavilyTools: {
+    category: "Tavily Research Tools",
+    description: "Web research and news via Tavily API (optional)",
+    tools: [
+      {
+        name: "web_search",
+        desc: "General company information search across the web",
+      },
+      {
+        name: "deep_research",
+        desc: "Multi-source comprehensive research on company topics",
+      },
+      {
+        name: "get_company_news",
+        desc: "Latest news and developments for the company",
+      },
+      {
+        name: "analyze_competitors",
+        desc: "Market positioning and competitor analysis",
+      },
+      {
+        name: "get_industry_trends",
+        desc: "Industry outlook and trend forecasts",
+      },
+    ],
+  },
 };
 
 export const techStackContent = {
@@ -109,6 +136,7 @@ export const techStackContent = {
     { label: "LLM", value: "Google Gemini" },
     { label: "SEC Data", value: "edgartools (EDGAR API)" },
     { label: "Market Data", value: "yfinance (Yahoo Finance)" },
+    { label: "Web Research", value: "Tavily API (optional)" },
   ],
 };
 
