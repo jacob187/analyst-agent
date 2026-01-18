@@ -2,9 +2,11 @@
   import ApiKeyInput from './lib/components/ApiKeyInput.svelte';
   import TickerInput from './lib/components/TickerInput.svelte';
   import ChatWindow from './lib/components/ChatWindow.svelte';
+  import ChatHistory from './lib/components/ChatHistory.svelte';
+  import ChatViewer from './lib/components/ChatViewer.svelte';
   import AboutPage from './lib/components/about/AboutPage.svelte';
 
-  type Page = 'main' | 'about';
+  type Page = 'main' | 'about' | 'history' | 'view-session';
   let currentPage: Page = 'main';
 
   let googleApiKey: string | null = null;
@@ -12,12 +14,28 @@
   let tavilyApiKey: string = '';
   let currentTicker: string | null = null;
 
+  // For viewing past sessions
+  let viewingSessionId: string | null = null;
+  let viewingSessionTicker: string | null = null;
+
   function navigateToAbout() {
     currentPage = 'about';
   }
 
   function navigateToMain() {
     currentPage = 'main';
+    viewingSessionId = null;
+    viewingSessionTicker = null;
+  }
+
+  function navigateToHistory() {
+    currentPage = 'history';
+  }
+
+  function handleSessionSelect(event: CustomEvent<{ sessionId: string; ticker: string }>) {
+    viewingSessionId = event.detail.sessionId;
+    viewingSessionTicker = event.detail.ticker;
+    currentPage = 'view-session';
   }
 
   function handleApiKeySubmit(event: CustomEvent<{ googleApiKey: string; secHeader: string; tavilyApiKey: string }>) {
@@ -56,6 +74,13 @@
         </button>
         <button
           class="nav-link"
+          class:active={currentPage === 'history' || currentPage === 'view-session'}
+          on:click={navigateToHistory}
+        >
+          History
+        </button>
+        <button
+          class="nav-link"
           class:active={currentPage === 'about'}
           on:click={navigateToAbout}
         >
@@ -69,6 +94,22 @@
   <main>
     {#if currentPage === 'about'}
       <AboutPage on:back={navigateToMain} />
+    {:else if currentPage === 'history'}
+      <div class="history-section">
+        <ChatHistory on:select={handleSessionSelect} on:close={navigateToMain} />
+      </div>
+    {:else if currentPage === 'view-session' && viewingSessionId && viewingSessionTicker}
+      <div class="chat-section">
+        <ChatViewer sessionId={viewingSessionId} ticker={viewingSessionTicker} />
+      </div>
+      <div class="actions-bar">
+        <button class="reset-btn" on:click={navigateToHistory}>
+          ← back to history
+        </button>
+        <button class="reset-btn" on:click={navigateToMain}>
+          ← new chat
+        </button>
+      </div>
     {:else if !googleApiKey || !secHeader}
       <!-- Step 1: API Key Configuration -->
       <div class="config-section">
@@ -211,6 +252,12 @@
   .config-section {
     width: 100%;
     max-width: 600px;
+  }
+
+  .history-section {
+    display: flex;
+    justify-content: center;
+    padding: 2rem 0;
   }
 
   .input-section {
