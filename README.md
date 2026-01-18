@@ -41,10 +41,6 @@ A full-stack AI-powered financial analysis application that combines SEC filings
 ```bash
 # Install Python dependencies
 uv sync
-
-# Or using pip/poetry
-pip install poetry
-poetry install
 ```
 
 ### Frontend Setup
@@ -56,30 +52,36 @@ npm install
 
 ## Running the Application
 
-### Option 1: Docker Compose (Recommended)
+### 1. Set up environment variables
 
 ```bash
-docker-compose up
+cp .env.example .env
 ```
 
-- API: http://localhost:8000
-- Frontend: http://localhost:3001
+Edit `.env` and add your API keys (or enter them in the UI):
+```
+GOOGLE_API_KEY="your-gemini-api-key"
+SEC_HEADER="your-email@example.com"  # SEC requires identification
+TAVILY_API_KEY="your-tavily-key"     # Optional, for web research
+```
 
-### Option 2: Local Development
+### 2. Start the backend (Terminal 1)
 
-Terminal 1 - Backend:
 ```bash
-uvicorn api.main:app --host 0.0.0.0 --port 8000
+uv run uvicorn api.main:app --reload --port 8000
 ```
 
-Terminal 2 - Frontend:
+### 3. Start the frontend (Terminal 2)
+
 ```bash
 cd frontend
 npm run dev
 ```
 
-- API: http://localhost:8000
+### 4. Open in browser
+
 - Frontend: http://localhost:5173
+- API: http://localhost:8000
 
 ### Frontend Commands
 
@@ -151,7 +153,7 @@ npm run check    # Type checking and linting
 For direct agent interaction without the web interface:
 
 ```bash
-poetry run python cli/sec_langgraph_cli.py
+uv run python cli/sec_langgraph_cli.py
 ```
 
 ## Project Structure
@@ -159,7 +161,8 @@ poetry run python cli/sec_langgraph_cli.py
 ```
 analyst-agent/
 ├── api/                    # FastAPI backend
-│   └── main.py            # WebSocket and HTTP endpoints
+│   ├── main.py            # WebSocket and HTTP endpoints
+│   └── db.py              # SQLite database for chat history
 ├── agents/                 # AI agent implementation
 │   ├── tools/             # Tool definitions
 │   │   ├── sec_tools.py   # SEC filing tools
@@ -169,15 +172,17 @@ analyst-agent/
 ├── frontend/              # Svelte frontend
 │   ├── src/
 │   │   ├── App.svelte     # Main application
-│   │   ├── ChatWindow.svelte
-│   │   ├── ApiKeyInput.svelte
-│   │   └── TickerInput.svelte
+│   │   ├── lib/components/
+│   │   │   ├── ChatWindow.svelte
+│   │   │   ├── ChatHistory.svelte
+│   │   │   ├── ChatViewer.svelte
+│   │   │   ├── ApiKeyInput.svelte
+│   │   │   └── TickerInput.svelte
+│   │   └── ...
 │   └── package.json
 ├── cli/                   # Command-line interface
-├── data/                  # Data storage
-├── docker-compose.yml
-├── Dockerfile
-└── pyproject.toml
+├── .env.example           # Environment variables template
+└── pyproject.toml         # Python dependencies
 ```
 
 ## License
