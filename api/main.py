@@ -80,8 +80,14 @@ async def chat(websocket: WebSocket, ticker: str):
 
         # Use existing session or create a new one
         existing_session_id = auth_message.get("session_id")
+        conversation_history = []  # Track conversation for agent memory
+
         if existing_session_id:
             session_id = existing_session_id
+            # Load previous messages for agent memory
+            previous_messages = await get_session_messages(session_id)
+            for msg in previous_messages:
+                conversation_history.append((msg["role"], msg["content"]))
         else:
             session_id = await create_session(ticker)
 
@@ -130,6 +136,9 @@ async def chat(websocket: WebSocket, ticker: str):
                     # Save user message (fire-and-forget)
                     asyncio.create_task(save_message(session_id, "user", user_query))
 
+                    # Add to conversation history
+                    conversation_history.append(("user", user_query))
+
                     # Stream agent response
                     await websocket.send_json({
                         "type": "status",
@@ -137,14 +146,17 @@ async def chat(websocket: WebSocket, ticker: str):
                     })
 
                     try:
-                        # Invoke agent
-                        result = agent.invoke({"messages": [("user", user_query)]})
+                        # Invoke agent with full conversation history
+                        result = agent.invoke({"messages": conversation_history})
 
                         # Send response
                         if result and "messages" in result:
                             response = result["messages"][-1].content
                         else:
                             response = str(result)
+
+                        # Add to conversation history
+                        conversation_history.append(("assistant", response))
 
                         # Save assistant response (fire-and-forget)
                         asyncio.create_task(save_message(session_id, "assistant", response))
