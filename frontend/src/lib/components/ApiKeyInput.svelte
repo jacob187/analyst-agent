@@ -48,7 +48,7 @@
   <div class="input-group">
     <label for="sec-header">
       <span class="label-text">SEC User Agent</span>
-      <span class="label-hint">Your email address (required by SEC)</span>
+      <span class="label-hint">Your name and email (required by SEC)</span>
     </label>
     <div class="input-wrapper">
       <input
@@ -56,7 +56,7 @@
         type="text"
         bind:value={secHeader}
         on:keydown={handleKeydown}
-        placeholder="your.email@example.com"
+        placeholder="Name your.email@example.com"
         autocomplete="email"
       />
     </div>
