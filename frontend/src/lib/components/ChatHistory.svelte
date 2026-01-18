@@ -3,6 +3,7 @@
 
   const dispatch = createEventDispatcher<{
     select: { sessionId: string; ticker: string };
+    continue: { sessionId: string; ticker: string };
     close: void;
   }>();
 
@@ -53,8 +54,12 @@
     }
   }
 
-  function selectSession(session: Session) {
+  function viewSession(session: Session) {
     dispatch('select', { sessionId: session.id, ticker: session.ticker });
+  }
+
+  function continueSession(session: Session) {
+    dispatch('continue', { sessionId: session.id, ticker: session.ticker });
   }
 </script>
 
@@ -73,10 +78,16 @@
       <div class="empty">No chat history yet</div>
     {:else}
       {#each sessions as session}
-        <button class="session-item" on:click={() => selectSession(session)}>
-          <span class="ticker">{session.ticker}</span>
-          <span class="date">{formatDate(session.created_at)}</span>
-        </button>
+        <div class="session-item">
+          <div class="session-info">
+            <span class="ticker">{session.ticker}</span>
+            <span class="date">{formatDate(session.created_at)}</span>
+          </div>
+          <div class="session-actions">
+            <button class="btn btn-sm btn-ghost" on:click={() => viewSession(session)}>View</button>
+            <button class="btn btn-sm btn-primary" on:click={() => continueSession(session)}>Continue</button>
+          </div>
+        </div>
       {/each}
     {/if}
   </div>
@@ -149,14 +160,23 @@
     background: transparent;
     border: 1px solid transparent;
     border-radius: 4px;
-    cursor: pointer;
     transition: all 0.2s;
-    text-align: left;
   }
 
   .session-item:hover {
     background: var(--bg-darker);
     border-color: var(--border);
+  }
+
+  .session-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .session-actions {
+    display: flex;
+    gap: 0.5rem;
   }
 
   .ticker {

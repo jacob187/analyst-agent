@@ -6,6 +6,7 @@
   export let googleApiKey: string;
   export let secHeader: string;
   export let tavilyApiKey: string = '';
+  export let sessionId: string | null = null;  // For continuing existing sessions
 
   interface Message {
     role: 'user' | 'assistant';
@@ -19,10 +20,30 @@
   let authenticated = false;
   let messagesContainer: HTMLElement;
 
-  onMount(() => {
+  onMount(async () => {
+    // If continuing a session, load existing messages first
+    if (sessionId) {
+      await loadExistingMessages();
+    }
     connectWebSocket();
     return () => socket?.close();
   });
+
+  async function loadExistingMessages() {
+    try {
+      const apiHost = import.meta.env.VITE_API_URL || 'localhost:8000';
+      const response = await fetch(`http://${apiHost}/sessions/${sessionId}/messages`);
+      if (response.ok) {
+        const data = await response.json();
+        messages = data.messages.map((m: { role: string; content: string }) => ({
+          role: m.role as 'user' | 'assistant',
+          content: m.content
+        }));
+      }
+    } catch (e) {
+      console.error('Failed to load existing messages:', e);
+    }
+  }
 
   afterUpdate(() => {
     if (messagesContainer) {
@@ -47,6 +68,9 @@
       if (tavilyApiKey.trim()) {
         authPayload.tavily_api_key = tavilyApiKey;
       }
+      if (sessionId) {
+        authPayload.session_id = sessionId;
+      }
       socket?.send(JSON.stringify(authPayload));
     };
 
@@ -55,10 +79,19 @@
 
       if (data.type === 'auth_success') {
         authenticated = true;
-        messages = [{
-          role: 'assistant',
-          content: data.message
-        }];
+        // Only add auth message if not continuing (existing messages already loaded)
+        if (!sessionId) {
+          messages = [{
+            role: 'assistant',
+            content: data.message
+          }];
+        } else {
+          // Add a system message indicating session resumed
+          messages = [...messages, {
+            role: 'assistant',
+            content: '[SESSION RESUMED] ' + data.message
+          }];
+        }
       } else if (data.type === 'system') {
         messages = [...messages, {
           role: 'assistant',

@@ -78,8 +78,12 @@ async def chat(websocket: WebSocket, ticker: str):
         if tavily_api_key:
             os.environ["TAVILY_API_KEY"] = tavily_api_key
 
-        # Create a new chat session
-        session_id = await create_session(ticker)
+        # Use existing session or create a new one
+        existing_session_id = auth_message.get("session_id")
+        if existing_session_id:
+            session_id = existing_session_id
+        else:
+            session_id = await create_session(ticker)
 
         research_status = "Web research enabled" if tavily_api_key else "Web research disabled (no Tavily API key)"
         await websocket.send_json({

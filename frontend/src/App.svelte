@@ -6,7 +6,7 @@
   import ChatViewer from './lib/components/ChatViewer.svelte';
   import AboutPage from './lib/components/about/AboutPage.svelte';
 
-  type Page = 'main' | 'about' | 'history' | 'view-session';
+  type Page = 'main' | 'about' | 'history' | 'view-session' | 'continue-session';
   let currentPage: Page = 'main';
 
   let googleApiKey: string | null = null;
@@ -14,9 +14,10 @@
   let tavilyApiKey: string = '';
   let currentTicker: string | null = null;
 
-  // For viewing past sessions
+  // For viewing/continuing past sessions
   let viewingSessionId: string | null = null;
   let viewingSessionTicker: string | null = null;
+  let continuingSessionId: string | null = null;
 
   function navigateToAbout() {
     currentPage = 'about';
@@ -36,6 +37,17 @@
     viewingSessionId = event.detail.sessionId;
     viewingSessionTicker = event.detail.ticker;
     currentPage = 'view-session';
+  }
+
+  function handleSessionContinue(event: CustomEvent<{ sessionId: string; ticker: string }>) {
+    continuingSessionId = event.detail.sessionId;
+    currentTicker = event.detail.ticker;
+    // If no API keys yet, go to config first
+    if (!googleApiKey || !secHeader) {
+      currentPage = 'continue-session';
+    } else {
+      currentPage = 'continue-session';
+    }
   }
 
   function handleApiKeySubmit(event: CustomEvent<{ googleApiKey: string; secHeader: string; tavilyApiKey: string }>) {
@@ -96,20 +108,47 @@
       <AboutPage on:back={navigateToMain} />
     {:else if currentPage === 'history'}
       <div class="history-section">
-        <ChatHistory on:select={handleSessionSelect} on:close={navigateToMain} />
+        <ChatHistory on:select={handleSessionSelect} on:continue={handleSessionContinue} on:close={navigateToMain} />
       </div>
     {:else if currentPage === 'view-session' && viewingSessionId && viewingSessionTicker}
       <div class="chat-section">
         <ChatViewer sessionId={viewingSessionId} ticker={viewingSessionTicker} />
       </div>
       <div class="actions-bar">
-        <button class="reset-btn" on:click={navigateToHistory}>
+        <button class="btn" on:click={navigateToHistory}>
           ← back to history
         </button>
-        <button class="reset-btn" on:click={navigateToMain}>
+        <button class="btn" on:click={navigateToMain}>
           ← new chat
         </button>
       </div>
+    {:else if currentPage === 'continue-session' && continuingSessionId && currentTicker}
+      {#if !googleApiKey || !secHeader}
+        <!-- Need API keys to continue -->
+        <div class="config-section">
+          <p class="continue-notice">Enter API keys to continue chat with <strong>{currentTicker}</strong></p>
+          <ApiKeyInput on:submit={handleApiKeySubmit} />
+        </div>
+      {:else}
+        <!-- Ready to continue -->
+        <div class="chat-section">
+          <ChatWindow
+            ticker={currentTicker}
+            googleApiKey={googleApiKey}
+            secHeader={secHeader}
+            tavilyApiKey={tavilyApiKey}
+            sessionId={continuingSessionId}
+          />
+        </div>
+        <div class="actions-bar">
+          <button class="btn" on:click={navigateToHistory}>
+            ← back to history
+          </button>
+          <button class="btn" on:click={navigateToMain}>
+            ← new chat
+          </button>
+        </div>
+      {/if}
     {:else if !googleApiKey || !secHeader}
       <!-- Step 1: API Key Configuration -->
       <div class="config-section">
@@ -130,7 +169,7 @@
           <span>MSFT</span>
         </div>
       </div>
-      <button class="reset-btn" on:click={resetSession}>
+      <button class="btn" on:click={resetSession}>
         ← reconfigure API keys
       </button>
     {:else}
@@ -144,10 +183,10 @@
         />
       </div>
       <div class="actions-bar">
-        <button class="reset-btn" on:click={() => currentTicker = null}>
+        <button class="btn" on:click={() => currentTicker = null}>
           ← new ticker
         </button>
-        <button class="reset-btn" on:click={resetSession}>
+        <button class="btn" on:click={resetSession}>
           ← reconfigure
         </button>
       </div>
@@ -254,6 +293,16 @@
     max-width: 600px;
   }
 
+  .continue-notice {
+    color: var(--text-dim);
+    margin-bottom: 1rem;
+    font-size: 0.9rem;
+  }
+
+  .continue-notice strong {
+    color: var(--accent);
+  }
+
   .history-section {
     display: flex;
     justify-content: center;
@@ -276,21 +325,6 @@
     flex-wrap: wrap;
   }
 
-  .reset-btn {
-    background: var(--bg-card);
-    color: var(--text-dim);
-    border: 1px solid var(--border);
-    padding: 0.6rem 1.2rem;
-    border-radius: 4px;
-    font-size: 0.85rem;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-
-  .reset-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
 
   .welcome {
     flex: 1;
@@ -402,10 +436,6 @@
       flex-direction: column;
     }
 
-    .reset-btn {
-      width: 100%;
-      text-align: center;
-    }
   }
 
   /* Small mobile breakpoint */
@@ -462,10 +492,6 @@
       font-size: 0.85rem;
     }
 
-    .reset-btn {
-      padding: 0.5rem 1rem;
-      font-size: 0.8rem;
-    }
 
     footer {
       margin-top: 1.5rem;
