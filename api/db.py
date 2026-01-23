@@ -41,6 +41,15 @@ async def init_db():
         CREATE INDEX IF NOT EXISTS idx_messages_session
         ON messages(session_id)
     """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            google_api_key TEXT,
+            sec_header TEXT,
+            tavily_api_key TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     await db.commit()
 
 async def close_db():
@@ -103,3 +112,33 @@ async def get_session(session_id: str) -> dict | None:
         if row:
             return {"id": row["id"], "ticker": row["ticker"], "created_at": row["created_at"]}
         return None
+
+async def get_settings() -> dict | None:
+    """Get global API settings."""
+    db = await get_db()
+    async with db.execute(
+        "SELECT google_api_key, sec_header, tavily_api_key, updated_at FROM settings WHERE id = 1"
+    ) as cursor:
+        row = await cursor.fetchone()
+        if row:
+            return {
+                "google_api_key": row["google_api_key"],
+                "sec_header": row["sec_header"],
+                "tavily_api_key": row["tavily_api_key"],
+                "updated_at": row["updated_at"]
+            }
+        return None
+
+async def save_settings(google_api_key: str, sec_header: str, tavily_api_key: str | None = None) -> None:
+    """Save or update global API settings."""
+    db = await get_db()
+    await db.execute("""
+        INSERT INTO settings (id, google_api_key, sec_header, tavily_api_key, updated_at)
+        VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO UPDATE SET
+            google_api_key = excluded.google_api_key,
+            sec_header = excluded.sec_header,
+            tavily_api_key = excluded.tavily_api_key,
+            updated_at = CURRENT_TIMESTAMP
+    """, (google_api_key, sec_header, tavily_api_key))
+    await db.commit()

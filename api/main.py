@@ -8,7 +8,7 @@ import asyncio
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from api.db import init_db, close_db, create_session, save_message, get_sessions, get_session_messages
+from api.db import init_db, close_db, create_session, save_message, get_sessions, get_session_messages, get_settings, save_settings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -43,6 +43,25 @@ async def get_messages(session_id: str):
     """Get all messages for a session."""
     messages = await get_session_messages(session_id)
     return {"messages": messages}
+
+@app.get("/settings")
+async def get_api_settings():
+    """Get saved API settings."""
+    settings = await get_settings()
+    return {"settings": settings}
+
+@app.post("/settings")
+async def save_api_settings(data: dict):
+    """Save API settings."""
+    google_api_key = data.get("google_api_key")
+    sec_header = data.get("sec_header")
+    tavily_api_key = data.get("tavily_api_key")
+
+    if not google_api_key or not sec_header:
+        return {"error": "google_api_key and sec_header are required"}, 400
+
+    await save_settings(google_api_key, sec_header, tavily_api_key)
+    return {"success": True}
 
 @app.websocket("/ws/chat/{ticker}")
 async def chat(websocket: WebSocket, ticker: str):
