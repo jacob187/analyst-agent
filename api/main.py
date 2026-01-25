@@ -1,6 +1,7 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from langchain_core.messages import HumanMessage, AIMessage
 import sys
 import os
 import json
@@ -58,7 +59,7 @@ async def save_api_settings(data: dict):
     tavily_api_key = data.get("tavily_api_key")
 
     if not google_api_key or not sec_header:
-        return {"error": "google_api_key and sec_header are required"}, 400
+        raise HTTPException(status_code=400, detail="google_api_key and sec_header are required")
 
     await save_settings(google_api_key, sec_header, tavily_api_key)
     return {"success": True}
