@@ -142,3 +142,13 @@ async def save_settings(google_api_key: str, sec_header: str, tavily_api_key: st
             updated_at = CURRENT_TIMESTAMP
     """, (google_api_key, sec_header, tavily_api_key))
     await db.commit()
+
+async def delete_session(session_id: str) -> bool:
+    """Delete a session and all its messages. Returns True if deleted."""
+    db = await get_db()
+    # Delete messages first (foreign key constraint)
+    await db.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+    # Delete the session
+    cursor = await db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+    await db.commit()
+    return cursor.rowcount > 0

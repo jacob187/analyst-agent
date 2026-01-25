@@ -9,7 +9,7 @@ import asyncio
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from api.db import init_db, close_db, create_session, save_message, get_sessions, get_session_messages, get_settings, save_settings
+from api.db import init_db, close_db, create_session, save_message, get_sessions, get_session_messages, get_settings, save_settings, delete_session
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -44,6 +44,14 @@ async def get_messages(session_id: str):
     """Get all messages for a session."""
     messages = await get_session_messages(session_id)
     return {"messages": messages}
+
+@app.delete("/sessions/{session_id}")
+async def remove_session(session_id: str):
+    """Delete a session and all its messages."""
+    deleted = await delete_session(session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"success": True}
 
 @app.get("/settings")
 async def get_api_settings():
