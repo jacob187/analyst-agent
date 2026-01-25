@@ -107,7 +107,10 @@ async def chat(websocket: WebSocket, ticker: str):
             # Load previous messages for agent memory
             previous_messages = await get_session_messages(session_id)
             for msg in previous_messages:
-                conversation_history.append((msg["role"], msg["content"]))
+                if msg["role"] == "user":
+                    conversation_history.append(HumanMessage(content=msg["content"]))
+                else:
+                    conversation_history.append(AIMessage(content=msg["content"]))
         else:
             session_id = await create_session(ticker)
 
@@ -157,7 +160,7 @@ async def chat(websocket: WebSocket, ticker: str):
                     asyncio.create_task(save_message(session_id, "user", user_query))
 
                     # Add to conversation history
-                    conversation_history.append(("user", user_query))
+                    conversation_history.append(HumanMessage(content=user_query))
 
                     # Stream agent response
                     await websocket.send_json({
@@ -176,7 +179,7 @@ async def chat(websocket: WebSocket, ticker: str):
                             response = str(result)
 
                         # Add to conversation history
-                        conversation_history.append(("assistant", response))
+                        conversation_history.append(AIMessage(content=response))
 
                         # Save assistant response (fire-and-forget)
                         asyncio.create_task(save_message(session_id, "assistant", response))
