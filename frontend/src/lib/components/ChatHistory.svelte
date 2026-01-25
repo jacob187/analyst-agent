@@ -61,6 +61,21 @@
   function continueSession(session: Session) {
     dispatch('continue', { sessionId: session.id, ticker: session.ticker });
   }
+
+  async function deleteSession(session: Session) {
+    if (!confirm(`Delete chat with ${session.ticker}?`)) return;
+
+    try {
+      const apiHost = import.meta.env.VITE_API_URL || 'localhost:8000';
+      const response = await fetch(`http://${apiHost}/sessions/${session.id}`, {
+        method: 'DELETE'
+      });
+      if (!response.ok) throw new Error('Failed to delete session');
+      sessions = sessions.filter(s => s.id !== session.id);
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to delete session';
+    }
+  }
 </script>
 
 <div class="chat-history">
@@ -86,6 +101,7 @@
           <div class="session-actions">
             <button class="btn btn-sm btn-ghost" on:click={() => viewSession(session)}>View</button>
             <button class="btn btn-sm btn-primary" on:click={() => continueSession(session)}>Continue</button>
+            <button class="btn btn-sm btn-danger" on:click={() => deleteSession(session)}>Delete</button>
           </div>
         </div>
       {/each}

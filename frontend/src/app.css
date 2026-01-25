@@ -121,3 +121,15 @@ html, body {
   background: var(--bg-darker);
   border-color: var(--border);
 }
+
+.btn-danger {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--bg-dark);
+}
