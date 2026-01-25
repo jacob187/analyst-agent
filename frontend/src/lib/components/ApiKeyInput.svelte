@@ -3,9 +3,9 @@
 
   const dispatch = createEventDispatcher<{ submit: { googleApiKey: string; secHeader: string; tavilyApiKey: string } }>();
 
-  let googleApiKey = '';
-  let secHeader = '';
-  let tavilyApiKey = '';
+  export let googleApiKey = '';
+  export let secHeader = '';
+  export let tavilyApiKey = '';
   let showKeys = false;
 
   function handleSubmit() {
@@ -25,7 +25,7 @@
 <div class="api-key-input">
   <div class="header">
     <h2>Configure API Access</h2>
-    <p>Keys are encrypted in transit via HTTPS and used only for your session. Never stored.</p>
+    <p>Keys are stored locally in your database for convenience. Only enter once.</p>
   </div>
 
   <div class="input-group">
