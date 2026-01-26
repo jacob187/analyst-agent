@@ -19,6 +19,7 @@
   let connected = false;
   let authenticated = false;
   let messagesContainer: HTMLElement;
+  let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 
   onMount(async () => {
     // If continuing a session, load existing messages first
@@ -26,7 +27,28 @@
       await loadExistingMessages();
     }
     connectWebSocket();
-    return () => socket?.close();
+
+    // Handle page visibility changes - reconnect if needed when user returns
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'visible') {
+        checkAndReconnect();
+      }
+    }
+
+    // Handle window focus - reconnect if needed when user clicks back into the window
+    function handleWindowFocus() {
+      checkAndReconnect();
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleWindowFocus);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleWindowFocus);
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      socket?.close();
+    };
   });
 
   async function loadExistingMessages() {
@@ -51,11 +73,26 @@
     }
   });
 
-  function connectWebSocket() {
+  function checkAndReconnect() {
+    if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
+      connected = false;
+      authenticated = false;
+      connectWebSocket(true);
+    }
+  }
+
+  function connectWebSocket(isReconnect = false) {
     const apiHost = import.meta.env.VITE_API_URL || 'localhost:8000';
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${apiHost}/ws/chat/${ticker}`;
     socket = new WebSocket(wsUrl);
+
+    if (isReconnect) {
+      messages = [...messages, {
+        role: 'assistant',
+        content: '[SYSTEM] Reconnecting...'
+      }];
+    }
 
     socket.onopen = () => {
       connected = true;
@@ -133,6 +170,12 @@
     socket.onclose = () => {
       connected = false;
       authenticated = false;
+      // Auto-reconnect after a short delay if the page is visible
+      if (document.visibilityState === 'visible') {
+        reconnectTimeout = setTimeout(() => {
+          connectWebSocket(true);
+        }, 2000);
+      }
     };
   }
 
