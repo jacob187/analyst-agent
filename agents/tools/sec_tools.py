@@ -367,6 +367,59 @@ def _tool_stock_info(ticker: str) -> str:
         return f"Failed to retrieve stock info for {ticker}: {e}"
 
 
+def _tool_financial_metrics(ticker: str) -> str:
+    """Return fundamental financial metrics from income statement and balance sheet."""
+    try:
+        from agents.technical_workflow.process_technical_indicators import TechnicalIndicators
+
+        retriever = _get_shared_stock_retriever(ticker)
+        financials = retriever.get_financials()
+
+        if not financials or (not financials.get("income_stmt") and not financials.get("balance_sheet")):
+            return f"No financial statement data available for {ticker}. This may be a newly listed company or a company type (e.g., investment trust) that doesn't report standard financials."
+
+        tech = TechnicalIndicators(ticker)
+        metrics = tech._calculate_financial_metrics(financials)
+
+        lines = [f"Financial Metrics for {ticker}:"]
+        lines.append("=" * 50)
+
+        has_any_metric = False
+
+        if "revenue_growth_yoy" in metrics:
+            growth = metrics["revenue_growth_yoy"]
+            direction = "+" if growth >= 0 else ""
+            lines.append(f"\n📊 REVENUE:")
+            lines.append(f"  Year-over-Year Growth: {direction}{growth:.2f}%")
+            has_any_metric = True
+
+        if "net_income_growth_yoy" in metrics:
+            growth = metrics["net_income_growth_yoy"]
+            direction = "+" if growth >= 0 else ""
+            lines.append(f"\n💰 NET INCOME:")
+            lines.append(f"  Year-over-Year Growth: {direction}{growth:.2f}%")
+            has_any_metric = True
+
+        if "debt_to_assets" in metrics:
+            lines.append(f"\n📉 LEVERAGE:")
+            lines.append(f"  Debt-to-Assets Ratio: {metrics['debt_to_assets']:.2f}%")
+            has_any_metric = True
+
+        if not has_any_metric:
+            # Provide detailed feedback about what's available
+            available_info = []
+            if financials.get("income_stmt"):
+                available_info.append("income statement data exists but lacks standard revenue/income rows")
+            if financials.get("balance_sheet"):
+                available_info.append("balance sheet data exists but lacks standard asset/liability rows")
+            detail = "; ".join(available_info) if available_info else "no recognizable financial data"
+            return f"Could not calculate financial metrics for {ticker}: {detail}. This company may use non-standard financial reporting."
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Failed to calculate financial metrics for {ticker}: {e}"
+
+
 def create_sec_tools(ticker: str, llm: BaseChatModel) -> tuple[list, str]:
     """Return the list of SEC tools bound to a specific ticker and LLM.
 
@@ -427,8 +480,13 @@ def create_sec_tools(ticker: str, llm: BaseChatModel) -> tuple[list, str]:
         ),
         Tool.from_function(
             name="get_stock_info",
-            description="Get current stock info including price, P/E ratio, market cap, 52-week high/low, volume, dividend yield, and beta.",
+            description="Get current stock info including current price, trailing P/E ratio, forward P/E ratio, price-to-book ratio, market cap, 52-week high/low, volume, average volume, dividend yield, and beta.",
             func=lambda query="": _tool_stock_info(ticker),
+        ),
+        Tool.from_function(
+            name="get_financial_metrics",
+            description="Get fundamental financial metrics including year-over-year revenue growth, net income growth, and debt-to-assets ratio from income statement and balance sheet.",
+            func=lambda query="": _tool_financial_metrics(ticker),
         ),
     ]
 

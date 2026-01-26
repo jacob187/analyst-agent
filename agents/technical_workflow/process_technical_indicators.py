@@ -180,37 +180,67 @@ class TechnicalIndicators:
             "max_drawdown": (df["Close"] / df["Close"].cummax() - 1.0).min(),
         }
 
+    def _find_row_by_labels(
+        self, df: pd.DataFrame, labels: List[str]
+    ) -> Optional[pd.Series]:
+        """Find a row in DataFrame by trying multiple possible labels."""
+        for label in labels:
+            if label in df.index:
+                return df.loc[label]
+        return None
+
     def _calculate_financial_metrics(
         self, financials: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Calculate key financial metrics from financial statements"""
         metrics = {}
 
+        # Common label variations for different company types
+        revenue_labels = [
+            "Total Revenue",
+            "Total Revenues",
+            "Revenue",
+            "Revenues",
+            "Net Revenue",
+            "Operating Revenue",
+        ]
+        net_income_labels = [
+            "Net Income",
+            "Net Income Common Stockholders",
+            "Net Income From Continuing Operations",
+            "Net Income Applicable To Common Shares",
+        ]
+        total_assets_labels = [
+            "Total Assets",
+        ]
+        total_liabilities_labels = [
+            "Total Liabilities Net Minority Interest",
+            "Total Liabilities",
+            "Total Debt",
+            "Total Non Current Liabilities Net Minority Interest",
+        ]
+
         # Try to extract income statement data
         try:
             income_stmt = self._dict_to_dataframe(financials.get("income_stmt", {}))
             if not income_stmt.empty:
-                # Calculate key growth rates
-                total_revenue = (
-                    income_stmt.loc["Total Revenue"]
-                    if "Total Revenue" in income_stmt.index
-                    else None
-                )
-                net_income = (
-                    income_stmt.loc["Net Income"]
-                    if "Net Income" in income_stmt.index
-                    else None
-                )
+                # Calculate key growth rates using fallback labels
+                total_revenue = self._find_row_by_labels(income_stmt, revenue_labels)
+                net_income = self._find_row_by_labels(income_stmt, net_income_labels)
 
                 if total_revenue is not None and len(total_revenue) >= 2:
-                    metrics["revenue_growth_yoy"] = (
-                        (total_revenue.iloc[0] / total_revenue.iloc[1]) - 1
-                    ) * 100
+                    # Check for valid non-zero values to avoid division errors
+                    if total_revenue.iloc[1] != 0:
+                        metrics["revenue_growth_yoy"] = (
+                            (total_revenue.iloc[0] / total_revenue.iloc[1]) - 1
+                        ) * 100
 
                 if net_income is not None and len(net_income) >= 2:
-                    metrics["net_income_growth_yoy"] = (
-                        (net_income.iloc[0] / net_income.iloc[1]) - 1
-                    ) * 100
+                    # Check for valid non-zero values to avoid division errors
+                    if net_income.iloc[1] != 0:
+                        metrics["net_income_growth_yoy"] = (
+                            (net_income.iloc[0] / net_income.iloc[1]) - 1
+                        ) * 100
         except Exception as e:
             print(f"Error calculating income statement metrics: {e}")
 
@@ -218,22 +248,17 @@ class TechnicalIndicators:
         try:
             balance_sheet = self._dict_to_dataframe(financials.get("balance_sheet", {}))
             if not balance_sheet.empty:
-                # Extract key metrics if available
-                total_assets = (
-                    balance_sheet.loc["Total Assets"]
-                    if "Total Assets" in balance_sheet.index
-                    else None
-                )
-                total_liabilities = (
-                    balance_sheet.loc["Total Liabilities Net Minority Interest"]
-                    if "Total Liabilities Net Minority Interest" in balance_sheet.index
-                    else None
+                # Extract key metrics using fallback labels
+                total_assets = self._find_row_by_labels(balance_sheet, total_assets_labels)
+                total_liabilities = self._find_row_by_labels(
+                    balance_sheet, total_liabilities_labels
                 )
 
                 if total_assets is not None and total_liabilities is not None:
-                    metrics["debt_to_assets"] = (
-                        total_liabilities.iloc[0] / total_assets.iloc[0]
-                    ) * 100
+                    if total_assets.iloc[0] != 0:
+                        metrics["debt_to_assets"] = (
+                            total_liabilities.iloc[0] / total_assets.iloc[0]
+                        ) * 100
         except Exception as e:
             print(f"Error calculating balance sheet metrics: {e}")
 

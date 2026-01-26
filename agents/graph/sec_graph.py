@@ -37,54 +37,26 @@ def create_sec_agent(
     tools, llm_id = create_sec_tools(ticker, llm)
 
     # Add research tools if Tavily API key is provided
-    research_tools_section = ""
     if tavily_api_key:
         from agents.tools.research_tools import create_research_tools
 
         research_tools = create_research_tools(ticker, tavily_api_key)
         tools.extend(research_tools)
-        research_tools_section = """
 
-    Web Research Tools (Tavily):
-    - web_search: Search the web for current information about the company
-    - deep_research: Perform comprehensive research on a specific topic (use for complex questions)
-    - get_company_news: Get the latest news and developments
-    - analyze_competitors: Research competitors and market positioning
-    - get_industry_trends: Research industry trends and outlook
-
-    Use research tools when you need:
-    - Current news or recent events not in SEC filings
-    - Competitor analysis and market positioning
-    - Industry trends and market outlook
-    - Real-time information beyond what's in official filings
-    - Verification of information from multiple sources"""
-
-    # System prompt that instructs the agent to use SEC tools
+    # System prompt - tool descriptions come from the Tool objects themselves
     system_prompt = f"""You are a financial analyst assistant for {ticker}.
 
-    You MUST use the available tools to answer questions about this company.
-    DO NOT answer from your own knowledge - always use the tools to get accurate,
-    up-to-date information from SEC filings and market data.
+    You have access to tools for SEC filings, stock market data, and web research.
+    ALWAYS use the appropriate tool to answer questions - do not rely on your own knowledge.
 
-    Available tools:
-    SEC Filing Tools:
-    - get_risk_factors_summary: Get analyzed risk factors with sentiment scores
-    - get_raw_risk_factors: Get complete raw text of risk factors
-    - get_mda_summary: Get management discussion analysis
-    - get_raw_management_discussion: Get raw MD&A text
-    - get_balance_sheet_summary: Get financial health analysis
-    - get_raw_balance_sheets: Get balance sheet data
-    - get_complete_10k_text: Get available 10-K sections
-    - get_all_summaries: Get comprehensive overview of SEC filings
+    Tool selection guidance:
+    - For stock prices, P/E ratios (trailing/forward), market cap, valuation metrics → use stock market tools
+    - For technical indicators (RSI, MACD, moving averages, Bollinger Bands) → use technical analysis tools
+    - For risks, management outlook, financial statements from filings → use SEC filing tools
+    - For current news, competitors, industry trends → use research tools (if available)
 
-    Stock Market Tools:
-    - get_stock_price_history: Get recent stock prices (last 10 trading days)
-    - get_technical_analysis: Get RSI, MACD, Bollinger Bands, moving averages, volatility
-    - get_stock_info: Get current price, P/E ratio, market cap, 52-week range, volume{research_tools_section}
-
-    When the user asks about stock prices, technical indicators, or market performance, use the stock tools.
-    When the user asks about risks, financials, or management outlook, use the SEC tools.
-    When the user asks about news, competitors, industry trends, or needs current information, use the research tools."""
+    If you're unsure which tool has the data, try the most likely tool rather than refusing.
+    Report what data is available or unavailable based on the tool's response."""
 
     # Create a ReAct agent with the tools, system prompt, and optional checkpointer
     agent = create_react_agent(
