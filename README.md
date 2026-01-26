@@ -52,33 +52,22 @@ npm install
 
 ## Running the Application
 
-### 1. Set up environment variables
+### 1. Start the application
 
 ```bash
-cp .env.example .env
+./start.sh
 ```
 
-Edit `.env` and add your API keys (or enter them in the UI):
-```
-GOOGLE_API_KEY="your-gemini-api-key"
-SEC_HEADER="your-email@example.com"  # SEC requires identification
-TAVILY_API_KEY="your-tavily-key"     # Optional, for web research
-```
+This runs both the backend (port 8000) and frontend (port 5173).
 
-### 2. Start the backend (Terminal 1)
+### 2. Enter API keys in the UI
 
-```bash
-uv run uvicorn api.main:app --reload --port 8000
-```
+Navigate to Settings in the app and enter your API keys:
+- **Google API Key** - For Gemini LLM
+- **SEC Header** - Your email (SEC requires identification)
+- **Tavily API Key** - Optional, for web research
 
-### 3. Start the frontend (Terminal 2)
-
-```bash
-cd frontend
-npm run dev
-```
-
-### 4. Open in browser
+### 3. Open in browser
 
 - Frontend: http://localhost:5173
 - API: http://localhost:8000
@@ -148,41 +137,37 @@ npm run check    # Type checking and linting
 - `analyze_competitors` - Market positioning analysis
 - `get_industry_trends` - Industry outlook forecasts
 
-## CLI Usage
-
-For direct agent interaction without the web interface:
-
-```bash
-uv run python cli/sec_langgraph_cli.py
-```
-
 ## Project Structure
 
 ```
 analyst-agent/
-├── api/                    # FastAPI backend
-│   ├── main.py            # WebSocket and HTTP endpoints
-│   └── db.py              # SQLite database for chat history
-├── agents/                 # AI agent implementation
-│   ├── tools/             # Tool definitions
-│   │   ├── sec_tools.py   # SEC filing tools
-│   │   ├── stock_tools.py # Market data tools
-│   │   └── research_tools.py # Tavily research tools
-│   └── sec_agent.py       # LangGraph ReAct agent
-├── frontend/              # Svelte frontend
+├── api/                        # FastAPI backend
+│   ├── main.py                # WebSocket and HTTP endpoints
+│   └── db.py                  # SQLite database for chat history
+├── agents/                     # AI agent implementation
+│   ├── graph/
+│   │   └── sec_graph.py       # LangGraph agent orchestration
+│   ├── sec_workflow/          # SEC filings processing
+│   │   ├── get_SEC_data.py
+│   │   └── sec_llm_models.py
+│   ├── technical_workflow/    # Stock data processing
+│   │   ├── get_stock_data.py
+│   │   └── process_technical_indicators.py
+│   └── tools/                 # Tool definitions
+│       ├── sec_tools.py       # SEC filing tools
+│       └── research_tools.py  # Tavily research tools
+├── frontend/                   # Svelte frontend
 │   ├── src/
-│   │   ├── App.svelte     # Main application
-│   │   ├── lib/components/
-│   │   │   ├── ChatWindow.svelte
-│   │   │   ├── ChatHistory.svelte
-│   │   │   ├── ChatViewer.svelte
-│   │   │   ├── ApiKeyInput.svelte
-│   │   │   └── TickerInput.svelte
-│   │   └── ...
+│   │   ├── App.svelte
+│   │   └── lib/components/
+│   │       ├── ChatWindow.svelte
+│   │       ├── ChatHistory.svelte
+│   │       ├── ChatViewer.svelte
+│   │       ├── ApiKeyInput.svelte
+│   │       └── TickerInput.svelte
 │   └── package.json
-├── cli/                   # Command-line interface
-├── .env.example           # Environment variables template
-└── pyproject.toml         # Python dependencies
+├── start.sh                    # Start script for local development
+└── pyproject.toml              # Python dependencies
 ```
 
 ## License
