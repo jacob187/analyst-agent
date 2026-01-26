@@ -29,57 +29,27 @@ A full-stack AI-powered financial analysis application that combines SEC filings
 - **ReAct Agent Pattern**: Reason → Act → Observe → Synthesize workflow
 - **Smart Caching**: Minimizes redundant API calls for efficient data retrieval
 
-## Installation
+## Quick Start
 
 ### Prerequisites
 - Python 3.12+
 - Node.js 20+
 - [uv](https://github.com/astral-sh/uv) (Python package manager)
 
-### Backend Setup
-
-```bash
-# Install Python dependencies
-uv sync
-```
-
-### Frontend Setup
-
-```bash
-cd frontend
-npm install
-```
-
-## Running the Application
-
-### 1. Start the application
+### Run the Application
 
 ```bash
 ./start.sh
 ```
 
-This runs both the backend (port 8000) and frontend (port 5173).
+This installs dependencies (if needed) and starts both the backend (port 8000) and frontend (port 5173).
 
-### 2. Enter API keys in the UI
+### Configure API Keys
 
-Navigate to Settings in the app and enter your API keys:
+Open http://localhost:5173 and enter your API keys in Settings:
 - **Google API Key** - For Gemini LLM
 - **SEC Header** - Your email (SEC requires identification)
 - **Tavily API Key** - Optional, for web research
-
-### 3. Open in browser
-
-- Frontend: http://localhost:5173
-- API: http://localhost:8000
-
-### Frontend Commands
-
-```bash
-npm run dev      # Development server with hot reload
-npm run build    # Production build
-npm run preview  # Preview production build
-npm run check    # Type checking and linting
-```
 
 ## API Endpoints
 
