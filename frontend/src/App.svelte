@@ -339,19 +339,6 @@
     border-bottom: 1px solid var(--accent);
   }
 
-  .logo-link {
-    font-size: 2rem;
-    font-weight: 700;
-    letter-spacing: 0.1em;
-    display: flex;
-    align-items: center;
-  }
-
-  .logo-link:hover .bracket,
-  .logo-link:hover .title {
-    color: var(--accent);
-  }
-
   main {
     flex: 1;
     display: flex;

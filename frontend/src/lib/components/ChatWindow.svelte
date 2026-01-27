@@ -225,7 +225,7 @@
       placeholder="ask anything..."
       disabled={!connected}
       rows="3"
-    />
+    ></textarea>
     <button on:click={sendMessage} disabled={!connected || !input.trim()}>
       send
     </button>
