@@ -69,10 +69,9 @@ def _tool_tavily_research(
     ticker: str,
     topic: str,
     tavily_api_key: str,
-    model: str = "pro",
 ) -> str:
     """
-    Perform deep research on a company topic using Tavily's Research API.
+    Perform deep research on a company topic using Tavily's Search API.
 
     This provides comprehensive, multi-source research with citations.
 
@@ -80,7 +79,6 @@ def _tool_tavily_research(
         ticker: Company ticker symbol
         topic: Research topic
         tavily_api_key: Tavily API key
-        model: "mini" (quick), "pro" (comprehensive), or "auto"
     """
     cache_key = _get_cache_key(ticker, topic)
 
@@ -97,8 +95,8 @@ def _tool_tavily_research(
         # Create research request with company context
         research_query = f"Comprehensive analysis of {ticker}: {topic}"
 
-        # Start research
-        response = client.research(
+        # Use search() method (the correct API method)
+        response = client.search(
             query=research_query,
             max_results=10,
             search_depth="advanced",

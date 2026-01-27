@@ -4,6 +4,8 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import create_react_agent
 
+from agents.prompts import SEC_AGENT_SYSTEM_PROMPT
+
 
 class SECState(TypedDict):
     """State for SEC analysis workflow using granular SEC tools."""
@@ -43,20 +45,8 @@ def create_sec_agent(
         research_tools = create_research_tools(ticker, tavily_api_key)
         tools.extend(research_tools)
 
-    # System prompt - tool descriptions come from the Tool objects themselves
-    system_prompt = f"""You are a financial analyst assistant for {ticker}.
-
-    You have access to tools for SEC filings, stock market data, and web research.
-    ALWAYS use the appropriate tool to answer questions - do not rely on your own knowledge.
-
-    Tool selection guidance:
-    - For stock prices, P/E ratios (trailing/forward), market cap, valuation metrics → use stock market tools
-    - For technical indicators (RSI, MACD, moving averages, Bollinger Bands) → use technical analysis tools
-    - For risks, management outlook, financial statements from filings → use SEC filing tools
-    - For current news, competitors, industry trends → use research tools (if available)
-
-    If you're unsure which tool has the data, try the most likely tool rather than refusing.
-    Report what data is available or unavailable based on the tool's response."""
+    # System prompt from centralized prompts file
+    system_prompt = SEC_AGENT_SYSTEM_PROMPT.format(ticker=ticker)
 
     # Create a ReAct agent with the tools, system prompt, and optional checkpointer
     agent = create_react_agent(
