@@ -1,7 +1,11 @@
 """Tavily research tools for deep web research on companies and financial topics."""
 
-from typing import Dict, Any, Optional
+import time
+from typing import Dict, Any
+
 from langchain_core.tools import Tool
+from langchain_tavily import TavilySearch
+from tavily import TavilyClient
 
 # Cache for research results to minimize API calls
 _research_cache: Dict[str, Dict[str, Any]] = {}
@@ -25,8 +29,6 @@ def _tool_tavily_search(
         search_depth: "basic" for quick search, "advanced" for comprehensive
     """
     try:
-        from langchain_tavily import TavilySearch
-
         search = TavilySearch(
             tavily_api_key=tavily_api_key,
             max_results=5,
@@ -71,9 +73,7 @@ def _tool_tavily_research(
     tavily_api_key: str,
 ) -> str:
     """
-    Perform deep research on a company topic using Tavily's Search API.
-
-    This provides comprehensive, multi-source research with citations.
+    Perform deep research on a company topic using Tavily's Research API.
 
     Args:
         ticker: Company ticker symbol
@@ -82,67 +82,48 @@ def _tool_tavily_research(
     """
     cache_key = _get_cache_key(ticker, topic)
 
-    # Check cache first
     if cache_key in _research_cache:
         cached = _research_cache[cache_key]
         return f"[Cached Research]\n\n{cached.get('content', 'No content')}"
 
     try:
-        from tavily import TavilyClient
-
         client = TavilyClient(api_key=tavily_api_key)
-
-        # Create research request with company context
         research_query = f"Comprehensive analysis of {ticker}: {topic}"
 
-        # Use search() method (the correct API method)
-        response = client.search(
-            query=research_query,
-            max_results=10,
-            search_depth="advanced",
-            include_answer=True,
-            include_raw_content=False,
-        )
+        response = client.research(input=research_query)
+        request_id = response.get("request_id")
 
-        # Process the research response
-        if isinstance(response, dict):
-            answer = response.get("answer", "")
-            results = response.get("results", [])
+        if not request_id:
+            return "Failed to initiate deep research: no request_id returned"
 
-            output_lines = [f"Deep Research Report: {ticker} - {topic}", "=" * 60, ""]
+        # Poll for completion
+        for _ in range(30):
+            result = client.get_research(request_id)
+            status = result.get("status", "")
 
-            if answer:
-                output_lines.append("Executive Summary:")
-                output_lines.append("-" * 40)
-                output_lines.append(answer)
-                output_lines.append("")
+            if status == "completed":
+                content = result.get("content", "")
+                sources = result.get("sources", [])
 
-            if results:
-                output_lines.append("Key Sources & Findings:")
-                output_lines.append("-" * 40)
-                for i, r in enumerate(results[:7], 1):
-                    title = r.get("title", "No title")
-                    url = r.get("url", "")
-                    content = r.get("content", "")[:300]
-                    output_lines.append(f"\n{i}. {title}")
-                    output_lines.append(f"   Source: {url}")
-                    output_lines.append(f"   Key Points: {content}...")
+                output_lines = [f"Deep Research Report: {ticker} - {topic}", "=" * 60, "", content]
 
-            result_text = "\n".join(output_lines)
+                if sources:
+                    output_lines.extend(["", "Sources:", "-" * 40])
+                    for i, source in enumerate(sources[:10], 1):
+                        output_lines.append(f"{i}. {source.get('title', 'No title')}")
+                        output_lines.append(f"   {source.get('url', '')}")
 
-            # Cache the result
-            _research_cache[cache_key] = {
-                "content": result_text,
-                "sources": len(results),
-            }
+                result_text = "\n".join(output_lines)
+                _research_cache[cache_key] = {"content": result_text, "sources": len(sources)}
+                return result_text
 
-            return result_text
-        else:
-            return str(response)
+            if status == "failed":
+                return f"Deep research failed: {result.get('error', 'Unknown error')}"
 
-    except ImportError:
-        # Fallback to langchain-tavily if tavily-python not available
-        return _tool_tavily_search(ticker, topic, tavily_api_key, "advanced")
+            time.sleep(2)
+
+        return "Deep research timed out. Please try again."
+
     except Exception as e:
         return f"Failed to perform deep research: {e}"
 
@@ -156,8 +137,6 @@ def _tool_company_news(ticker: str, tavily_api_key: str) -> str:
         tavily_api_key: Tavily API key
     """
     try:
-        from langchain_tavily import TavilySearch
-
         search = TavilySearch(
             tavily_api_key=tavily_api_key,
             max_results=7,
@@ -207,8 +186,6 @@ def _tool_competitor_analysis(ticker: str, tavily_api_key: str) -> str:
         tavily_api_key: Tavily API key
     """
     try:
-        from langchain_tavily import TavilySearch
-
         search = TavilySearch(
             tavily_api_key=tavily_api_key,
             max_results=10,
@@ -262,8 +239,6 @@ def _tool_industry_trends(ticker: str, tavily_api_key: str) -> str:
         tavily_api_key: Tavily API key
     """
     try:
-        from langchain_tavily import TavilySearch
-
         search = TavilySearch(
             tavily_api_key=tavily_api_key,
             max_results=8,
