@@ -135,7 +135,7 @@ async def chat(websocket: WebSocket, ticker: str):
             from agents.graph.sec_graph import create_sec_qa_agent
 
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash-exp",
+                model="gemini-2.5-flash",
                 google_api_key=google_api_key,
                 temperature=0
             )
