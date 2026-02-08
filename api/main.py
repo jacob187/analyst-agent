@@ -145,7 +145,7 @@ async def chat(websocket: WebSocket, ticker: str):
             tools_count = "16 tools" if tavily_api_key else "11 tools"
             await websocket.send_json({
                 "type": "system",
-                "message": f"Agent initialized for {ticker} with {tools_count}"
+                "message": f"Planning agent initialized for {ticker} with {tools_count}. Complex queries will be auto-decomposed."
             })
 
         except Exception as e:
