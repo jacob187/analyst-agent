@@ -16,8 +16,10 @@ export const storyContent = {
     `What started as a data extraction problem evolved into a comprehensive
     AI-powered financial analysis platform.`,
 
-    // Add more paragraphs as needed:
-    // `Your additional paragraph here...`,
+    `The architecture evolved further from a simple ReAct agent to an intelligent
+    planning system that routes queries based on complexity - using dynamic tool
+    selection for simple questions and structured multi-step execution for complex
+    financial analysis. This hybrid approach optimizes both performance and result quality.`,
   ],
 };
 
@@ -27,13 +29,16 @@ export const architectureContent = {
   systemOverview: {
     title: "System Overview",
     description: `The Analyst Agent is a full-stack application that combines real-time SEC filing data
-with market analysis, powered by an AI agent that can reason about financial information.`,
+with market analysis, powered by a hybrid AI agent architecture. The system intelligently routes queries
+based on complexity - using dynamic ReAct for simple questions and structured multi-step planning for
+complex financial analysis.`,
   },
 
   agentFlow: {
-    title: "LangGraph ReAct Agent Flow",
-    description: `The agent uses the ReAct (Reasoning + Acting) pattern to process queries. It reasons about
-which tools to use, executes them, observes results, and synthesizes a response.`,
+    title: "Intelligent Query Planning Flow",
+    description: `The agent uses query complexity classification to determine the optimal execution path.
+Simple queries are handled by a ReAct agent with dynamic tool selection. Complex queries are decomposed
+into structured execution plans with explicit steps, dependencies, and result synthesis.`,
   },
 };
 
@@ -144,7 +149,7 @@ export const techStackContent = {
 export const diagrams = {
   systemArchitecture: `
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           ANALYST AGENT ARCHITECTURE                         │
+│                      ANALYST AGENT ARCHITECTURE (v2)                         │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │   ┌──────────────┐         WebSocket          ┌──────────────────────────┐  │
@@ -154,82 +159,124 @@ export const diagrams = {
 │                                                            │                 │
 │                                                            ▼                 │
 │                                               ┌──────────────────────────┐  │
-│                                               │    LangGraph ReAct Agent │  │
-│                                               │    (create_react_agent)  │  │
+│                                               │ LangGraph Planning Agent │  │
+│                                               │  (StateGraph workflow)   │  │
 │                                               └────────────┬─────────────┘  │
 │                                                            │                 │
-│                            ┌───────────────────────────────┼────────────┐   │
-│                            │                               │            │   │
-│                            ▼                               ▼            ▼   │
-│               ┌────────────────────────┐    ┌─────────────────────────────┐ │
-│               │     SEC Tools (8)      │    │   Yahoo Finance Tools (3)   │ │
-│               │                        │    │                             │ │
-│               │  • Risk Factors        │    │  • Stock Price History      │ │
-│               │  • MD&A Analysis       │    │  • Technical Analysis       │ │
-│               │  • Balance Sheets      │    │  • Stock Info               │ │
-│               │  • Complete 10-K       │    │                             │ │
-│               │  • All Summaries       │    │                             │ │
-│               └───────────┬────────────┘    └──────────────┬──────────────┘ │
-│                           │                                │                 │
-│                           ▼                                ▼                 │
-│               ┌────────────────────────┐    ┌─────────────────────────────┐ │
-│               │      SEC EDGAR API     │    │      Yahoo Finance API      │ │
-│               │   (edgartools library) │    │    (yfinance library)       │ │
-│               └────────────────────────┘    └─────────────────────────────┘ │
+│                                  ┌─────────────────────────┴─────────────┐  │
+│                                  │      Query Complexity Router          │  │
+│                                  │  (LLM-based classification)           │  │
+│                                  └──────────┬───────────────┬────────────┘  │
+│                                             │               │                │
+│                                  SIMPLE     │               │    COMPLEX     │
+│                                             │               │                │
+│                                             ▼               ▼                │
+│                              ┌────────────────┐   ┌────────────────────┐    │
+│                              │  ReAct Agent   │   │  Query Planner     │    │
+│                              │  (Dynamic)     │   │  (Structured)      │    │
+│                              └───────┬────────┘   └─────────┬──────────┘    │
+│                                      │                      │                │
+│                                      │                      ▼                │
+│                                      │            ┌─────────────────────┐    │
+│                                      │            │  Step Executor      │    │
+│                                      │            │  (Loop until done)  │    │
+│                                      │            └─────────┬───────────┘    │
+│                                      │                      │                │
+│                                      │                      ▼                │
+│                                      │            ┌─────────────────────┐    │
+│                                      │            │   Synthesizer       │    │
+│                                      │            │  (Combine results)  │    │
+│                                      │            └─────────┬───────────┘    │
+│                                      │                      │                │
+│                                      └──────────┬───────────┘                │
+│                                                 │                            │
+│                            ┌────────────────────┼────────────────────┐       │
+│                            │                    │                    │       │
+│                            ▼                    ▼                    ▼       │
+│               ┌────────────────────┐  ┌─────────────────┐  ┌──────────────┐ │
+│               │   SEC Tools (8)    │  │  Yahoo (3)      │  │ Tavily (5)   │ │
+│               │                    │  │                 │  │  (optional)  │ │
+│               │ • Risk Factors     │  │ • Price History │  │ • News       │ │
+│               │ • MD&A             │  │ • Technicals    │  │ • Research   │ │
+│               │ • Balance Sheets   │  │ • Stock Info    │  │ • Industry   │ │
+│               └────────────────────┘  └─────────────────┘  └──────────────┘ │
 │                                                                              │
 │                           ┌────────────────────────────────┐                 │
 │                           │      Google Gemini LLM         │                 │
-│                           │  (langchain_google_genai)      │                 │
+│                           │  (Powers classification,       │                 │
+│                           │   planning, and synthesis)     │                 │
 │                           └────────────────────────────────┘                 │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘`,
 
   reactFlow: `
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                          LangGraph ReAct Agent Flow                          │
+│                   Intelligent Query Planning Workflow                       │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│    User Query                                                                │
-│        │                                                                     │
-│        ▼                                                                     │
-│   ┌─────────┐    ┌──────────────────────────────────────────────────────┐   │
-│   │  START  │───►│                   ReAct Agent                         │   │
-│   └─────────┘    │                                                       │   │
-│                  │   ┌─────────────────────────────────────────────────┐ │   │
-│                  │   │  REASON: Analyze query, decide which tool(s)    │ │   │
-│                  │   └─────────────────────────────────────────────────┘ │   │
-│                  │                         │                             │   │
-│                  │                         ▼                             │   │
-│                  │   ┌─────────────────────────────────────────────────┐ │   │
-│                  │   │  ACT: Call selected tool(s)                     │ │   │
-│                  │   │  • SEC tools for filings/risks/financials       │ │   │
-│                  │   │  • Yahoo tools for prices/technical analysis    │ │   │
-│                  │   └─────────────────────────────────────────────────┘ │   │
-│                  │                         │                             │   │
-│                  │                         ▼                             │   │
-│                  │   ┌─────────────────────────────────────────────────┐ │   │
-│                  │   │  OBSERVE: Process tool output                   │ │   │
-│                  │   └─────────────────────────────────────────────────┘ │   │
-│                  │                         │                             │   │
-│                  │              ┌──────────┴──────────┐                  │   │
-│                  │              ▼                     ▼                  │   │
-│                  │        Need more info?       Have enough?             │   │
-│                  │              │                     │                  │   │
-│                  │              └───────┐   ┌────────┘                   │   │
-│                  │                      │   │                            │   │
-│                  │                      ▼   ▼                            │   │
-│                  │   ┌─────────────────────────────────────────────────┐ │   │
-│                  │   │  SYNTHESIZE: Generate final response            │ │   │
-│                  │   └─────────────────────────────────────────────────┘ │   │
-│                  └──────────────────────────┬───────────────────────────┘   │
-│                                             │                                │
-│                                             ▼                                │
-│                                        ┌─────────┐                           │
-│                                        │   END   │                           │
-│                                        └─────────┘                           │
-│                                             │                                │
-│                                             ▼                                │
-│                                      Response to User                        │
+│                              User Query                                      │
+│                                  │                                           │
+│                                  ▼                                           │
+│                          ┌───────────────┐                                   │
+│                          │  Query Router │                                   │
+│                          │  (Classify)   │                                   │
+│                          └───────┬───────┘                                   │
+│                                  │                                           │
+│                    ┌─────────────┴─────────────┐                             │
+│                    │                           │                             │
+│            SIMPLE (≤1 tool)           COMPLEX (>1 tool)                      │
+│                    │                           │                             │
+│                    ▼                           ▼                             │
+│         ┌──────────────────┐        ┌─────────────────────┐                 │
+│         │   ReAct Agent    │        │   Query Planner     │                 │
+│         │                  │        │                     │                 │
+│         │  ┌────────────┐  │        │  Creates structured │                 │
+│         │  │  Reason    │  │        │  plan with steps:   │                 │
+│         │  │  Select    │  │        │  • Step 1: Action   │                 │
+│         │  │  Tool      │  │        │  • Step 2: Depends  │                 │
+│         │  └─────┬──────┘  │        │    on Step 1        │                 │
+│         │        │         │        │  • Step N: Finalize │                 │
+│         │        ▼         │        └──────────┬──────────┘                 │
+│         │  ┌────────────┐  │                   │                             │
+│         │  │  Execute   │  │                   ▼                             │
+│         │  │  Tool      │  │        ┌─────────────────────┐                 │
+│         │  └─────┬──────┘  │        │  Step Executor      │◄─┐              │
+│         │        │         │        │                     │  │              │
+│         │        ▼         │        │  Execute current    │  │              │
+│         │  ┌────────────┐  │        │  step with tool     │  │              │
+│         │  │  Response  │  │        └──────────┬──────────┘  │              │
+│         │  └────────────┘  │                   │              │              │
+│         └─────────┬────────┘                   ▼              │              │
+│                   │                    ┌───────────────┐      │              │
+│                   │                    │  More steps?  │──Yes─┘              │
+│                   │                    └───────┬───────┘                     │
+│                   │                            │ No                          │
+│                   │                            ▼                             │
+│                   │                   ┌─────────────────┐                    │
+│                   │                   │  Synthesizer    │                    │
+│                   │                   │                 │                    │
+│                   │                   │  Combine all    │                    │
+│                   │                   │  step results   │                    │
+│                   │                   │  into coherent  │                    │
+│                   │                   │  response       │                    │
+│                   │                   └────────┬────────┘                    │
+│                   │                            │                             │
+│                   └────────────┬───────────────┘                             │
+│                                │                                             │
+│                                ▼                                             │
+│                         ┌─────────────┐                                      │
+│                         │    END      │                                      │
+│                         └──────┬──────┘                                      │
+│                                │                                             │
+│                                ▼                                             │
+│                         Response to User                                     │
+│                                                                              │
+│  Key Features:                                                               │
+│  • Automatic complexity detection                                           │
+│  • Dynamic routing to optimal execution path                                │
+│  • Structured planning for multi-step analysis                              │
+│  • Dependency-aware step execution                                          │
+│  • Intelligent result synthesis                                             │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘`,
 };
