@@ -23,10 +23,14 @@ A full-stack AI-powered financial analysis application that combines SEC filings
 ## Features
 
 - **Interactive Chat Interface**: Real-time WebSocket communication with AI agent
+- **Intelligent Query Routing**: Automatically classifies queries and routes to optimal execution path
+- **Multi-Step Planning**: Complex queries are decomposed into structured execution plans
 - **SEC Filings Analysis**: Extracts and analyzes MD&A, Risk Factors, and Balance Sheets
 - **Technical Analysis**: RSI, MACD, Bollinger Bands, moving averages, and more
 - **Web Research**: Company news, competitor analysis, and industry trends (with Tavily)
-- **ReAct Agent Pattern**: Reason → Act → Observe → Synthesize workflow
+- **Hybrid Agent Architecture**:
+  - Simple queries → ReAct agent (dynamic tool selection)
+  - Complex queries → Planner → Step-by-step execution → Synthesis
 - **Smart Caching**: Minimizes redundant API calls for efficient data retrieval
 
 ## Quick Start
@@ -68,6 +72,51 @@ Open http://localhost:5173 and enter your API keys in Settings:
 
 ## Architecture
 
+### Query Planning Workflow
+
+The system uses a hybrid architecture that intelligently routes queries based on complexity:
+
+```
+User Query
+    │
+    ▼
+┌───────────────────────────────────────────────────────┐
+│                  Query Router                         │
+│  (Classifies complexity: simple vs. complex)          │
+└───────────┬───────────────────────────────────────────┘
+            │
+      ┌─────┴─────┐
+      ▼           ▼
+  Simple      Complex
+      │           │
+      │           ▼
+      │     ┌──────────────┐
+      │     │   Planner    │ Creates multi-step execution plan
+      │     └──────┬───────┘
+      │            │
+      │            ▼
+      │     ┌──────────────┐
+      │     │     Step     │ Executes each step with dependencies
+      │     │   Executor   │ (loops until all steps complete)
+      │     └──────┬───────┘
+      │            │
+      │            ▼
+      │     ┌──────────────┐
+      │     │ Synthesizer  │ Combines results into final response
+      │     └──────┬───────┘
+      │            │
+      ▼            ▼
+  ┌─────────────────┐
+  │  ReAct Agent    │ Dynamic tool selection for simple queries
+  └────────┬────────┘
+           │
+    ┌──────┴──────┐
+    ▼             ▼
+ Response    Final Answer
+```
+
+### System Architecture
+
 ```
 ┌─────────────────┐     WebSocket      ┌─────────────────┐
 │    Frontend     │◄──────────────────►│    FastAPI      │
@@ -76,7 +125,7 @@ Open http://localhost:5173 and enter your API keys in Settings:
                                                 │
                                        ┌────────▼────────┐
                                        │  LangGraph      │
-                                       │  ReAct Agent    │
+                                       │  Planning Agent │
                                        └────────┬────────┘
                                                 │
                     ┌───────────────────────────┼───────────────────────────┐
@@ -86,6 +135,14 @@ Open http://localhost:5173 and enter your API keys in Settings:
            │  (edgartools)   │        │  (yfinance)     │        │   (Tavily)      │
            └─────────────────┘        └─────────────────┘        └─────────────────┘
 ```
+
+**Key Components:**
+
+- **Query Router**: Uses LLM to classify query complexity and estimate required tools
+- **ReAct Agent**: For simple queries (1 tool, straightforward), uses dynamic reasoning
+- **Query Planner**: Decomposes complex queries into structured `AnalysisStep` objects
+- **Step Executor**: Executes plan steps sequentially, respecting dependencies
+- **Synthesizer**: Combines multi-step results into comprehensive final response
 
 ## Available Tools
 
@@ -116,7 +173,9 @@ analyst-agent/
 │   └── db.py                  # SQLite database for chat history
 ├── agents/                     # AI agent implementation
 │   ├── graph/
-│   │   └── sec_graph.py       # LangGraph agent orchestration
+│   │   └── sec_graph.py       # LangGraph planning workflow
+│   ├── planner.py             # Query complexity classification & planning
+│   ├── prompts.py             # System prompts for agents
 │   ├── sec_workflow/          # SEC filings processing
 │   │   ├── get_SEC_data.py
 │   │   └── sec_llm_models.py
