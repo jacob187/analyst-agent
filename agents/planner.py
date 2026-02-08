@@ -4,7 +4,11 @@ from typing import List, Literal
 from pydantic import BaseModel, Field
 from langchain_core.language_models.chat_models import BaseChatModel
 
-from agents.prompts import QUERY_PLANNER_SYSTEM_PROMPT, QUERY_CLASSIFIER_PROMPT
+from agents.prompts import (
+    QUERY_PLANNER_SYSTEM_PROMPT,
+    QUERY_CLASSIFIER_PROMPT,
+    TOOL_CAPABILITIES,
+)
 
 
 class AnalysisStep(BaseModel):
@@ -45,34 +49,6 @@ class QueryPlan(BaseModel):
         default="",
         description="How to combine results from multiple steps",
     )
-
-
-# Tool categories for the planner to understand
-TOOL_CAPABILITIES = """
-Available tools and their capabilities:
-
-SEC FILING TOOLS:
-- get_risk_factors_summary: Analyze risks from 10-K filings (sentiment, key risks, severity)
-- get_mda_summary: Management outlook, sentiment, future plans from MD&A section
-- get_balance_sheet_summary: Financial health, key metrics, red flags
-- get_all_summaries: Comprehensive 10-K overview (risks + MD&A + financials)
-- get_raw_risk_factors: Raw text of risk factors (for detailed reading)
-- get_raw_management_discussion: Raw MD&A text
-- get_raw_balance_sheets: Raw balance sheet data availability
-
-STOCK MARKET TOOLS:
-- get_stock_info: Current price, P/E ratios, market cap, 52-week range, dividend yield
-- get_stock_price_history: Last 10 trading days OHLC prices
-- get_technical_analysis: RSI, MACD, Bollinger Bands, moving averages, volatility
-- get_financial_metrics: Revenue growth, net income growth, debt ratios
-
-RESEARCH TOOLS (if available):
-- web_search: Search for current news/information
-- deep_research: Comprehensive multi-source research on a topic
-- get_company_news: Latest news and developments
-- analyze_competitors: Competitive landscape analysis
-- get_industry_trends: Industry trends and forecasts
-"""
 
 
 class QueryPlanner:

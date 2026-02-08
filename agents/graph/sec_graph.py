@@ -1,140 +1,354 @@
-from typing import Dict, Any, TypedDict, Annotated, Optional
+"""
+LangGraph workflow for SEC financial analysis with query planning.
+
+Architecture:
+- Simple queries → ReAct agent directly
+- Complex queries → Planner → Step Executor (loop) → Synthesizer
+"""
+
+from typing import Dict, Any, TypedDict, Annotated, Optional, List, Literal
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import create_react_agent
 
-from agents.prompts import SEC_AGENT_SYSTEM_PROMPT
+from agents.prompts import (
+    SEC_AGENT_SYSTEM_PROMPT,
+    SYNTHESIS_SYSTEM_PROMPT,
+    STEP_EXECUTOR_PROMPT,
+)
+from agents.planner import (
+    QueryPlanner,
+    QueryPlan,
+    QueryClassification,
+    AnalysisStep,
+    create_planner,
+)
 
 
-class SECState(TypedDict):
-    """State for SEC analysis workflow using granular SEC tools."""
+class AnalysisState(TypedDict):
+    """Unified state for the analysis workflow."""
 
+    # Core
+    messages: Annotated[List[BaseMessage], add_messages]
     ticker: str
-    llm_id: str
-    available_tools: list
-    messages: Annotated[list, add_messages]
-    current_step: str
+
+    # Planning
+    query_complexity: str  # simple | moderate | complex
+    classification: Optional[QueryClassification]
+    plan: Optional[QueryPlan]
+
+    # Execution
+    current_step_index: int
+    step_results: Dict[int, str]
+
+    # Output
+    final_response: str
 
 
-def create_sec_agent(
-    llm: BaseChatModel,
-    ticker: str,
-    checkpointer=None,
-    tavily_api_key: Optional[str] = None,
-) -> Any:
-    """
-    Create a ReAct agent with granular SEC tools and optional research tools.
-    The agent can choose which specific tool to use based on the query.
+def _get_latest_query(messages: List[BaseMessage]) -> str:
+    """Extract the latest user query from messages."""
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            return msg.content
+    return ""
 
-    Args:
-        llm: Language model for the agent
-        ticker: Company ticker symbol
-        checkpointer: Optional checkpointer for conversation memory
-        tavily_api_key: Optional Tavily API key for web research tools
-    """
+
+def _create_tools(ticker: str, llm: BaseChatModel, tavily_api_key: Optional[str] = None):
+    """Create all available tools for the ticker."""
     from agents.tools.sec_tools import create_sec_tools
 
-    # Create SEC tools using proper separation of concerns
-    tools, llm_id = create_sec_tools(ticker, llm)
+    tools, _ = create_sec_tools(ticker, llm)
 
-    # Add research tools if Tavily API key is provided
     if tavily_api_key:
         from agents.tools.research_tools import create_research_tools
 
         research_tools = create_research_tools(ticker, tavily_api_key)
         tools.extend(research_tools)
 
-    # System prompt from centralized prompts file
-    system_prompt = SEC_AGENT_SYSTEM_PROMPT.format(ticker=ticker)
-
-    # Create a ReAct agent with the tools, system prompt, and optional checkpointer
-    agent = create_react_agent(
-        llm,
-        tools,
-        prompt=system_prompt,
-        checkpointer=checkpointer,
-    )
-
-    return agent, llm_id
+    return tools
 
 
-def create_sec_workflow(llm: BaseChatModel) -> StateGraph:
-    """
-    Create a LangGraph workflow that initializes SEC tools and makes them available.
-    This ensures only one SEC API call is made.
-    """
+def _build_tools_dict(tools: List[Any]) -> Dict[str, Any]:
+    """Convert tools list to name->func dict for direct execution."""
+    return {tool.name: tool.func for tool in tools}
 
-    def initialize_sec_tools(state: SECState) -> SECState:
-        """Initialize SEC tools using proper separation of concerns."""
-        from agents.tools.sec_tools import create_sec_tools
 
-        ticker = state["ticker"]
-        print(f"Initializing SEC tools factory for {ticker}")
+# =============================================================================
+# Node Functions
+# =============================================================================
 
-        # This makes the single SEC API call
-        tools, llm_id = create_sec_tools(ticker, llm)
-        state["llm_id"] = llm_id  # Store the LLM ID for reference
-        state["available_tools"] = tools
-        state["current_step"] = "initialized"
-        state["messages"].append(
-            f"Initialized SEC tools for {ticker} with {len(state['available_tools'])} tools available"
-        )
+
+def create_router_node(planner: QueryPlanner):
+    """Create router node that classifies query complexity."""
+
+    def router(state: AnalysisState) -> AnalysisState:
+        query = _get_latest_query(state["messages"])
+
+        if not query:
+            state["query_complexity"] = "simple"
+            state["classification"] = None
+            return state
+
+        # Classify the query
+        classification = planner.classify_query(query)
+        state["classification"] = classification
+
+        # Determine complexity routing
+        if classification.complexity == "simple" and classification.estimated_tools <= 1:
+            state["query_complexity"] = "simple"
+        else:
+            state["query_complexity"] = "complex"
+
         return state
 
-    # Create the workflow
-    workflow = StateGraph(SECState)
+    return router
+
+
+def create_react_node(react_agent: Any):
+    """Create node that runs the ReAct agent for simple queries."""
+
+    def react_node(state: AnalysisState) -> AnalysisState:
+        result = react_agent.invoke({"messages": state["messages"]})
+
+        if result and "messages" in result:
+            response = result["messages"][-1].content
+        else:
+            response = str(result)
+
+        state["final_response"] = response
+        return state
+
+    return react_node
+
+
+def create_planner_node(planner: QueryPlanner):
+    """Create node that generates an execution plan for complex queries."""
+
+    def planner_node(state: AnalysisState) -> AnalysisState:
+        query = _get_latest_query(state["messages"])
+
+        plan = planner.create_plan(query)
+        state["plan"] = plan
+        state["current_step_index"] = 0
+        state["step_results"] = {}
+
+        return state
+
+    return planner_node
+
+
+def create_step_executor_node(tools_dict: Dict[str, Any], ticker: str):
+    """Create node that executes the current plan step."""
+
+    def step_executor(state: AnalysisState) -> AnalysisState:
+        plan = state["plan"]
+        if not plan or not plan.steps:
+            return state
+
+        step_index = state["current_step_index"]
+        if step_index >= len(plan.steps):
+            return state
+
+        step = plan.steps[step_index]
+
+        # Execute the tool directly
+        if step.tool in tools_dict:
+            try:
+                result = tools_dict[step.tool]("")
+                state["step_results"][step.id] = str(result)
+            except Exception as e:
+                state["step_results"][step.id] = f"[ERROR: {str(e)}]"
+        else:
+            state["step_results"][step.id] = f"[ERROR: Tool '{step.tool}' not found]"
+
+        # Move to next step
+        state["current_step_index"] = step_index + 1
+
+        return state
+
+    return step_executor
+
+
+def create_synthesizer_node(llm: BaseChatModel, ticker: str):
+    """Create node that synthesizes all step results into final response."""
+
+    def synthesizer(state: AnalysisState) -> AnalysisState:
+        plan = state["plan"]
+        step_results = state["step_results"]
+        query = _get_latest_query(state["messages"])
+
+        # Format step results
+        results_text = []
+        if plan:
+            for step in plan.steps:
+                result = step_results.get(step.id, "[No result]")
+                results_text.append(
+                    f"=== Step {step.id}: {step.action} (via {step.tool}) ===\n{result}\n"
+                )
+
+        synthesis_approach = plan.synthesis_approach if plan else "Combine findings into a comprehensive answer"
+
+        prompt = SYNTHESIS_SYSTEM_PROMPT.format(
+            ticker=ticker,
+            step_results="\n".join(results_text),
+            query=query,
+            synthesis_approach=synthesis_approach,
+        )
+
+        response = llm.invoke(prompt)
+        state["final_response"] = response.content
+
+        return state
+
+    return synthesizer
+
+
+# =============================================================================
+# Routing Functions
+# =============================================================================
+
+
+def route_by_complexity(state: AnalysisState) -> Literal["react_agent", "planner"]:
+    """Route based on query complexity."""
+    if state["query_complexity"] == "simple":
+        return "react_agent"
+    return "planner"
+
+
+def check_more_steps(state: AnalysisState) -> Literal["step_executor", "synthesizer"]:
+    """Check if there are more steps to execute."""
+    plan = state["plan"]
+    if not plan or not plan.steps:
+        return "synthesizer"
+
+    if state["current_step_index"] < len(plan.steps):
+        return "step_executor"
+
+    return "synthesizer"
+
+
+# =============================================================================
+# Graph Construction
+# =============================================================================
+
+
+def create_planning_workflow(
+    llm: BaseChatModel,
+    ticker: str,
+    tavily_api_key: Optional[str] = None,
+) -> StateGraph:
+    """
+    Create the unified LangGraph workflow with planning capabilities.
+
+    Flow:
+    1. Router classifies query complexity
+    2. Simple → ReAct agent → END
+    3. Complex → Planner → Step Executor (loop) → Synthesizer → END
+    """
+    # Create tools and planner
+    tools = _create_tools(ticker, llm, tavily_api_key)
+    tools_dict = _build_tools_dict(tools)
+    has_research = tavily_api_key is not None
+
+    planner = create_planner(llm, ticker, has_research)
+
+    # Create ReAct agent for simple queries
+    system_prompt = SEC_AGENT_SYSTEM_PROMPT.format(ticker=ticker)
+    react_agent = create_react_agent(llm, tools, prompt=system_prompt)
+
+    # Build the graph
+    workflow = StateGraph(AnalysisState)
 
     # Add nodes
-    workflow.add_node("initialize", initialize_sec_tools)
+    workflow.add_node("router", create_router_node(planner))
+    workflow.add_node("react_agent", create_react_node(react_agent))
+    workflow.add_node("planner", create_planner_node(planner))
+    workflow.add_node("step_executor", create_step_executor_node(tools_dict, ticker))
+    workflow.add_node("synthesizer", create_synthesizer_node(llm, ticker))
 
-    # Set entry point and edges
-    workflow.set_entry_point("initialize")
-    workflow.add_edge("initialize", END)
+    # Set entry point
+    workflow.set_entry_point("router")
+
+    # Add edges
+    workflow.add_conditional_edges("router", route_by_complexity)
+    workflow.add_edge("react_agent", END)
+    workflow.add_edge("planner", "step_executor")
+    workflow.add_conditional_edges("step_executor", check_more_steps)
+    workflow.add_edge("synthesizer", END)
 
     return workflow.compile()
 
 
-def initialize_sec_tools_for_ticker(ticker: str, llm: BaseChatModel) -> Dict[str, Any]:
+# =============================================================================
+# Public API
+# =============================================================================
+
+
+class PlanningAgent:
     """
-    Initialize SEC tools for a ticker and return the factory and available tools.
+    Wrapper that provides a consistent interface for the planning workflow.
 
-    Args:
-        ticker: Company ticker symbol
-        llm: Language model for processing
-
-    Returns:
-        Dictionary containing the tools factory and available tools
+    Matches the interface expected by the API (invoke with messages dict).
     """
-    workflow = create_sec_workflow(llm)
 
-    initial_state = SECState(
-        ticker=ticker,
-        llm_id="",
-        available_tools=[],
-        messages=[],
-        current_step="starting",
-    )
+    def __init__(
+        self,
+        workflow: StateGraph,
+        ticker: str,
+    ):
+        self.workflow = workflow
+        self.ticker = ticker
 
-    # Run the workflow
-    final_state = workflow.invoke(initial_state)
+    def invoke(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Process a query through the planning workflow.
 
-    return {
-        "ticker": ticker,
-        "status": final_state["current_step"],
-        "llm_id": final_state["llm_id"],
-        "available_tools": final_state["available_tools"],
-        "messages": final_state["messages"],
-    }
+        Args:
+            inputs: Dict with "messages" key containing conversation history
+
+        Returns:
+            Dict with "messages" key containing updated conversation
+        """
+        messages = inputs.get("messages", [])
+
+        # Initialize state
+        initial_state: AnalysisState = {
+            "messages": messages,
+            "ticker": self.ticker,
+            "query_complexity": "",
+            "classification": None,
+            "plan": None,
+            "current_step_index": 0,
+            "step_results": {},
+            "final_response": "",
+        }
+
+        # Run workflow
+        final_state = self.workflow.invoke(initial_state)
+
+        # Return in expected format
+        response = final_state.get("final_response", "")
+        if response:
+            return {"messages": messages + [AIMessage(content=response)]}
+
+        return {"messages": messages}
 
 
-def create_sec_qa_agent(
+def create_planning_agent(
     ticker: str,
     llm: BaseChatModel,
     tavily_api_key: Optional[str] = None,
-) -> Any:
+) -> PlanningAgent:
     """
-    Create a Q&A agent that can answer questions about SEC filings using granular tools.
+    Create a planning-enabled agent for financial analysis.
+
+    This is the main entry point for creating an agent with:
+    - Query complexity classification
+    - Multi-step planning for complex queries
+    - Direct ReAct execution for simple queries
+    - Result synthesis for planned queries
 
     Args:
         ticker: Company ticker symbol
@@ -142,9 +356,34 @@ def create_sec_qa_agent(
         tavily_api_key: Optional Tavily API key for web research tools
 
     Returns:
-        Configured agent that can answer SEC-related questions
+        PlanningAgent instance with invoke() method
     """
-    agent, tools_factory = create_sec_agent(
-        llm, ticker, tavily_api_key=tavily_api_key
-    )
-    return agent
+    workflow = create_planning_workflow(llm, ticker, tavily_api_key)
+    return PlanningAgent(workflow, ticker)
+
+
+# =============================================================================
+# Backward Compatibility
+# =============================================================================
+
+
+def create_sec_qa_agent(
+    ticker: str,
+    llm: BaseChatModel,
+    tavily_api_key: Optional[str] = None,
+) -> PlanningAgent:
+    """
+    Create a Q&A agent with planning capabilities.
+
+    This maintains backward compatibility with existing code while
+    providing the new planning functionality.
+
+    Args:
+        ticker: Company ticker symbol
+        llm: Language model for processing
+        tavily_api_key: Optional Tavily API key for web research tools
+
+    Returns:
+        PlanningAgent instance (drop-in replacement for old ReAct agent)
+    """
+    return create_planning_agent(ticker, llm, tavily_api_key)
