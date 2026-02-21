@@ -1,0 +1,30 @@
+[
+  {
+    "id": "golden_risk",
+    "query": "What are the main risk factors for Apple?",
+    "ticker": "AAPL",
+    "expected_complexity": "simple",
+    "must_mention": ["risk", "Apple"]
+  },
+  {
+    "id": "golden_technical",
+    "query": "Give me a technical analysis of Apple stock",
+    "ticker": "AAPL",
+    "expected_complexity": "simple",
+    "must_mention": ["RSI", "MACD", "moving average"]
+  },
+  {
+    "id": "golden_comprehensive",
+    "query": "Provide a full investment analysis of Apple including fundamentals, technicals, and risk factors",
+    "ticker": "AAPL",
+    "expected_complexity": "complex",
+    "must_mention": ["risk", "revenue", "price"]
+  },
+  {
+    "id": "golden_financial_health",
+    "query": "How healthy are Apple's finances? Look at the balance sheet and income statement",
+    "ticker": "AAPL",
+    "expected_complexity": "complex",
+    "must_mention": ["balance sheet", "debt", "revenue"]
+  }
+]
