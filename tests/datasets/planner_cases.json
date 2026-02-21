@@ -1,0 +1,32 @@
+[
+  {
+    "id": "risk_and_financials",
+    "query": "Analyze Apple's risk factors and financial health",
+    "expected_tools": ["get_risk_factors_summary", "get_balance_sheet_summary"],
+    "optional_tools": ["get_financial_metrics", "get_all_summaries"]
+  },
+  {
+    "id": "technical_overview",
+    "query": "Give me a technical analysis overview with price history",
+    "expected_tools": ["get_technical_analysis"],
+    "optional_tools": ["get_stock_price_history", "get_stock_info"]
+  },
+  {
+    "id": "full_analysis",
+    "query": "Provide a comprehensive analysis of Apple including SEC filings, fundamentals, and technical indicators",
+    "expected_tools": ["get_technical_analysis"],
+    "optional_tools": ["get_all_summaries", "get_risk_factors_summary", "get_mda_summary", "get_balance_sheet_summary", "get_stock_info", "get_financial_metrics"]
+  },
+  {
+    "id": "mda_and_outlook",
+    "query": "What does Apple's management say about the future? Include the MD&A analysis and stock trends",
+    "expected_tools": ["get_mda_summary"],
+    "optional_tools": ["get_stock_price_history", "get_technical_analysis", "get_stock_info"]
+  },
+  {
+    "id": "balance_sheet_deep_dive",
+    "query": "Deep dive into Apple's balance sheet and financial metrics",
+    "expected_tools": ["get_balance_sheet_summary"],
+    "optional_tools": ["get_financial_metrics", "get_raw_balance_sheets"]
+  }
+]

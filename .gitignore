@@ -22,3 +22,4 @@ htmlcov/
 # Project specific
 /data/
 CLAUDE.md
+.claude

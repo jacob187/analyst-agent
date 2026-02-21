@@ -23,17 +23,27 @@ dependencies = [
     "aiosqlite>=0.22.1",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.3.5",
-    "pytest-cov>=6.0.0",
-    "pytest-asyncio>=0.24.0",
-    "pytest-mock>=3.14.0",
+[tool.pytest.ini_options]
+markers = [
+    "eval_unit: pure logic tests, no API keys needed",
+    "eval_fast: single LLM call each (router/planner/synthesizer)",
+    "eval_tools: individual tool validation (requires API keys)",
+    "eval_quality: LLM-as-judge scoring (requires API keys)",
+    "eval_e2e: full agent invocations (requires API keys)",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+    "pytest-cov>=6.0.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-mock>=3.14.0",
+    "langsmith>=0.6.2",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["api", "agents"]

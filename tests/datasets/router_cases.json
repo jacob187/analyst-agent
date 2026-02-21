@@ -1,0 +1,50 @@
+[
+  {
+    "id": "simple_price",
+    "query": "What is Apple's current stock price?",
+    "expected_complexity": "simple",
+    "reasoning": "Single data point, one tool needed"
+  },
+  {
+    "id": "simple_pe",
+    "query": "What is AAPL's P/E ratio?",
+    "expected_complexity": "simple",
+    "reasoning": "Single metric from stock info"
+  },
+  {
+    "id": "simple_market_cap",
+    "query": "What is Apple's market cap?",
+    "expected_complexity": "simple",
+    "reasoning": "Single metric lookup"
+  },
+  {
+    "id": "simple_dividend",
+    "query": "Does Apple pay a dividend?",
+    "expected_complexity": "simple",
+    "reasoning": "Single yes/no from stock info"
+  },
+  {
+    "id": "simple_52week",
+    "query": "What is AAPL's 52-week high?",
+    "expected_complexity": "simple",
+    "reasoning": "Single metric from stock info"
+  },
+  {
+    "id": "complex_comprehensive",
+    "query": "Give me a comprehensive analysis of Apple including risk factors, financial health, and technical indicators",
+    "expected_complexity": "complex",
+    "reasoning": "Requires SEC filings + financials + technicals across multiple tools"
+  },
+  {
+    "id": "complex_compare",
+    "query": "Compare Apple's risk factors with their management discussion, and tell me how the technical indicators reflect these risks",
+    "expected_complexity": "complex",
+    "reasoning": "Cross-references multiple SEC sections with market data"
+  },
+  {
+    "id": "complex_investment",
+    "query": "Should I invest in Apple? Analyze the fundamentals, technicals, and SEC filings to give me a complete picture",
+    "expected_complexity": "complex",
+    "reasoning": "Full investment thesis requires all data sources"
+  }
+]
