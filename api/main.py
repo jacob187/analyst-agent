@@ -134,13 +134,33 @@ async def chat(websocket: WebSocket, ticker: str):
             from langchain_google_genai import ChatGoogleGenerativeAI
             from agents.graph.sec_graph import create_sec_qa_agent
 
+            # Main LLM: thinking set to "low" for tool-calling nodes.
+            # Gemini 3 Flash always thinks (can't fully disable it), but
+            # "low" minimizes overhead. langchain-google-genai >= 4.0 handles
+            # thought signatures automatically in tool call round-trips.
             llm = ChatGoogleGenerativeAI(
                 model="gemini-3-flash-preview",
                 google_api_key=google_api_key,
-                temperature=0
+                temperature=0,
+                thinking_level="low",
             )
 
-            agent = create_sec_qa_agent(ticker, llm, tavily_api_key=tavily_api_key)
+            # Synthesizer LLM: deeper thinking for the final analytical
+            # response. This node doesn't call tools so we get the full
+            # benefit of extended reasoning.
+            synthesizer_llm = ChatGoogleGenerativeAI(
+                model="gemini-3-flash-preview",
+                google_api_key=google_api_key,
+                temperature=0,
+                thinking_level="medium",
+                include_thoughts=True,
+            )
+
+            agent = create_sec_qa_agent(
+                ticker, llm,
+                tavily_api_key=tavily_api_key,
+                synthesizer_llm=synthesizer_llm,
+            )
 
             tools_count = "16 tools" if tavily_api_key else "11 tools"
             await websocket.send_json({
@@ -170,37 +190,29 @@ async def chat(websocket: WebSocket, ticker: str):
                     # Add to conversation history
                     conversation_history.append(HumanMessage(content=user_query))
 
-                    # Stream agent response
-                    await websocket.send_json({
-                        "type": "status",
-                        "message": "Processing query..."
-                    })
-
+                    # Stream agent events to the frontend in real-time.
+                    # Uses agent.stream() which is an async generator backed
+                    # by LangGraph's native astream() — no thread bridge needed.
+                    full_response = ""
                     try:
-                        # Invoke agent with full conversation history
-                        result = agent.invoke({"messages": conversation_history})
-
-                        # Send response
-                        if result and "messages" in result:
-                            response = result["messages"][-1].content
-                        else:
-                            response = str(result)
-
-                        # Add to conversation history
-                        conversation_history.append(AIMessage(content=response))
-
-                        # Save assistant response (fire-and-forget)
-                        asyncio.create_task(save_message(session_id, "assistant", response))
-
-                        await websocket.send_json({
-                            "type": "response",
-                            "message": response
-                        })
+                        async for event in agent.stream(
+                            {"messages": conversation_history}
+                        ):
+                            await websocket.send_json(event)
+                            if event["type"] == "response":
+                                full_response = event["message"]
                     except Exception as e:
                         await websocket.send_json({
                             "type": "error",
                             "message": f"Error processing query: {str(e)}"
                         })
+
+                    # Persist the final response
+                    if full_response:
+                        conversation_history.append(AIMessage(content=full_response))
+                        asyncio.create_task(
+                            save_message(session_id, "assistant", full_response)
+                        )
 
             except WebSocketDisconnect:
                 break

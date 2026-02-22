@@ -3,18 +3,33 @@
 
   export let role: 'user' | 'assistant';
   export let content: string;
+  export let thinking: string = '';
+  export let status: string = '';
 
-  // Convert markdown to HTML
-  // The $: makes this reactive - it re-runs whenever 'content' changes
+  // Convert markdown to HTML — reactive, re-runs when content changes
   $: htmlContent = marked.parse(content);
+  $: thinkingHtml = thinking ? marked.parse(thinking) : '';
 </script>
 
 <div class="message {role}">
   <div class="header">
     <span class="label">{role === 'user' ? 'YOU' : 'ANALYST'}</span>
+    {#if status}
+      <span class="status-badge">{status}</span>
+    {/if}
   </div>
-  <!-- {@html} renders the HTML string instead of showing it as text -->
-  <div class="content">{@html htmlContent}</div>
+
+  <!-- Thinking block: collapsible <details> so users can peek at reasoning -->
+  {#if thinking}
+    <details class="thinking-block">
+      <summary>Thinking</summary>
+      <div class="thinking-content">{@html thinkingHtml}</div>
+    </details>
+  {/if}
+
+  {#if content}
+    <div class="content">{@html htmlContent}</div>
+  {/if}
 </div>
 
 <style>
@@ -51,6 +66,49 @@
 
   .message.assistant .label {
     color: var(--success);
+  }
+
+  .status-badge {
+    font-size: 0.65rem;
+    color: var(--accent);
+    opacity: 0.8;
+    font-style: italic;
+  }
+
+  .thinking-block {
+    margin-bottom: 0.5rem;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .thinking-block summary {
+    padding: 0.4rem 0.8rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    cursor: pointer;
+    background: rgba(255, 255, 255, 0.03);
+    user-select: none;
+  }
+
+  .thinking-block summary:hover {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  .thinking-content {
+    padding: 0.6rem 0.8rem;
+    font-size: 0.8rem;
+    line-height: 1.4;
+    color: var(--text-muted);
+    font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+    background: rgba(0, 0, 0, 0.2);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 300px;
+    overflow-y: auto;
   }
 
   .content {

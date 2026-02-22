@@ -11,6 +11,9 @@
   interface Message {
     role: 'user' | 'assistant';
     content: string;
+    thinking?: string;
+    status?: string;
+    isStreaming?: boolean;
   }
 
   let messages: Message[] = [];
@@ -116,14 +119,12 @@
 
       if (data.type === 'auth_success') {
         authenticated = true;
-        // Only add auth message if not continuing (existing messages already loaded)
         if (!sessionId) {
           messages = [{
             role: 'assistant',
             content: data.message
           }];
         } else {
-          // Add a system message indicating session resumed
           messages = [...messages, {
             role: 'assistant',
             content: '[SESSION RESUMED] ' + data.message
@@ -134,23 +135,38 @@
           role: 'assistant',
           content: `[SYSTEM] ${data.message}`
         }];
-      } else if (data.type === 'status') {
-        messages = [...messages, {
-          role: 'assistant',
-          content: `[STATUS] ${data.message}`
-        }];
+
+      // --- Streaming event types ---
+      // These all update a single "streaming" message in-place rather
+      // than appending new messages for each event.
+
+      } else if (data.type === 'node') {
+        // Graph node transition: update the streaming message's status line
+        updateStreamingMessage({ status: data.message });
+
+      } else if (data.type === 'tool') {
+        // Tool execution: show tool name + step progress
+        const toolStatus = `Running ${data.tool} (step ${data.step}/${data.total})`;
+        updateStreamingMessage({ status: toolStatus });
+
+      } else if (data.type === 'thinking') {
+        // Thinking token from the LLM: append to thinking field
+        appendToStreamingMessage('thinking', data.message);
+
+      } else if (data.type === 'token') {
+        // Content token from the LLM: append to content field
+        appendToStreamingMessage('content', data.message);
+
       } else if (data.type === 'response') {
-        messages = [...messages, {
-          role: 'assistant',
-          content: data.message
-        }];
+        // Final assembled response: finalize the streaming message
+        finalizeStreamingMessage(data.message);
+
       } else if (data.type === 'error') {
         messages = [...messages, {
           role: 'assistant',
           content: `[ERROR] ${data.message}`
         }];
       } else {
-        // Legacy format
         messages = [...messages, {
           role: 'assistant',
           content: data.message || JSON.stringify(data)
@@ -182,16 +198,61 @@
   function sendMessage() {
     if (!input.trim() || !socket || !connected || !authenticated) return;
 
-    messages = [...messages, {
-      role: 'user',
-      content: input
-    }];
+    // Add user message + a blank streaming message for the assistant response
+    messages = [
+      ...messages,
+      { role: 'user', content: input },
+      { role: 'assistant', content: '', thinking: '', status: 'Processing query...', isStreaming: true },
+    ];
 
     socket.send(JSON.stringify({
       type: 'query',
       message: input
     }));
     input = '';
+  }
+
+  /**
+   * Find (or create) the current streaming message and set fields on it.
+   * This is how node/tool events update the status line in-place.
+   */
+  function updateStreamingMessage(fields: Partial<Message>) {
+    const idx = messages.findIndex(m => m.isStreaming);
+    if (idx === -1) return;
+    messages[idx] = { ...messages[idx], ...fields };
+    messages = messages; // trigger Svelte reactivity
+  }
+
+  /**
+   * Append text to a field on the streaming message (content or thinking).
+   * Tokens arrive one at a time, so we concat them as they come in.
+   */
+  function appendToStreamingMessage(field: 'content' | 'thinking', text: string) {
+    const idx = messages.findIndex(m => m.isStreaming);
+    if (idx === -1) return;
+    const current = (messages[idx][field] || '') as string;
+    messages[idx] = { ...messages[idx], [field]: current + text };
+    messages = messages;
+  }
+
+  /**
+   * Replace the streaming message with the final assembled response.
+   * Clears status and the isStreaming flag so the message renders normally.
+   */
+  function finalizeStreamingMessage(fullContent: string) {
+    const idx = messages.findIndex(m => m.isStreaming);
+    if (idx === -1) {
+      // Fallback: no streaming message found, just append
+      messages = [...messages, { role: 'assistant', content: fullContent }];
+      return;
+    }
+    messages[idx] = {
+      ...messages[idx],
+      content: fullContent,
+      status: '',
+      isStreaming: false,
+    };
+    messages = messages;
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -214,7 +275,12 @@
 
   <div class="messages" bind:this={messagesContainer}>
     {#each messages as message}
-      <ChatMessage role={message.role} content={message.content} />
+      <ChatMessage
+        role={message.role}
+        content={message.content}
+        thinking={message.thinking || ''}
+        status={message.status || ''}
+      />
     {/each}
   </div>
 
