@@ -157,7 +157,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.110.0" },
     { name = "langchain", specifier = ">=0.3.22" },
     { name = "langchain-google-genai", specifier = ">=4.0.0" },
-    { name = "langchain-tavily", specifier = ">=0.1.0" },
+    { name = "langchain-tavily", specifier = ">=0.2.0" },
     { name = "langgraph", specifier = ">=0.6.4" },
     { name = "pydantic", specifier = ">=2.6.0" },
     { name = "tavily-python", specifier = ">=0.5.0" },
