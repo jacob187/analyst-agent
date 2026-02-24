@@ -23,3 +23,6 @@ htmlcov/
 /data/
 CLAUDE.md
 .claude
+
+# Docker
+.dockerignore

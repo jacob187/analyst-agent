@@ -1,5 +1,10 @@
 # Stock Analyst Agent
 
+[![CI](https://github.com/jacob187/analyst-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/jacob187/analyst-agent/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Node](https://img.shields.io/badge/node-20+-green.svg)](https://nodejs.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A full-stack AI-powered financial analysis application that combines SEC filings analysis, technical indicators, and real-time web research through an interactive chat interface.
 
 ## Tech Stack
@@ -35,14 +40,21 @@ A full-stack AI-powered financial analysis application that combines SEC filings
 
 ## Quick Start
 
-### Prerequisites
-- Python 3.12+
-- Node.js 20+
-- [uv](https://github.com/astral-sh/uv) (Python package manager)
-
-### Run the Application
+### Option 1: Docker (Recommended)
 
 ```bash
+cp .env.example .env   # fill in your API keys
+docker compose up --build
+```
+
+Frontend → http://localhost:5173 | Backend → http://localhost:8000
+
+### Option 2: Local Development
+
+**Prerequisites:** Python 3.12+, Node.js 20+, [uv](https://github.com/astral-sh/uv)
+
+```bash
+cp .env.example .env   # fill in your API keys
 ./start.sh
 ```
 
@@ -50,10 +62,10 @@ This installs dependencies (if needed) and starts both the backend (port 8000) a
 
 ### Configure API Keys
 
-Open http://localhost:5173 and enter your API keys in Settings:
-- **Google API Key** - For Gemini LLM
-- **SEC Header** - Your email (SEC requires identification)
-- **Tavily API Key** - Optional, for web research
+Open http://localhost:5173 and enter your API keys in Settings (or set them in `.env`):
+- **Google API Key** - For Gemini LLM (required)
+- **SEC Header** - Your email (SEC requires identification, required)
+- **Tavily API Key** - Optional, for web research tools
 
 ## API Endpoints
 
