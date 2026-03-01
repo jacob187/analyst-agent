@@ -98,11 +98,23 @@ def planner(llm):
 
 
 @pytest.fixture(scope="session")
-def tools(llm):
+def sec_header():
+    """SEC EDGAR identity header from .env.
+
+    Skips tests that depend on SEC API if not set.
+    """
+    header = os.environ.get("SEC_HEADER", "")
+    if not header:
+        pytest.skip("SEC_HEADER not set — skipping SEC-dependent test")
+    return header
+
+
+@pytest.fixture(scope="session")
+def tools(llm, sec_header):
     """List of Tool objects for AAPL."""
     from agents.tools.sec_tools import create_sec_tools
 
-    tool_list, _ = create_sec_tools(DEFAULT_TICKER, llm)
+    tool_list, _ = create_sec_tools(DEFAULT_TICKER, llm, sec_header)
     return tool_list
 
 
@@ -118,11 +130,11 @@ def tools_dict(tools):
 
 
 @pytest.fixture(scope="session")
-def agent(llm):
+def agent(llm, sec_header):
     """Full PlanningAgent for AAPL."""
     from agents.graph.sec_graph import create_planning_agent
 
-    return create_planning_agent(ticker=DEFAULT_TICKER, llm=llm)
+    return create_planning_agent(ticker=DEFAULT_TICKER, llm=llm, sec_header=sec_header)
 
 
 # ---------------------------------------------------------------------------
