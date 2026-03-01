@@ -100,12 +100,6 @@ async def chat(websocket: WebSocket, ticker: str):
             await websocket.close()
             return
 
-        # Set environment variables for this session
-        os.environ["GOOGLE_API_KEY"] = google_api_key
-        os.environ["SEC_HEADER"] = sec_header
-        if tavily_api_key:
-            os.environ["TAVILY_API_KEY"] = tavily_api_key
-
         # Use existing session or create a new one
         existing_session_id = auth_message.get("session_id")
         conversation_history = []  # Track conversation for agent memory
@@ -160,6 +154,7 @@ async def chat(websocket: WebSocket, ticker: str):
                 ticker, llm,
                 tavily_api_key=tavily_api_key,
                 synthesizer_llm=synthesizer_llm,
+                sec_header=sec_header,
             )
 
             tools_count = "16 tools" if tavily_api_key else "11 tools"

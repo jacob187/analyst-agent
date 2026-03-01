@@ -60,11 +60,11 @@ def _get_latest_query(messages: List[BaseMessage]) -> str:
     return ""
 
 
-def _create_tools(ticker: str, llm: BaseChatModel, tavily_api_key: Optional[str] = None):
+def _create_tools(ticker: str, llm: BaseChatModel, tavily_api_key: Optional[str] = None, sec_header: str = ""):
     """Create all available tools for the ticker."""
     from agents.tools.sec_tools import create_sec_tools
 
-    tools, _ = create_sec_tools(ticker, llm)
+    tools, _ = create_sec_tools(ticker, llm, sec_header)
 
     if tavily_api_key:
         from agents.tools.research_tools import create_research_tools
@@ -331,6 +331,7 @@ def create_planning_workflow(
     ticker: str,
     tavily_api_key: Optional[str] = None,
     synthesizer_llm: Optional[BaseChatModel] = None,
+    sec_header: str = "",
 ) -> StateGraph:
     """
     Create the unified LangGraph workflow with planning capabilities.
@@ -348,9 +349,10 @@ def create_planning_workflow(
         synthesizer_llm: Optional separate LLM for the synthesizer node.
              This can have thinking enabled since it doesn't call tools.
              Falls back to `llm` if not provided.
+        sec_header: SEC EDGAR identity header for this session
     """
     # Create tools and planner
-    tools = _create_tools(ticker, llm, tavily_api_key)
+    tools = _create_tools(ticker, llm, tavily_api_key, sec_header)
     tools_dict = _build_tools_dict(tools)
     has_research = tavily_api_key is not None
 
@@ -569,6 +571,7 @@ def create_planning_agent(
     llm: BaseChatModel,
     tavily_api_key: Optional[str] = None,
     synthesizer_llm: Optional[BaseChatModel] = None,
+    sec_header: str = "",
 ) -> PlanningAgent:
     """
     Create a planning-enabled agent for financial analysis.
@@ -580,11 +583,12 @@ def create_planning_agent(
         synthesizer_llm: Optional thinking-enabled LLM for synthesis only.
              Gemini's thought signatures conflict with tool calls, so thinking
              must be isolated to the synthesizer which doesn't call tools.
+        sec_header: SEC EDGAR identity header for this session
 
     Returns:
         PlanningAgent instance with invoke() and stream_sync() methods
     """
-    workflow = create_planning_workflow(llm, ticker, tavily_api_key, synthesizer_llm)
+    workflow = create_planning_workflow(llm, ticker, tavily_api_key, synthesizer_llm, sec_header)
     return PlanningAgent(workflow, ticker)
 
 
@@ -598,6 +602,7 @@ def create_sec_qa_agent(
     llm: BaseChatModel,
     tavily_api_key: Optional[str] = None,
     synthesizer_llm: Optional[BaseChatModel] = None,
+    sec_header: str = "",
 ) -> PlanningAgent:
     """
     Create a Q&A agent with planning capabilities.
@@ -605,4 +610,4 @@ def create_sec_qa_agent(
     This maintains backward compatibility with existing code while
     providing the new planning functionality.
     """
-    return create_planning_agent(ticker, llm, tavily_api_key, synthesizer_llm)
+    return create_planning_agent(ticker, llm, tavily_api_key, synthesizer_llm, sec_header)
