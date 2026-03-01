@@ -1,5 +1,4 @@
 from edgar import Company, set_identity
-import os
 import json
 from typing import Literal, Optional, Dict, Any
 from datetime import datetime
@@ -44,10 +43,7 @@ class FilingMetadata:
 
 
 class SECDataRetrieval:
-    def __init__(self, ticker: str):
-        sec_header = os.getenv("SEC_HEADER")
-        if not sec_header:
-            raise ValueError("SEC_HEADER environment variable is not set")
+    def __init__(self, ticker: str, sec_header: str):
         set_identity(sec_header)
         self.ticker = ticker
         self.company = Company(ticker)
