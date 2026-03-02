@@ -5,13 +5,16 @@ TOOL_CAPABILITIES = """
 Available tools and their capabilities:
 
 SEC FILING TOOLS:
-- get_risk_factors_summary: Analyze risks from 10-K filings (sentiment, key risks, severity)
-- get_mda_summary: Management outlook, sentiment, future plans from MD&A section
+- get_risk_factors_summary: Analyze risks from most recent filing (10-Q preferred, 10-K fallback) — sentiment, key risks, severity
+- get_mda_summary: Management outlook, sentiment, future plans from most recent MD&A (10-Q preferred)
 - get_balance_sheet_summary: Financial health, key metrics, red flags
-- get_all_summaries: Comprehensive 10-K overview (risks + MD&A + financials)
-- get_raw_risk_factors: Raw text of risk factors (for detailed reading)
-- get_raw_management_discussion: Raw MD&A text
+- get_all_summaries: Comprehensive overview across risks, MD&A, and financials
+- get_raw_risk_factors: Raw risk factors text (most recent filing)
+- get_raw_management_discussion: Raw MD&A text (most recent filing)
 - get_raw_balance_sheets: Raw balance sheet data availability
+- get_business_overview: Company business description, products, segments, markets (10-K Item 1)
+- get_cybersecurity_disclosure: Cybersecurity risk management and governance (10-K Item 1C)
+- get_legal_proceedings: Significant pending litigation and regulatory actions (10-K Item 3)
 
 STOCK MARKET TOOLS:
 - get_stock_info: Current price, P/E ratios, market cap, 52-week range, dividend yield
