@@ -50,6 +50,27 @@ def _get_cache_key(ticker: str, analysis_type: str) -> str:
     return f"{ticker}_{analysis_type}"
 
 
+def _is_substantive(text: str) -> bool:
+    """Return True if text has real content rather than 10-Q boilerplate."""
+    boilerplate_phrases = [
+        "no material changes",
+        "not materially changed",
+        "no significant changes",
+        "previously disclosed",
+        "incorporated by reference",
+    ]
+    lower = text.lower().strip()
+    return bool(lower) and (len(lower) >= 500 or not any(phrase in lower for phrase in boilerplate_phrases))
+
+
+def _fetch_best_section(fetch_fn) -> Dict[str, Any]:
+    """Try 10-Q first; fall back to 10-K when 10-Q is boilerplate or unavailable."""
+    result = fetch_fn("10-Q")
+    if result.get("found") and _is_substantive(result.get("text", "")):
+        return result
+    return fetch_fn("10-K")
+
+
 def _format_top_n(items: list[str], n: int = 3) -> str:
     lines = []
     for i, item in enumerate(items[:n], 1):
@@ -58,30 +79,27 @@ def _format_top_n(items: list[str], n: int = 3) -> str:
 
 
 def _tool_raw_risk_factors(ticker: str, llm: BaseChatModel, sec_header: str = "") -> str:
-    """Return raw Risk Factors text for the given ticker."""
+    """Return raw Risk Factors text, preferring 10-Q (most recent) with 10-K fallback."""
     try:
         retriever = _get_shared_retriever(ticker, sec_header)
-        # Use the new dict-based method that includes metadata
-        result = retriever.get_risk_factors_raw("10-K")
-        if not result.get("found", False):
-            return f"Risk Factors section not found in 10-K filing for {ticker}."
-        return result.get("text", "No text available")
+        result = _fetch_best_section(retriever.get_risk_factors_raw)
+        if not result.get("found"):
+            return f"Risk Factors section not found for {ticker}."
+        return result["text"]
     except Exception as e:
         return f"Failed to retrieve risk factors for {ticker}: {e}"
 
 
 def _tool_risk_factors_summary(ticker: str, llm: BaseChatModel, sec_header: str = "") -> str:
-    """Return summarized Risk Factors for the given ticker (cached)."""
+    """Return summarized Risk Factors, preferring 10-Q with 10-K fallback (cached)."""
     cache_key = _get_cache_key(ticker, "risk_summary")
     if cache_key not in _processed_cache.get(ticker, {}):
         try:
             retriever = _get_shared_retriever(ticker, sec_header)
             processor = _get_shared_processor(ticker, llm)
-            # Use the new dict-based method that includes metadata
-            risk_data = retriever.get_risk_factors_raw("10-K")
+            risk_data = _fetch_best_section(retriever.get_risk_factors_raw)
             if not risk_data.get("found", False):
-                return f"Risk Factors section not found in 10-K filing for {ticker}."
-            # Pass the full dict to the analysis method
+                return f"Risk Factors section not found for {ticker}."
             analysis = processor.analyze_risk_factors(ticker, risk_data)
             _processed_cache[ticker][cache_key] = analysis.model_dump()
         except Exception as e:
@@ -97,30 +115,27 @@ def _tool_risk_factors_summary(ticker: str, llm: BaseChatModel, sec_header: str 
 
 
 def _tool_raw_mda(ticker: str, llm: BaseChatModel, sec_header: str = "") -> str:
-    """Return raw MD&A text for the given ticker."""
+    """Return raw MD&A text, preferring 10-Q (most recent) with 10-K fallback."""
     try:
         retriever = _get_shared_retriever(ticker, sec_header)
-        # Use the new dict-based method that includes metadata
-        result = retriever.get_mda_raw("10-K")
-        if not result.get("found", False):
-            return f"Management Discussion section not found in 10-K filing for {ticker}."
-        return result.get("text", "No text available")
+        result = _fetch_best_section(retriever.get_mda_raw)
+        if not result.get("found"):
+            return f"Management Discussion section not found for {ticker}."
+        return result["text"]
     except Exception as e:
         return f"Failed to retrieve MD&A for {ticker}: {e}"
 
 
 def _tool_mda_summary(ticker: str, llm: BaseChatModel, sec_header: str = "") -> str:
-    """Return summarized MD&A for the given ticker (cached)."""
+    """Return summarized MD&A, preferring 10-Q with 10-K fallback (cached)."""
     cache_key = _get_cache_key(ticker, "mda_summary")
     if cache_key not in _processed_cache.get(ticker, {}):
         try:
             retriever = _get_shared_retriever(ticker, sec_header)
             processor = _get_shared_processor(ticker, llm)
-            # Use the new dict-based method that includes metadata
-            mda_data = retriever.get_mda_raw("10-K")
+            mda_data = _fetch_best_section(retriever.get_mda_raw)
             if not mda_data.get("found", False):
-                return f"Management Discussion section not found in 10-K filing for {ticker}."
-            # Pass the full dict to the analysis method
+                return f"Management Discussion section not found for {ticker}."
             analysis = processor.analyze_mda(ticker, mda_data)
             _processed_cache[ticker][cache_key] = analysis.model_dump()
         except Exception as e:
@@ -178,6 +193,42 @@ def _tool_balance_sheet_summary(ticker: str, llm: BaseChatModel, sec_header: str
             response += f"\n\nRed Flags: {', '.join(red_flags[:2])}"
         return response
     return str(result)
+
+
+def _tool_business_overview(ticker: str, sec_header: str = "") -> str:
+    """Return raw Business Overview text (10-K Item 1)."""
+    try:
+        retriever = _get_shared_retriever(ticker, sec_header)
+        result = retriever.get_business_raw()
+        if not result.get("found"):
+            return f"Business overview not found for {ticker}."
+        return result["text"]
+    except Exception as e:
+        return f"Failed to retrieve business overview for {ticker}: {e}"
+
+
+def _tool_cybersecurity_disclosure(ticker: str, sec_header: str = "") -> str:
+    """Return Cybersecurity risk management disclosure (10-K Item 1C)."""
+    try:
+        retriever = _get_shared_retriever(ticker, sec_header)
+        result = retriever.get_cybersecurity_raw()
+        if not result.get("found"):
+            return f"Cybersecurity disclosure not found for {ticker} (may not be present in older filings)."
+        return result["text"]
+    except Exception as e:
+        return f"Failed to retrieve cybersecurity disclosure for {ticker}: {e}"
+
+
+def _tool_legal_proceedings(ticker: str, sec_header: str = "") -> str:
+    """Return Legal Proceedings text (10-K Item 3)."""
+    try:
+        retriever = _get_shared_retriever(ticker, sec_header)
+        result = retriever.get_legal_proceedings_raw()
+        if not result.get("found"):
+            return f"Legal proceedings section not found for {ticker}."
+        return result["text"]
+    except Exception as e:
+        return f"Failed to retrieve legal proceedings for {ticker}: {e}"
 
 
 def _tool_complete_10k_text(ticker: str, llm: BaseChatModel, sec_header: str = "") -> str:
@@ -467,6 +518,21 @@ def create_sec_tools(ticker: str, llm: BaseChatModel, sec_header: str = "") -> t
             name="get_complete_10k_text",
             description="Get list of available 10-K sections retrieved as raw text.",
             func=lambda query="": _tool_complete_10k_text(ticker, llm, sec_header),
+        ),
+        Tool.from_function(
+            name="get_business_overview",
+            description="Get the Company Business section (10-K Item 1): products, services, segments, and market overview.",
+            func=lambda query="": _tool_business_overview(ticker, sec_header),
+        ),
+        Tool.from_function(
+            name="get_cybersecurity_disclosure",
+            description="Get the Cybersecurity risk management and governance disclosure (10-K Item 1C, SEC-mandated since 2023).",
+            func=lambda query="": _tool_cybersecurity_disclosure(ticker, sec_header),
+        ),
+        Tool.from_function(
+            name="get_legal_proceedings",
+            description="Get Legal Proceedings section (10-K Item 3): significant pending litigation, regulatory actions, and legal risks.",
+            func=lambda query="": _tool_legal_proceedings(ticker, sec_header),
         ),
         Tool.from_function(
             name="get_all_summaries",
