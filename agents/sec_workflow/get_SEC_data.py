@@ -3,6 +3,49 @@ import json
 from typing import Literal, Optional, Dict, Any
 from datetime import datetime
 
+# Maps item codes to edgartools __getitem__ keys for each form.
+# Installed edgartools 3.x resolves sections via chunked_document using bare
+# "Item X" keys — part-qualified keys ("Part I, Item 2") are only supported
+# in the unreleased dev branch and should not be used here.
+_TENK_ITEM_KEYS: Dict[str, str] = {
+    "1":  "Item 1",   # Business
+    "1A": "Item 1A",  # Risk Factors
+    "1C": "Item 1C",  # Cybersecurity (SEC-mandated since 2023)
+    "3":  "Item 3",   # Legal Proceedings
+    "7":  "Item 7",   # MD&A
+    "7A": "Item 7A",  # Quantitative/Qualitative Market Risk
+}
+
+_TENQ_ITEM_KEYS: Dict[str, str] = {
+    "1A": "Item 1A",  # Risk Factors (Part II — often "no material changes" boilerplate)
+    "2":  "Item 2",   # MD&A (Part I)
+    "3":  "Item 3",   # Market Risk (Part I — often boilerplate)
+    "4":  "Item 4",   # Controls and Procedures (Part I)
+    "5":  "Item 5",   # Other Information (Part II — insider trading arrangements, etc.)
+}
+
+# Item code → edgartools __getitem__ key for each form.
+# 10-K: items are unique across all parts; keys are "Item X" strings.
+# 10-Q: installed edgartools 3.x resolves via chunked_document, so bare
+#        "Item X" keys work.  "Item 3" = Market Risk (Part I),
+#        "Item 1A" = Risk Factors (Part II).
+_TENK_ITEM_KEYS: Dict[str, str] = {
+    "1":  "Item 1",   # Business
+    "1A": "Item 1A",  # Risk Factors
+    "1C": "Item 1C",  # Cybersecurity (SEC-mandated since 2023)
+    "3":  "Item 3",   # Legal Proceedings
+    "7":  "Item 7",   # MD&A
+    "7A": "Item 7A",  # Quantitative / Qualitative Market Risk
+}
+
+_TENQ_ITEM_KEYS: Dict[str, str] = {
+    "1A": "Item 1A",  # Risk Factors (Part II)
+    "2":  "Item 2",   # MD&A (Part I)
+    "3":  "Item 3",   # Market Risk (Part I)
+    "4":  "Item 4",   # Controls and Procedures (Part I)
+    "5":  "Item 5",   # Other Information (Part II — insider trading etc.)
+}
+
 
 class FilingMetadata:
     """Metadata for SEC filings to track provenance."""
@@ -144,90 +187,73 @@ class SECDataRetrieval:
         )
         return filing
 
-    def get_section(
-        self, form: Literal["10-K", "10-Q"], item: Literal["1A", "2", "7"]
-    ) -> Dict[str, Any]:
-        """
-        Extract specific sections from SEC filings with metadata.
+    def get_section(self, form: Literal["10-K", "10-Q"], item: str) -> Dict[str, Any]:
+        """Extract one section from a 10-K or 10-Q filing.
 
-        Args:
-            form: "10-K" or "10-Q"
-            item: "1A" (Risk Factors), "2" (MD&A for 10-Q), "7" (MD&A for 10-K)
+        Returns {"text", "metadata", "found"} where metadata includes the
+        accession_number — the stable key for future database caching.
+        The DB layer will wrap this method, not the tool layer above it.
 
-        Returns:
-            Dict with 'text', 'metadata', and 'found' keys
+        Item codes:
+          10-K: "1" business, "1A" risk factors, "1C" cybersecurity,
+                "3" legal proceedings, "7" MD&A, "7A" market risk
+          10-Q: "1A" risk factors, "2" MD&A, "3" market risk,
+                "4" controls, "5" other information
         """
         try:
             if form == "10-K":
                 filing_obj = self.get_tenk()
                 metadata = self._tenk_metadata
-            else:  # 10-Q
+                key = _TENK_ITEM_KEYS.get(item)
+            else:
                 filing_obj = self.get_tenq()
                 metadata = self._tenq_metadata
+                key = _TENQ_ITEM_KEYS.get(item)
 
-            text = None
-            found = False
+            if key is None:
+                return {
+                    "text": f"Item '{item}' not supported for {form}",
+                    "metadata": metadata.to_dict() if metadata else {},
+                    "found": False,
+                }
 
-            # Use only the known working attributes from EdgarTools
-            if form == "10-K":
-                if item == "1A":
-                    if hasattr(filing_obj, "risk_factors"):
-                        text = filing_obj.risk_factors
-                        found = True
-                elif item == "7":
-                    if hasattr(filing_obj, "management_discussion"):
-                        text = filing_obj.management_discussion
-                        found = True
-            elif form == "10-Q":
-                # 10-Q objects don't have risk_factors or management_discussion as convenience properties
-                # Check if they exist and handle gracefully
-                if item == "1A":
-                    if hasattr(filing_obj, "risk_factors"):
-                        text = filing_obj.risk_factors
-                        found = True
-                    else:
-                        text = "Risk Factors section not available in 10-Q filing. This is common when there are no material changes to risk factors since the most recent 10-K filing."
-                        found = False
-                elif item == "2":
-                    if hasattr(filing_obj, "management_discussion"):
-                        text = filing_obj.management_discussion
-                        found = True
-                    else:
-                        text = "Management Discussion and Analysis section not available as a convenience property in this 10-Q filing."
-                        found = False
-
-            if not text:
-                text = (
-                    f"Section Item {item} not found or not available in {form} filing"
-                )
+            text = filing_obj[key]
+            found = text is not None and bool(str(text).strip())
+            if not found:
+                text = f"Section {key} not found in {form} filing"
 
             return {
-                "text": text or "",
+                "text": str(text) if text else "",
                 "metadata": metadata.to_dict() if metadata else {},
                 "found": found,
             }
 
         except Exception as e:
-            print(f"Error extracting section {item} from {form}: {e}")
-            return {
-                "text": f"Error extracting section {item} from {form}: {e}",
-                "metadata": {},
-                "found": False,
-            }
+            return {"text": f"Error extracting {item} from {form}: {e}", "metadata": {}, "found": False}
 
-    # New form-specific methods with clear naming and provenance
     def get_mda_raw(self, form: Literal["10-K", "10-Q"] = "10-K") -> Dict[str, Any]:
-        """Get Management Discussion and Analysis with metadata."""
-        if form == "10-K":
-            return self.get_section(form, "7")
-        else:
-            return self.get_section(form, "2")
+        """MD&A: Item 7 from 10-K, Item 2 from 10-Q."""
+        return self.get_section(form, "7" if form == "10-K" else "2")
 
-    def get_risk_factors_raw(
-        self, form: Literal["10-K", "10-Q"] = "10-K"
-    ) -> Dict[str, Any]:
-        """Get Risk Factors with metadata."""
+    def get_risk_factors_raw(self, form: Literal["10-K", "10-Q"] = "10-K") -> Dict[str, Any]:
+        """Risk Factors: Item 1A in both forms."""
         return self.get_section(form, "1A")
+
+    def get_business_raw(self) -> Dict[str, Any]:
+        """Company Business overview — 10-K Item 1."""
+        return self.get_section("10-K", "1")
+
+    def get_cybersecurity_raw(self) -> Dict[str, Any]:
+        """Cybersecurity risk management — 10-K Item 1C (SEC-mandated since 2023)."""
+        return self.get_section("10-K", "1C")
+
+    def get_legal_proceedings_raw(self) -> Dict[str, Any]:
+        """Legal Proceedings — 10-K Item 3."""
+        return self.get_section("10-K", "3")
+
+    def get_market_risk_raw(self, form: Literal["10-K", "10-Q"] = "10-K") -> Dict[str, Any]:
+        """Market Risk: Item 7A from 10-K, Item 3 from 10-Q."""
+        return self.get_section(form, "7A" if form == "10-K" else "3")
 
     def get_balance_sheet(
         self, form: Literal["10-K", "10-Q", "both"] = "both"
