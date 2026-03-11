@@ -24,9 +24,16 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             ticker TEXT NOT NULL,
+            summary TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Migration: add summary column to existing databases that predate this column
+    try:
+        await db.execute("ALTER TABLE sessions ADD COLUMN summary TEXT")
+        await db.commit()
+    except Exception:
+        pass  # Column already exists
     await db.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,
@@ -65,10 +72,54 @@ async def create_session(ticker: str) -> str:
     db = await get_db()
     await db.execute(
         "INSERT INTO sessions (id, ticker) VALUES (?, ?)",
-        (session_id, ticker)
+        (session_id, ticker.upper())
     )
     await db.commit()
     return session_id
+
+async def get_or_create_session(ticker: str) -> str:
+    """
+    Return the existing session ID for this ticker, or create one.
+
+    One session per ticker is enforced at the application level. This means
+    entering AAPL always resumes the AAPL conversation — delete the session
+    from History to start fresh.
+    """
+    db = await get_db()
+    ticker = ticker.upper()
+    async with db.execute(
+        "SELECT id FROM sessions WHERE ticker = ?", (ticker,)
+    ) as cursor:
+        row = await cursor.fetchone()
+        if row:
+            return row["id"]
+    # No existing session — create one
+    session_id = str(uuid.uuid4())
+    await db.execute(
+        "INSERT INTO sessions (id, ticker) VALUES (?, ?)", (session_id, ticker)
+    )
+    await db.commit()
+    return session_id
+
+async def get_session_by_ticker(ticker: str) -> dict | None:
+    """Return session metadata for a ticker, or None if no session exists."""
+    db = await get_db()
+    async with db.execute(
+        "SELECT id, ticker, created_at FROM sessions WHERE ticker = ?",
+        (ticker.upper(),)
+    ) as cursor:
+        row = await cursor.fetchone()
+        if row:
+            return {"id": row["id"], "ticker": row["ticker"], "created_at": row["created_at"]}
+        return None
+
+async def update_session_summary(session_id: str, summary: str) -> None:
+    """Store a rolling summary of the conversation for context compression."""
+    db = await get_db()
+    await db.execute(
+        "UPDATE sessions SET summary = ? WHERE id = ?", (summary, session_id)
+    )
+    await db.commit()
 
 async def save_message(session_id: str, role: str, content: str) -> str:
     """Save a message to the database. Returns message ID."""
@@ -102,15 +153,20 @@ async def get_sessions(limit: int = 50) -> list[dict]:
         return [{"id": row["id"], "ticker": row["ticker"], "created_at": row["created_at"]} for row in rows]
 
 async def get_session(session_id: str) -> dict | None:
-    """Get a specific session by ID."""
+    """Get a specific session by ID, including any stored summary."""
     db = await get_db()
     async with db.execute(
-        "SELECT id, ticker, created_at FROM sessions WHERE id = ?",
+        "SELECT id, ticker, summary, created_at FROM sessions WHERE id = ?",
         (session_id,)
     ) as cursor:
         row = await cursor.fetchone()
         if row:
-            return {"id": row["id"], "ticker": row["ticker"], "created_at": row["created_at"]}
+            return {
+                "id": row["id"],
+                "ticker": row["ticker"],
+                "summary": row["summary"],
+                "created_at": row["created_at"],
+            }
         return None
 
 async def get_settings() -> dict | None:
