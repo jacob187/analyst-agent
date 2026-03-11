@@ -99,8 +99,27 @@
     }
   }
 
-  function handleTickerSubmit(event: CustomEvent<string>) {
-    currentTicker = event.detail;
+  async function handleTickerSubmit(event: CustomEvent<string>) {
+    const ticker = event.detail.toUpperCase();
+    currentTicker = ticker;
+
+    // Check whether a session already exists for this ticker.
+    // If so, route into the "continue" flow so past messages load in the UI.
+    // To start completely fresh, the user must delete the session from History first.
+    try {
+      const res = await fetch(`${API_BASE}/sessions/by-ticker/${ticker}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.session) {
+          continuingSessionId = data.session.id;
+          currentPage = 'continue-session';
+          return;
+        }
+      }
+    } catch (e) {
+      console.error('Failed to check for existing session:', e);
+    }
+    // No existing session — currentTicker is set, template renders new ChatWindow
   }
 
   function resetSession() {

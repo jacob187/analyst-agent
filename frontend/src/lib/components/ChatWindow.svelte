@@ -114,12 +114,21 @@
       socket?.send(JSON.stringify(authPayload));
     };
 
-    socket.onmessage = (event) => {
+    socket.onmessage = async (event) => {
       const data = JSON.parse(event.data);
 
       if (data.type === 'auth_success') {
         authenticated = true;
-        if (!sessionId) {
+        if (data.resumed && !sessionId) {
+          // Backend found an existing session for this ticker even though the
+          // frontend didn't pass a session_id. Load the history now.
+          sessionId = data.session_id;
+          await loadExistingMessages();
+          messages = [...messages, {
+            role: 'assistant',
+            content: '[SESSION RESUMED] ' + data.message
+          }];
+        } else if (!sessionId) {
           messages = [{
             role: 'assistant',
             content: data.message
