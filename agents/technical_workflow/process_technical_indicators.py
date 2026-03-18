@@ -33,16 +33,20 @@ class TechnicalIndicators:
         }
 
     def _dict_to_dataframe(self, data: Dict[str, Any]) -> pd.DataFrame:
-        """Convert dictionary data back to DataFrame"""
-        if not data:  # Check if the dictionary is empty
+        """Convert dictionary data back to DataFrame.
+
+        Financial statement dicts (income_stmt, balance_sheet) from yfinance
+        have string row labels as the index and dates as columns — do NOT
+        coerce the index to DatetimeIndex.
+        """
+        if not data:
             return pd.DataFrame()
         try:
-            df = pd.DataFrame(
+            return pd.DataFrame(
                 data=data["data"],
                 columns=data["columns"],
-                index=pd.DatetimeIndex(data["index"]),
+                index=data["index"],
             )
-            return df
         except Exception as e:
             print(f"Error converting dictionary to DataFrame: {e}")
             return pd.DataFrame()
