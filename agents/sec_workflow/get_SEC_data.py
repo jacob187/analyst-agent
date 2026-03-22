@@ -3,27 +3,6 @@ import json
 from typing import Literal, Optional, Dict, Any
 from datetime import datetime
 
-# Maps item codes to edgartools __getitem__ keys for each form.
-# Installed edgartools 3.x resolves sections via chunked_document using bare
-# "Item X" keys — part-qualified keys ("Part I, Item 2") are only supported
-# in the unreleased dev branch and should not be used here.
-_TENK_ITEM_KEYS: Dict[str, str] = {
-    "1":  "Item 1",   # Business
-    "1A": "Item 1A",  # Risk Factors
-    "1C": "Item 1C",  # Cybersecurity (SEC-mandated since 2023)
-    "3":  "Item 3",   # Legal Proceedings
-    "7":  "Item 7",   # MD&A
-    "7A": "Item 7A",  # Quantitative/Qualitative Market Risk
-}
-
-_TENQ_ITEM_KEYS: Dict[str, str] = {
-    "1A": "Item 1A",  # Risk Factors (Part II — often "no material changes" boilerplate)
-    "2":  "Item 2",   # MD&A (Part I)
-    "3":  "Item 3",   # Market Risk (Part I — often boilerplate)
-    "4":  "Item 4",   # Controls and Procedures (Part I)
-    "5":  "Item 5",   # Other Information (Part II — insider trading arrangements, etc.)
-}
-
 # Item code → edgartools __getitem__ key for each form.
 # 10-K: items are unique across all parts; keys are "Item X" strings.
 # 10-Q: installed edgartools 3.x resolves via chunked_document, so bare
