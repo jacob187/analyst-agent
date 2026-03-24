@@ -11,6 +11,7 @@ Streaming:
 - invoke() remains unchanged for backward compatibility
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, TypedDict, Annotated, Optional, List, Literal, Generator
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
@@ -146,33 +147,82 @@ def create_planner_node(planner: QueryPlanner):
     return planner_node
 
 
+def _build_dependency_layers(steps: List[AnalysisStep]) -> List[List[AnalysisStep]]:
+    """Group steps into layers where each layer's dependencies are satisfied by prior layers.
+
+    Steps declare which earlier step IDs they depend on via `depends_on`.
+    Layer 0 contains all steps with no dependencies — these run first, in parallel.
+    Layer 1 contains steps whose dependencies are all in layer 0, and so on.
+
+    This is a topological sort by depth. Steps within the same layer are independent
+    of each other and safe to execute concurrently.
+    """
+    completed_ids: set[int] = set()
+    remaining = list(steps)
+    layers: List[List[AnalysisStep]] = []
+
+    while remaining:
+        # Find steps whose dependencies are all satisfied
+        ready = [s for s in remaining if all(d in completed_ids for d in s.depends_on)]
+
+        if not ready:
+            # Circular dependency or missing IDs — flush remaining to avoid infinite loop
+            layers.append(remaining)
+            break
+
+        layers.append(ready)
+        completed_ids.update(s.id for s in ready)
+        remaining = [s for s in remaining if s.id not in completed_ids]
+
+    return layers
+
+
+def _execute_step(step: AnalysisStep, tools_dict: Dict[str, Any]) -> tuple[int, str]:
+    """Execute a single step and return (step_id, result). Thread-safe helper."""
+    if step.tool not in tools_dict:
+        return step.id, f"[ERROR: Tool '{step.tool}' not found]"
+    try:
+        return step.id, str(tools_dict[step.tool](""))
+    except Exception as e:
+        return step.id, f"[ERROR: {str(e)}]"
+
+
 def create_step_executor_node(tools_dict: Dict[str, Any], ticker: str):
-    """Create node that executes the current plan step."""
+    """Create node that executes all plan steps, running independent steps in parallel.
+
+    Steps are grouped into dependency layers via _build_dependency_layers().
+    Each layer runs concurrently with ThreadPoolExecutor — only steps that share
+    a layer run at the same time, and a layer only starts once the previous layer
+    has fully completed. This respects the depends_on declarations from the planner
+    while maximising throughput.
+    """
 
     def step_executor(state: AnalysisState) -> AnalysisState:
         plan = state["plan"]
         if not plan or not plan.steps:
             return state
 
-        step_index = state["current_step_index"]
-        if step_index >= len(plan.steps):
-            return state
+        layers = _build_dependency_layers(plan.steps)
+        step_results: Dict[int, str] = {}
 
-        step = plan.steps[step_index]
+        for layer in layers:
+            if len(layer) == 1:
+                # Single step — no thread overhead needed
+                step_id, result = _execute_step(layer[0], tools_dict)
+                step_results[step_id] = result
+            else:
+                # Multiple independent steps — run concurrently
+                with ThreadPoolExecutor(max_workers=len(layer)) as pool:
+                    futures = {
+                        pool.submit(_execute_step, step, tools_dict): step
+                        for step in layer
+                    }
+                    for future in as_completed(futures):
+                        step_id, result = future.result()
+                        step_results[step_id] = result
 
-        # Execute the tool directly
-        if step.tool in tools_dict:
-            try:
-                result = tools_dict[step.tool]("")
-                state["step_results"][step.id] = str(result)
-            except Exception as e:
-                state["step_results"][step.id] = f"[ERROR: {str(e)}]"
-        else:
-            state["step_results"][step.id] = f"[ERROR: Tool '{step.tool}' not found]"
-
-        # Move to next step
-        state["current_step_index"] = step_index + 1
-
+        state["step_results"] = step_results
+        state["current_step_index"] = len(plan.steps)
         return state
 
     return step_executor
@@ -496,19 +546,17 @@ class PlanningAgent:
                     if plan_update is not None:
                         current_plan = plan_update
 
-                    # After step_executor, emit which tool ran and progress
+                    # After step_executor, emit a tool event for every executed step.
+                    # All steps run in a single node pass now (parallel by layer),
+                    # so we report them all at once when the node completes.
                     if node_name == "step_executor" and current_plan:
-                        # current_step_index was incremented by the node,
-                        # so the step that just ran is index - 1
-                        step_idx = state_update.get("current_step_index", 1) - 1
-                        if 0 <= step_idx < len(current_plan.steps):
-                            step = current_plan.steps[step_idx]
+                        for i, step in enumerate(current_plan.steps):
                             yield {
                                 "type": "tool",
                                 "node": node_name,
                                 "tool": step.tool,
                                 "action": step.action,
-                                "step": step_idx + 1,
+                                "step": i + 1,
                                 "total": len(current_plan.steps),
                             }
 
@@ -548,15 +596,13 @@ class PlanningAgent:
                     current_plan = plan_update
 
                 if node_name == "step_executor" and current_plan:
-                    step_idx = state_update.get("current_step_index", 1) - 1
-                    if 0 <= step_idx < len(current_plan.steps):
-                        step = current_plan.steps[step_idx]
+                    for i, step in enumerate(current_plan.steps):
                         yield {
                             "type": "tool",
                             "node": node_name,
                             "tool": step.tool,
                             "action": step.action,
-                            "step": step_idx + 1,
+                            "step": i + 1,
                             "total": len(current_plan.steps),
                         }
 

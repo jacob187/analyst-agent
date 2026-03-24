@@ -231,15 +231,19 @@ class TestStreamSync:
 
     @pytest.mark.eval_unit
     def test_complex_query_yields_tool_events(self):
-        """A complex query should yield tool events from step_executor."""
+        """A complex query should yield tool events from step_executor.
+
+        The step executor runs all steps in a single node pass (parallel by
+        dependency layer), so there is one step_executor update containing all
+        results. The streaming method emits a tool event for every step in the plan.
+        """
         plan = _make_plan(2)
 
         mock_workflow = MagicMock()
         mock_workflow.stream.return_value = [
             ("updates", {"router": {"query_complexity": "complex"}}),
             ("updates", {"planner": {"plan": plan, "current_step_index": 0}}),
-            ("updates", {"step_executor": {"current_step_index": 1, "step_results": {1: "result1"}}}),
-            ("updates", {"step_executor": {"current_step_index": 2, "step_results": {2: "result2"}}}),
+            ("updates", {"step_executor": {"current_step_index": 2, "step_results": {1: "result1", 2: "result2"}}}),
             ("updates", {"synthesizer": {"final_response": "Combined analysis..."}}),
         ]
 
