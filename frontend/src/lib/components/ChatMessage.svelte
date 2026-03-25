@@ -1,14 +1,18 @@
 <script lang="ts">
   import { marked } from 'marked';
+  import DOMPurify from 'dompurify';
 
   export let role: 'user' | 'assistant';
   export let content: string;
   export let thinking: string = '';
   export let status: string = '';
 
-  // Convert markdown to HTML — reactive, re-runs when content changes
-  $: htmlContent = marked.parse(content);
-  $: thinkingHtml = thinking ? marked.parse(thinking) : '';
+  // Convert markdown to HTML, then sanitize to prevent XSS.
+  // marked() does NOT sanitize — it passes raw HTML through unchanged.
+  // DOMPurify strips dangerous elements (script, onerror, etc.) while
+  // keeping safe formatting tags (p, strong, code, table, etc.).
+  $: htmlContent = DOMPurify.sanitize(marked.parse(content) as string);
+  $: thinkingHtml = thinking ? DOMPurify.sanitize(marked.parse(thinking) as string) : '';
 </script>
 
 <div class="message {role}">
