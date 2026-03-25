@@ -19,7 +19,8 @@ export const storyContent = {
     `The architecture evolved further from a simple ReAct agent to an intelligent
     planning system that routes queries based on complexity - using dynamic tool
     selection for simple questions and structured multi-step execution for complex
-    financial analysis. This hybrid approach optimizes both performance and result quality.`,
+    financial analysis. Independent analysis steps run in parallel to minimize
+    response time. This hybrid approach optimizes both performance and result quality.`,
   ],
 };
 
@@ -31,14 +32,15 @@ export const architectureContent = {
     description: `The Analyst Agent is a full-stack application that combines real-time SEC filing data
 with market analysis, powered by a hybrid AI agent architecture. The system intelligently routes queries
 based on complexity - using dynamic ReAct for simple questions and structured multi-step planning for
-complex financial analysis.`,
+complex financial analysis. Independent steps are executed in parallel to minimize latency.`,
   },
 
   agentFlow: {
     title: "Intelligent Query Planning Flow",
     description: `The agent uses query complexity classification to determine the optimal execution path.
 Simple queries are handled by a ReAct agent with dynamic tool selection. Complex queries are decomposed
-into structured execution plans with explicit steps, dependencies, and result synthesis.`,
+into structured execution plans where steps are grouped into dependency layers - independent steps within
+a layer run concurrently, while layers execute in sequence to respect data dependencies.`,
   },
 };
 
@@ -51,7 +53,7 @@ export const toolsContent = {
     tools: [
       {
         name: "get_raw_risk_factors",
-        desc: "Complete raw text of Risk Factors section (Item 1A) from 10-K filing",
+        desc: "Complete raw text of Risk Factors section (Item 1A) from 10-K/10-Q filing",
       },
       {
         name: "get_risk_factors_summary",
@@ -78,8 +80,20 @@ export const toolsContent = {
         desc: "List of all available 10-K sections that can be retrieved as raw text",
       },
       {
+        name: "get_business_overview",
+        desc: "Company Business section (10-K Item 1): products, services, segments, and market overview",
+      },
+      {
+        name: "get_cybersecurity_disclosure",
+        desc: "Cybersecurity risk management and governance disclosure (10-K Item 1C, SEC-mandated since 2023)",
+      },
+      {
+        name: "get_legal_proceedings",
+        desc: "Legal Proceedings section (10-K Item 3): pending litigation, regulatory actions, and legal risks",
+      },
+      {
         name: "get_all_summaries",
-        desc: "Comprehensive overview combining risk factors, MD&A, and financial analysis",
+        desc: "Comprehensive overview combining risk factors, MD&A, and financial analysis (runs all three in parallel)",
       },
     ],
   },
@@ -99,6 +113,10 @@ export const toolsContent = {
       {
         name: "get_stock_info",
         desc: "Current price, P/E ratio, market cap, 52-week high/low, average volume, dividend yield, and beta",
+      },
+      {
+        name: "get_financial_metrics",
+        desc: "Year-over-year revenue growth, net income growth, and debt-to-assets ratio from income statement and balance sheet",
       },
     ],
   },
@@ -179,7 +197,7 @@ export const diagrams = {
 │                                      │                      ▼                │
 │                                      │            ┌─────────────────────┐    │
 │                                      │            │  Step Executor      │    │
-│                                      │            │  (Loop until done)  │    │
+│                                      │            │  (Parallel layers)  │    │
 │                                      │            └─────────┬───────────┘    │
 │                                      │                      │                │
 │                                      │                      ▼                │
@@ -194,7 +212,7 @@ export const diagrams = {
 │                            │                    │                    │       │
 │                            ▼                    ▼                    ▼       │
 │               ┌────────────────────┐  ┌─────────────────┐  ┌──────────────┐ │
-│               │   SEC Tools (8)    │  │  Yahoo (3)      │  │ Tavily (5)   │ │
+│               │  SEC Tools (11)   │  │  Yahoo (4)      │  │ Tavily (5)   │ │
 │               │                    │  │                 │  │  (optional)  │ │
 │               │ • Risk Factors     │  │ • Price History │  │ • News       │ │
 │               │ • MD&A             │  │ • Technicals    │  │ • Research   │ │
@@ -231,26 +249,25 @@ export const diagrams = {
 │         │   ReAct Agent    │        │   Query Planner     │                 │
 │         │                  │        │                     │                 │
 │         │  ┌────────────┐  │        │  Creates structured │                 │
-│         │  │  Reason    │  │        │  plan with steps:   │                 │
-│         │  │  Select    │  │        │  • Step 1: Action   │                 │
-│         │  │  Tool      │  │        │  • Step 2: Depends  │                 │
-│         │  └─────┬──────┘  │        │    on Step 1        │                 │
-│         │        │         │        │  • Step N: Finalize │                 │
-│         │        ▼         │        └──────────┬──────────┘                 │
-│         │  ┌────────────┐  │                   │                             │
-│         │  │  Execute   │  │                   ▼                             │
-│         │  │  Tool      │  │        ┌─────────────────────┐                 │
-│         │  └─────┬──────┘  │        │  Step Executor      │◄─┐              │
-│         │        │         │        │                     │  │              │
-│         │        ▼         │        │  Execute current    │  │              │
-│         │  ┌────────────┐  │        │  step with tool     │  │              │
-│         │  │  Response  │  │        └──────────┬──────────┘  │              │
-│         │  └────────────┘  │                   │              │              │
-│         └─────────┬────────┘                   ▼              │              │
-│                   │                    ┌───────────────┐      │              │
-│                   │                    │  More steps?  │──Yes─┘              │
-│                   │                    └───────┬───────┘                     │
-│                   │                            │ No                          │
+│         │  │  Reason    │  │        │  plan with steps    │                 │
+│         │  │  Select    │  │        │  and dependencies:  │                 │
+│         │  │  Tool      │  │        │  • Layer 0: A, B    │                 │
+│         │  └─────┬──────┘  │        │    (parallel)       │                 │
+│         │        │         │        │  • Layer 1: C       │                 │
+│         │        ▼         │        │    (depends on A,B) │                 │
+│         │  ┌────────────┐  │        └──────────┬──────────┘                 │
+│         │  │  Execute   │  │                   │                             │
+│         │  │  Tool      │  │                   ▼                             │
+│         │  └─────┬──────┘  │        ┌─────────────────────┐                 │
+│         │        │         │        │  Step Executor      │                 │
+│         │        ▼         │        │                     │                 │
+│         │  ┌────────────┐  │        │  Layer 0: ─┬─ A     │                 │
+│         │  │  Response  │  │        │            └─ B     │                 │
+│         │  └────────────┘  │        │  Layer 1: ── C      │                 │
+│         └─────────┬────────┘        │  (parallel within   │                 │
+│                   │                 │   each layer)       │                 │
+│                   │                 └──────────┬──────────┘                 │
+│                   │                            │                            │
 │                   │                            ▼                             │
 │                   │                   ┌─────────────────┐                    │
 │                   │                   │  Synthesizer    │                    │
@@ -275,7 +292,8 @@ export const diagrams = {
 │  • Automatic complexity detection                                           │
 │  • Dynamic routing to optimal execution path                                │
 │  • Structured planning for multi-step analysis                              │
-│  • Dependency-aware step execution                                          │
+│  • Parallel execution of independent steps (~2-4x faster)                   │
+│  • Dependency-aware layer ordering                                          │
 │  • Intelligent result synthesis                                             │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘`,
