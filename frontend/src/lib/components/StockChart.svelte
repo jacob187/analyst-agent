@@ -296,6 +296,20 @@
 
     if (!candleSeries || !volumeSeries) return;
 
+    // Clear all indicator series first — prevents stale data when switching
+    // to a shorter timeframe that doesn't include all indicators
+    // (e.g., 1W has no MA200 because <200 data points).
+    ma20Series?.setData([]);
+    ma50Series?.setData([]);
+    ma200Series?.setData([]);
+    bbUpperSeries?.setData([]);
+    bbMiddleSeries?.setData([]);
+    bbLowerSeries?.setData([]);
+    rsiSeries?.setData([]);
+    macdLineSeries?.setData([]);
+    macdSignalSeries?.setData([]);
+    macdHistSeries?.setData([]);
+
     // Candlesticks
     candleSeries.setData(candles);
 
@@ -311,23 +325,22 @@
     volumeSeries.setData(volumeData);
 
     // Moving averages
-    if (indicators.ma20 && ma20Series) ma20Series.setData(indicators.ma20);
-    if (indicators.ma50 && ma50Series) ma50Series.setData(indicators.ma50);
-    if (indicators.ma200 && ma200Series) ma200Series.setData(indicators.ma200);
+    if (indicators.ma20) ma20Series?.setData(indicators.ma20);
+    if (indicators.ma50) ma50Series?.setData(indicators.ma50);
+    if (indicators.ma200) ma200Series?.setData(indicators.ma200);
 
     // Bollinger Bands
     if (indicators.bollinger) {
       const bb = indicators.bollinger;
-      if (bbUpperSeries) bbUpperSeries.setData(bb.map((p: any) => ({ time: p.time, value: p.upper })));
-      if (bbMiddleSeries) bbMiddleSeries.setData(bb.map((p: any) => ({ time: p.time, value: p.middle })));
-      if (bbLowerSeries) bbLowerSeries.setData(bb.map((p: any) => ({ time: p.time, value: p.lower })));
+      bbUpperSeries?.setData(bb.map((p: any) => ({ time: p.time, value: p.upper })));
+      bbMiddleSeries?.setData(bb.map((p: any) => ({ time: p.time, value: p.middle })));
+      bbLowerSeries?.setData(bb.map((p: any) => ({ time: p.time, value: p.lower })));
     }
 
     // RSI
-    if (indicators.rsi && rsiSeries) {
-      rsiSeries.setData(indicators.rsi);
+    if (indicators.rsi) {
+      rsiSeries?.setData(indicators.rsi);
 
-      // Set overbought/oversold reference lines across the time range
       const timeRange = indicators.rsi.map((p: any) => p.time);
       if (timeRange.length > 0 && rsiChart) {
         const refData = (val: number) =>
@@ -340,23 +353,27 @@
     // MACD
     if (indicators.macd) {
       const macd = indicators.macd;
-      if (macdLineSeries)
-        macdLineSeries.setData(
-          macd.map((p: any) => ({ time: p.time, value: p.macd }))
-        );
-      if (macdSignalSeries)
-        macdSignalSeries.setData(
-          macd.map((p: any) => ({ time: p.time, value: p.signal }))
-        );
-      if (macdHistSeries)
-        macdHistSeries.setData(
-          macd.map((p: any) => ({
-            time: p.time,
-            value: p.histogram,
-            color: p.histogram >= 0 ? "#26a69a" : "#ef5350",
-          }))
-        );
+      macdLineSeries?.setData(
+        macd.map((p: any) => ({ time: p.time, value: p.macd }))
+      );
+      macdSignalSeries?.setData(
+        macd.map((p: any) => ({ time: p.time, value: p.signal }))
+      );
+      macdHistSeries?.setData(
+        macd.map((p: any) => ({
+          time: p.time,
+          value: p.histogram,
+          color: p.histogram >= 0 ? "#26a69a" : "#ef5350",
+        }))
+      );
     }
+
+    // Show time-of-day on x-axis for intraday timeframes
+    const intraday = period === "1w" || period === "1mo";
+    const timeOpts = { timeVisible: intraday, secondsVisible: false };
+    priceChart?.timeScale().applyOptions(timeOpts);
+    rsiChart?.timeScale().applyOptions(timeOpts);
+    macdChart?.timeScale().applyOptions(timeOpts);
 
     // Fit content
     priceChart?.timeScale().fitContent();
@@ -374,6 +391,21 @@
     bbUpperSeries?.applyOptions({ visible: showBollinger });
     bbMiddleSeries?.applyOptions({ visible: showBollinger });
     bbLowerSeries?.applyOptions({ visible: showBollinger });
+  }
+
+  function resizeAllCharts() {
+    // After toggling sub-chart visibility the flex layout redistributes space.
+    // Lightweight Charts won't pick that up automatically — we need to tell
+    // each chart its container's new dimensions.
+    if (priceContainer && priceChart) {
+      priceChart.applyOptions({ width: priceContainer.clientWidth, height: priceContainer.clientHeight });
+    }
+    if (rsiContainer && rsiChart && showRSI) {
+      rsiChart.applyOptions({ width: rsiContainer.clientWidth, height: rsiContainer.clientHeight });
+    }
+    if (macdContainer && macdChart && showMACD) {
+      macdChart.applyOptions({ width: macdContainer.clientWidth, height: macdContainer.clientHeight });
+    }
   }
 
   // ── Cleanup ──────────────────────────────────────────────────────────
@@ -414,6 +446,15 @@
     void showMAs;
     void showBollinger;
     updateVisibility();
+  });
+
+  // Resize charts when RSI/MACD toggled — flex layout redistributes space
+  // and Lightweight Charts needs to be told about the new dimensions.
+  // requestAnimationFrame waits for the DOM to update after display:none changes.
+  $effect(() => {
+    void showRSI;
+    void showMACD;
+    requestAnimationFrame(() => resizeAllCharts());
   });
 </script>
 
@@ -485,15 +526,16 @@
     flex: 1;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
   }
 
   .price-chart {
     flex: 1;
-    min-height: 300px;
+    min-height: 200px;
   }
 
   .sub-chart {
-    height: 120px;
+    flex: 0 0 120px;
     border-top: 1px solid var(--border);
   }
 

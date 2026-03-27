@@ -359,7 +359,7 @@
     flex: 1;
     padding: 1.5rem;
     overflow-y: auto;
-    min-height: 400px;
+    min-height: 0; /* allow flex child to shrink so input-area stays visible */
   }
 
   .input-area {
@@ -434,7 +434,7 @@
 
     .messages {
       padding: 1rem;
-      min-height: 300px;
+      min-height: 0;
     }
 
     .input-area {
@@ -473,7 +473,7 @@
 
     .messages {
       padding: 0.8rem;
-      min-height: 250px;
+      min-height: 0;
     }
 
     .input-area {
