@@ -17,7 +17,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from langchain_core.messages import HumanMessage, AIMessage
 
-from api.main import (
+from api.memory import (
     estimate_tokens,
     build_context_from_session,
     compress_history,
@@ -164,14 +164,14 @@ def mock_llm():
 class TestCompressHistory:
     async def test_returns_summary_plus_recent(self, mock_llm):
         history = _make_history(RECENT_MESSAGES_TO_KEEP + 4)
-        with patch("api.main.update_session_summary"):
+        with patch("api.memory.update_session_summary"):
             result = await compress_history("session-1", history, mock_llm)
 
         assert len(result) == RECENT_MESSAGES_TO_KEEP + 1
 
     async def test_first_message_is_summary(self, mock_llm):
         history = _make_history(RECENT_MESSAGES_TO_KEEP + 2)
-        with patch("api.main.update_session_summary"):
+        with patch("api.memory.update_session_summary"):
             result = await compress_history("session-1", history, mock_llm)
 
         assert result[0].content.startswith("[CONVERSATION SUMMARY]")
@@ -179,7 +179,7 @@ class TestCompressHistory:
 
     async def test_recent_messages_are_preserved_verbatim(self, mock_llm):
         history = _make_history(RECENT_MESSAGES_TO_KEEP + 4)
-        with patch("api.main.update_session_summary"):
+        with patch("api.memory.update_session_summary"):
             result = await compress_history("session-1", history, mock_llm)
 
         # Tail of result (after the summary message) must match tail of input
@@ -192,7 +192,7 @@ class TestCompressHistory:
         """
         history = _make_history(RECENT_MESSAGES_TO_KEEP + 2)
         old_messages = history[:-RECENT_MESSAGES_TO_KEEP]
-        with patch("api.main.update_session_summary"):
+        with patch("api.memory.update_session_summary"):
             await compress_history("session-1", history, mock_llm)
 
         call_args = mock_llm.ainvoke.call_args[0][0]  # list[HumanMessage]
@@ -210,7 +210,7 @@ class TestCompressHistory:
         recent = _make_history(RECENT_MESSAGES_TO_KEEP)
         history = [prior_summary] + recent
 
-        with patch("api.main.update_session_summary"):
+        with patch("api.memory.update_session_summary"):
             await compress_history("session-1", history, mock_llm)
 
         prompt_text = mock_llm.ainvoke.call_args[0][0][0].content
@@ -221,8 +221,8 @@ class TestCompressHistory:
     async def test_persists_summary_to_db(self, mock_llm):
         """update_session_summary must be scheduled (via create_task)."""
         history = _make_history(RECENT_MESSAGES_TO_KEEP + 2)
-        with patch("api.main.update_session_summary") as mock_save, \
-             patch("api.main.asyncio.create_task") as mock_task:
+        with patch("api.memory.update_session_summary") as mock_save, \
+             patch("api.memory.asyncio.create_task") as mock_task:
             await compress_history("session-42", history, mock_llm)
 
         # create_task should have been called once (with the coroutine from update_session_summary)
@@ -231,8 +231,8 @@ class TestCompressHistory:
     async def test_result_is_human_message_type(self, mock_llm):
         """The summary placeholder must be a HumanMessage so the LLM reads it as context."""
         history = _make_history(RECENT_MESSAGES_TO_KEEP + 2)
-        with patch("api.main.update_session_summary"), \
-             patch("api.main.asyncio.create_task"):
+        with patch("api.memory.update_session_summary"), \
+             patch("api.memory.asyncio.create_task"):
             result = await compress_history("session-1", history, mock_llm)
 
         assert isinstance(result[0], HumanMessage)
