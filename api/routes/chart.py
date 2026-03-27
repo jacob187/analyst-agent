@@ -118,7 +118,22 @@ async def get_chart_data(
         ti = TechnicalIndicators(ticker)
         all_indicators = ti.calculate_chart_indicators(df, intraday=intraday)
 
-        full_data = {"candles": candles, "all_indicators": all_indicators}
+        # Live quote from yfinance fast_info (lightweight, ~50ms)
+        quote = {}
+        try:
+            fi = retriever.yf_ticker.fast_info
+            prev_close = float(fi["previous_close"])
+            last_price = float(fi["last_price"])
+            quote = {
+                "price": round(last_price, 2),
+                "previousClose": round(prev_close, 2),
+                "change": round(last_price - prev_close, 2),
+                "changePercent": round((last_price - prev_close) / prev_close * 100, 2),
+            }
+        except Exception:
+            pass  # Fall back to candle data on frontend
+
+        full_data = {"candles": candles, "all_indicators": all_indicators, "quote": quote}
         _chart_cache[cache_key] = (now, full_data)
 
     # Filter to only requested indicators (cheap dict comprehension)
@@ -127,6 +142,10 @@ async def get_chart_data(
     }
 
     return JSONResponse(
-        content={"candles": full_data["candles"], "indicators": filtered_indicators},
+        content={
+            "candles": full_data["candles"],
+            "indicators": filtered_indicators,
+            "quote": full_data.get("quote", {}),
+        },
         headers={"Cache-Control": "public, max-age=60"},
     )
