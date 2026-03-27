@@ -191,3 +191,66 @@ Respond with:
 - should_replan: true/false
 - reasoning: brief explanation
 - new_steps: (only if replanning) list of adjusted remaining steps"""
+
+
+MDA_ANALYSIS_USER_TEMPLATE = """Analyze the following MD&A section from {ticker}'s {form_type} SEC filing:
+
+Filing Date: {filing_date}
+Period of Report: {period}
+
+MD&A Content:
+{mda_text}
+
+ANALYSIS INSTRUCTIONS:
+- If the content is minimal (less than 200 characters) or only contains section headers, clearly state this limitation.
+- For 10-Q filings, focus on quarterly changes and developments.
+- If meaningful analysis cannot be performed due to insufficient content, explain this in your summary.
+
+Follow this JSON schema EXACTLY and fill in the values with your analysis:
+{format_instructions}
+
+Your response should be a valid JSON object with real values, not placeholders or field descriptions.
+Make sure to include the form_type and filing_metadata fields with the provided information."""
+
+
+RISK_FACTORS_USER_TEMPLATE = """Analyze the following Risk Factors section from {ticker}'s {form_type} SEC filing:
+
+Filing Date: {filing_date}
+Period of Report: {period}
+
+Risk Factors Content:
+{risk_text}
+
+ANALYSIS INSTRUCTIONS:
+- If the content indicates "no material changes" or is minimal, this is normal for 10-Q filings.
+- For 10-Q with no risk factor updates, provide analysis explaining this is standard practice.
+- If content is insufficient for risk categorization, explain this limitation clearly.
+- Focus on any new or changed risks if this is a 10-Q filing.
+
+Follow this JSON schema EXACTLY and fill in the values with your analysis:
+{format_instructions}
+
+Your response should be a valid JSON object with real values, not placeholders or field descriptions.
+Make sure to include the form_type and filing_metadata fields with the provided information."""
+
+
+BALANCE_SHEET_USER_TEMPLATE = """Analyze the following Balance Sheet section from {ticker}'s 10-K and 10-Q SEC filings:
+
+{tenk}
+
+{tenq}
+
+Follow this JSON schema EXACTLY and fill in the values with your analysis:
+{format_instructions}
+
+Your response should be a valid JSON object with real values, not placeholders or field descriptions."""
+
+
+CONVERSATION_COMPRESSION_PROMPT = """You are compressing a financial analysis conversation for context management. \
+Preserve all specific numbers, tickers, dates, analysis conclusions, open \
+questions, and anything the user might want to reference later. Be concise \
+but complete — this summary replaces the full history in future LLM calls.
+
+{transcript}
+
+SUMMARY:"""

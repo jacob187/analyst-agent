@@ -10,6 +10,7 @@ import asyncio
 from langchain_core.messages import HumanMessage, AIMessage
 
 from api.db import update_session_summary
+from agents.prompts import CONVERSATION_COMPRESSION_PROMPT
 
 # How many tokens (rough estimate) before we compress.
 TOKEN_THRESHOLD = 30_000
@@ -51,13 +52,8 @@ async def compress_history(
         else:
             history_lines.append(f"ASSISTANT: {content}")
 
-    prompt = (
-        "You are compressing a financial analysis conversation for context management. "
-        "Preserve all specific numbers, tickers, dates, analysis conclusions, open "
-        "questions, and anything the user might want to reference later. Be concise "
-        "but complete — this summary replaces the full history in future LLM calls.\n\n"
-        + "\n\n".join(history_lines)
-        + "\n\nSUMMARY:"
+    prompt = CONVERSATION_COMPRESSION_PROMPT.format(
+        transcript="\n\n".join(history_lines)
     )
     response = await llm.ainvoke([HumanMessage(content=prompt)])
     summary_text = str(response.content)
