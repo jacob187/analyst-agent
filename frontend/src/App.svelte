@@ -139,14 +139,14 @@
       <nav class="nav-links">
         <button
           class="nav-link"
-          class:active={currentPage === 'main'}
+          class:active={currentPage === 'main' || currentPage === 'continue-session'}
           on:click={navigateToMain}
         >
           Terminal
         </button>
         <button
           class="nav-link"
-          class:active={currentPage === 'history' || currentPage === 'view-session' || currentPage === 'continue-session'}
+          class:active={currentPage === 'history' || currentPage === 'view-session'}
           on:click={navigateToHistory}
         >
           History
