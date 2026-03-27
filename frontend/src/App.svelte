@@ -6,6 +6,7 @@
   import ChatHistory from './lib/components/ChatHistory.svelte';
   import ChatViewer from './lib/components/ChatViewer.svelte';
   import AboutPage from './lib/components/about/AboutPage.svelte';
+  import StockChart from './lib/components/StockChart.svelte';
 
   const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -215,15 +216,20 @@
           </button>
         </div>
       {:else}
-        <!-- Ready to continue -->
-        <div class="chat-section">
-          <ChatWindow
-            ticker={currentTicker}
-            googleApiKey={googleApiKey}
-            secHeader={secHeader}
-            tavilyApiKey={tavilyApiKey}
-            sessionId={continuingSessionId}
-          />
+        <!-- Ready to continue — Chart + Chat Split Layout -->
+        <div class="terminal-layout">
+          <div class="chart-column">
+            <StockChart ticker={currentTicker} />
+          </div>
+          <div class="chat-column">
+            <ChatWindow
+              ticker={currentTicker}
+              googleApiKey={googleApiKey}
+              secHeader={secHeader}
+              tavilyApiKey={tavilyApiKey}
+              sessionId={continuingSessionId}
+            />
+          </div>
         </div>
         <div class="actions-bar">
           <button class="btn" on:click={navigateToHistory}>
@@ -263,14 +269,19 @@
         ← update API keys
       </button>
     {:else}
-      <!-- Step 3: Chat Interface -->
-      <div class="chat-section">
-        <ChatWindow
-          ticker={currentTicker}
-          googleApiKey={googleApiKey}
-          secHeader={secHeader}
-          tavilyApiKey={tavilyApiKey}
-        />
+      <!-- Step 3: Chart + Chat Split Layout -->
+      <div class="terminal-layout">
+        <div class="chart-column">
+          <StockChart ticker={currentTicker} />
+        </div>
+        <div class="chat-column">
+          <ChatWindow
+            ticker={currentTicker}
+            googleApiKey={googleApiKey}
+            secHeader={secHeader}
+            tavilyApiKey={tavilyApiKey}
+          />
+        </div>
       </div>
       <div class="actions-bar">
         <button class="btn" on:click={() => currentTicker = null}>
@@ -292,12 +303,13 @@
 
 <style>
   .app-container {
-    max-width: 1400px;
+    max-width: 1800px;
     margin: 0 auto;
     padding: 2rem;
-    min-height: 100vh;
+    height: 100vh;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
   }
 
   header {
@@ -363,6 +375,8 @@
     display: flex;
     flex-direction: column;
     gap: 1.5rem;
+    min-height: 0; /* prevent flex child from expanding beyond parent */
+    overflow: hidden;
   }
 
   .config-section {
@@ -435,6 +449,27 @@
   .input-section {
     width: 100%;
     max-width: 600px;
+  }
+
+  .terminal-layout {
+    display: grid;
+    grid-template-columns: 3fr 2fr;
+    gap: 1rem;
+    flex: 1;
+    min-height: 0; /* critical: let grid shrink within flex parent */
+    overflow: hidden;
+  }
+
+  .chart-column {
+    overflow-y: auto;
+    min-height: 0;
+  }
+
+  .chat-column {
+    overflow: hidden;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
 
   .chat-section {
@@ -529,6 +564,20 @@
       max-width: 100%;
     }
 
+    .terminal-layout {
+      grid-template-columns: 1fr;
+      height: auto;
+    }
+
+    .chart-column {
+      height: 500px;
+      overflow-y: auto;
+    }
+
+    .chat-column {
+      height: 500px;
+    }
+
     .chat-section {
       min-height: 400px;
     }
@@ -581,6 +630,10 @@
 
     main {
       gap: 1rem;
+    }
+
+    .chart-column {
+      height: 400px;
     }
 
     .chat-section {
