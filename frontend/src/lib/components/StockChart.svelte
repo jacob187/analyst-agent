@@ -234,40 +234,36 @@
     resizeObserver.observe(priceContainer);
   }
 
+  // Guard flag prevents recursive sync: chart A scrolls -> updates B ->
+  // B's handler fires -> tries to update A again. Without this flag each
+  // scroll event would bounce between charts until the call stack settles.
+  let syncing = false;
+
   function syncCharts() {
     if (!priceChart) return;
 
     priceChart
       .timeScale()
       .subscribeVisibleLogicalRangeChange((range) => {
-        if (range) {
-          if (rsiChart) rsiChart.timeScale().setVisibleLogicalRange(range);
-          if (macdChart) macdChart.timeScale().setVisibleLogicalRange(range);
-        }
+        if (syncing || !range) return;
+        syncing = true;
+        rsiChart?.timeScale().setVisibleLogicalRange(range);
+        macdChart?.timeScale().setVisibleLogicalRange(range);
+        syncing = false;
       });
 
-    // Sync scrolling from sub-charts back to price chart
-    if (rsiChart) {
-      rsiChart
-        .timeScale()
-        .subscribeVisibleLogicalRangeChange((range) => {
-          if (range && priceChart)
-            priceChart.timeScale().setVisibleLogicalRange(range);
-          if (range && macdChart)
-            macdChart.timeScale().setVisibleLogicalRange(range);
-        });
-    }
+    // Sub-charts sync back to price chart (and each other)
+    const subSync = (range: any) => {
+      if (syncing || !range) return;
+      syncing = true;
+      priceChart?.timeScale().setVisibleLogicalRange(range);
+      rsiChart?.timeScale().setVisibleLogicalRange(range);
+      macdChart?.timeScale().setVisibleLogicalRange(range);
+      syncing = false;
+    };
 
-    if (macdChart) {
-      macdChart
-        .timeScale()
-        .subscribeVisibleLogicalRangeChange((range) => {
-          if (range && priceChart)
-            priceChart.timeScale().setVisibleLogicalRange(range);
-          if (range && rsiChart)
-            rsiChart.timeScale().setVisibleLogicalRange(range);
-        });
-    }
+    rsiChart?.timeScale().subscribeVisibleLogicalRangeChange(subSync);
+    macdChart?.timeScale().subscribeVisibleLogicalRangeChange(subSync);
   }
 
   // ── Fetch and render data ────────────────────────────────────────────
@@ -451,15 +447,13 @@
 
     <div class="price-chart" bind:this={priceContainer}></div>
 
-    {#if showRSI}
-      <div class="sub-chart-label">RSI (14)</div>
-      <div class="sub-chart" bind:this={rsiContainer}></div>
-    {/if}
+    <!-- Use CSS display:none instead of {#if} to keep chart instances alive.
+         Svelte {#if} destroys the DOM node, orphaning the chart instance. -->
+    <div class="sub-chart-label" class:hidden={!showRSI}>RSI (14)</div>
+    <div class="sub-chart" class:hidden={!showRSI} bind:this={rsiContainer}></div>
 
-    {#if showMACD}
-      <div class="sub-chart-label">MACD (12, 26, 9)</div>
-      <div class="sub-chart" bind:this={macdContainer}></div>
-    {/if}
+    <div class="sub-chart-label" class:hidden={!showMACD}>MACD (12, 26, 9)</div>
+    <div class="sub-chart" class:hidden={!showMACD} bind:this={macdContainer}></div>
   </div>
 
   <div class="chart-legend">
@@ -510,6 +504,10 @@
     background: var(--bg-darker);
     border-top: 1px solid var(--border);
     letter-spacing: 0.05em;
+  }
+
+  .hidden {
+    display: none;
   }
 
   .overlay {

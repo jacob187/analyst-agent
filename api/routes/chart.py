@@ -1,9 +1,18 @@
-"""Chart data endpoint — serves OHLCV candles + indicator time series."""
+"""Chart data endpoint — serves OHLCV candles + indicator time series.
+
+Performance notes:
+- Server-side TTL cache avoids repeated yfinance network calls (200-800ms each).
+  The cache stores the full payload (candles + ALL indicators); per-request
+  indicator filtering is a cheap dict comprehension after the cache lookup.
+- Candle formatting uses vectorized pandas ops instead of row-by-row iloc.
+"""
 
 import re
+import time
 from enum import Enum
 from typing import Optional
 
+import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
@@ -30,6 +39,24 @@ _PERIOD_MAP = {
 # All available chart indicators
 _ALL_INDICATORS = {"ma5", "ma10", "ma20", "ma50", "ma200", "rsi", "macd", "bollinger"}
 
+# Server-side cache: {(ticker, period): (monotonic_timestamp, full_payload)}
+# Stores candles + all indicators so different indicator requests share one fetch.
+_chart_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+_CACHE_TTL = 60  # seconds
+
+
+def _format_candles(df: pd.DataFrame) -> list[dict]:
+    """Vectorized OHLCV formatting — avoids per-row iloc overhead."""
+    candle_df = pd.DataFrame({
+        "time": df.index.strftime("%Y-%m-%d"),
+        "open": df["Open"].round(2),
+        "high": df["High"].round(2),
+        "low": df["Low"].round(2),
+        "close": df["Close"].round(2),
+        "volume": df["Volume"].astype(int),
+    })
+    return candle_df.to_dict("records")
+
 
 @router.get("/stock/{ticker}/chart")
 async def get_chart_data(
@@ -55,38 +82,39 @@ async def get_chart_data(
             detail=f"Unknown indicators: {', '.join(invalid)}. Valid: {', '.join(sorted(_ALL_INDICATORS))}",
         )
 
-    from agents.technical_workflow.get_stock_data import YahooFinanceDataRetrieval
-    from agents.technical_workflow.process_technical_indicators import TechnicalIndicators
+    # Check server-side cache (keyed on ticker + period, not indicators —
+    # we cache the full payload and filter afterward)
+    cache_key = (ticker, period.value)
+    now = time.monotonic()
+    cached = _chart_cache.get(cache_key)
 
-    retriever = YahooFinanceDataRetrieval(ticker)
-    yf_period = _PERIOD_MAP[period.value]
-    df = retriever.get_historical_prices(period=yf_period)
+    if cached and (now - cached[0]) < _CACHE_TTL:
+        full_data = cached[1]
+    else:
+        from agents.technical_workflow.get_stock_data import YahooFinanceDataRetrieval
+        from agents.technical_workflow.process_technical_indicators import TechnicalIndicators
 
-    if df is None or df.empty:
-        raise HTTPException(status_code=404, detail=f"No data found for {ticker}")
+        retriever = YahooFinanceDataRetrieval(ticker)
+        yf_period = _PERIOD_MAP[period.value]
+        df = retriever.get_historical_prices(period=yf_period)
 
-    # Format candles
-    candles = []
-    for i in range(len(df)):
-        row = df.iloc[i]
-        candles.append({
-            "time": df.index[i].strftime("%Y-%m-%d"),
-            "open": round(float(row["Open"]), 2),
-            "high": round(float(row["High"]), 2),
-            "low": round(float(row["Low"]), 2),
-            "close": round(float(row["Close"]), 2),
-            "volume": int(row["Volume"]),
-        })
+        if df is None or df.empty:
+            raise HTTPException(status_code=404, detail=f"No data found for {ticker}")
 
-    # Calculate indicators
-    ti = TechnicalIndicators(ticker)
-    all_chart_indicators = ti.calculate_chart_indicators(df)
+        candles = _format_candles(df)
 
+        ti = TechnicalIndicators(ticker)
+        all_indicators = ti.calculate_chart_indicators(df)
+
+        full_data = {"candles": candles, "all_indicators": all_indicators}
+        _chart_cache[cache_key] = (now, full_data)
+
+    # Filter to only requested indicators (cheap dict comprehension)
     filtered_indicators = {
-        k: v for k, v in all_chart_indicators.items() if k in requested
+        k: v for k, v in full_data["all_indicators"].items() if k in requested
     }
 
     return JSONResponse(
-        content={"candles": candles, "indicators": filtered_indicators},
+        content={"candles": full_data["candles"], "indicators": filtered_indicators},
         headers={"Cache-Control": "public, max-age=60"},
     )

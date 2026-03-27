@@ -100,16 +100,16 @@ class TechnicalIndicators:
     ) -> List[Dict[str, Any]]:
         """Convert a pandas Series to [{time: "YYYY-MM-DD", value: float}].
 
-        Drops NaN entries (from rolling warmup periods).
+        Drops NaN and infinity entries (from rolling warmup periods).
+        Uses vectorized pandas ops instead of per-element Python loop.
         """
-        result = []
-        for i, val in enumerate(series):
-            if pd.notna(val) and np.isfinite(val):
-                result.append({
-                    "time": index[i].strftime("%Y-%m-%d"),
-                    "value": round(float(val), 4),
-                })
-        return result
+        tmp = pd.DataFrame({
+            "time": index.strftime("%Y-%m-%d"),
+            "value": series.round(4),
+        })
+        tmp = tmp.dropna(subset=["value"])
+        tmp = tmp[np.isfinite(tmp["value"])]
+        return tmp.to_dict("records")
 
     @staticmethod
     def _macd_to_chart_format(
@@ -119,17 +119,13 @@ class TechnicalIndicators:
         index: pd.DatetimeIndex,
     ) -> List[Dict[str, Any]]:
         """Convert MACD series to [{time, macd, signal, histogram}]."""
-        result = []
-        for i in range(len(macd_line)):
-            m, s, h = macd_line.iloc[i], signal_line.iloc[i], histogram.iloc[i]
-            if pd.notna(m) and pd.notna(s) and pd.notna(h):
-                result.append({
-                    "time": index[i].strftime("%Y-%m-%d"),
-                    "macd": round(float(m), 4),
-                    "signal": round(float(s), 4),
-                    "histogram": round(float(h), 4),
-                })
-        return result
+        tmp = pd.DataFrame({
+            "time": index.strftime("%Y-%m-%d"),
+            "macd": macd_line.round(4),
+            "signal": signal_line.round(4),
+            "histogram": histogram.round(4),
+        })
+        return tmp.dropna().to_dict("records")
 
     @staticmethod
     def _bollinger_to_chart_format(
@@ -139,16 +135,13 @@ class TechnicalIndicators:
         index: pd.DatetimeIndex,
     ) -> List[Dict[str, Any]]:
         """Convert Bollinger Band series to [{time, upper, middle, lower}]."""
-        result = []
-        for i in range(len(upper)):
-            u, m, lo = upper.iloc[i], middle.iloc[i], lower.iloc[i]
-            if pd.notna(u) and pd.notna(m) and pd.notna(lo):
-                result.append({
-                    "time": index[i].strftime("%Y-%m-%d"),
-                    "upper": round(float(u), 4),
-                    "middle": round(float(m), 4),
-                    "lower": round(float(lo), 4),
-                })
+        tmp = pd.DataFrame({
+            "time": index.strftime("%Y-%m-%d"),
+            "upper": upper.round(4),
+            "middle": middle.round(4),
+            "lower": lower.round(4),
+        })
+        return tmp.dropna().to_dict("records")
         return result
 
     # ── Private indicator methods ───────────────────────────────────────
