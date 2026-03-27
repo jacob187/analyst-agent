@@ -40,9 +40,13 @@ class TechnicalIndicators:
         }
 
     def calculate_chart_indicators(
-        self, df: Optional[pd.DataFrame]
+        self, df: Optional[pd.DataFrame], intraday: bool = False
     ) -> Dict[str, Any]:
         """Calculate indicators and return full time series for chart rendering.
+
+        Args:
+            df: OHLCV DataFrame.
+            intraday: If True, use unix timestamps instead of date strings.
 
         Returns dict with keys like 'ma20', 'rsi', 'macd', 'bollinger' —
         each containing a list of {time, value} dicts ready for Lightweight Charts.
@@ -50,6 +54,7 @@ class TechnicalIndicators:
         if df is None or df.empty:
             return {}
 
+        self._intraday = intraday
         raw = self._calculate_all_raw(df)
         index = df.index
         result = {}
@@ -94,49 +99,60 @@ class TechnicalIndicators:
 
     # ── Chart format helpers ────────────────────────────────────────────
 
-    @staticmethod
+    def _format_time_column(self, index: pd.DatetimeIndex):
+        """Format timestamps for Lightweight Charts.
+
+        Daily data → "YYYY-MM-DD" strings.
+        Intraday data → Unix timestamps (integers).
+        """
+        if getattr(self, "_intraday", False):
+            return (index.astype("int64") // 10**9).tolist()
+        return index.strftime("%Y-%m-%d").tolist()
+
     def _series_to_chart_format(
-        series: pd.Series, index: pd.DatetimeIndex
+        self, series: pd.Series, index: pd.DatetimeIndex
     ) -> List[Dict[str, Any]]:
-        """Convert a pandas Series to [{time: "YYYY-MM-DD", value: float}].
+        """Convert a pandas Series to [{time, value}].
 
         Drops NaN and infinity entries (from rolling warmup periods).
-        Uses vectorized pandas ops instead of per-element Python loop.
         """
+        times = self._format_time_column(index)
         tmp = pd.DataFrame({
-            "time": index.strftime("%Y-%m-%d"),
+            "time": times,
             "value": series.round(4),
         })
         tmp = tmp.dropna(subset=["value"])
         tmp = tmp[np.isfinite(tmp["value"])]
         return tmp.to_dict("records")
 
-    @staticmethod
     def _macd_to_chart_format(
+        self,
         macd_line: pd.Series,
         signal_line: pd.Series,
         histogram: pd.Series,
         index: pd.DatetimeIndex,
     ) -> List[Dict[str, Any]]:
         """Convert MACD series to [{time, macd, signal, histogram}]."""
+        times = self._format_time_column(index)
         tmp = pd.DataFrame({
-            "time": index.strftime("%Y-%m-%d"),
+            "time": times,
             "macd": macd_line.round(4),
             "signal": signal_line.round(4),
             "histogram": histogram.round(4),
         })
         return tmp.dropna().to_dict("records")
 
-    @staticmethod
     def _bollinger_to_chart_format(
+        self,
         upper: pd.Series,
         middle: pd.Series,
         lower: pd.Series,
         index: pd.DatetimeIndex,
     ) -> List[Dict[str, Any]]:
         """Convert Bollinger Band series to [{time, upper, middle, lower}]."""
+        times = self._format_time_column(index)
         tmp = pd.DataFrame({
-            "time": index.strftime("%Y-%m-%d"),
+            "time": times,
             "upper": upper.round(4),
             "middle": middle.round(4),
             "lower": lower.round(4),

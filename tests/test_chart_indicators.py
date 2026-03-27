@@ -282,7 +282,7 @@ class TestSeriesToChartFormat:
         """NaN values from rolling warmup should not appear in output."""
         index = pd.bdate_range(start="2026-01-01", periods=5)
         series = pd.Series([np.nan, np.nan, 10.0, 20.0, 30.0])
-        result = TechnicalIndicators._series_to_chart_format(series, index)
+        result = TechnicalIndicators("TEST")._series_to_chart_format(series, index)
         assert len(result) == 3
         assert all("value" in r for r in result)
 
@@ -290,14 +290,14 @@ class TestSeriesToChartFormat:
         """Infinite values should also be excluded."""
         index = pd.bdate_range(start="2026-01-01", periods=3)
         series = pd.Series([np.inf, -np.inf, 42.0])
-        result = TechnicalIndicators._series_to_chart_format(series, index)
+        result = TechnicalIndicators("TEST")._series_to_chart_format(series, index)
         assert len(result) == 1
         assert result[0]["value"] == 42.0
 
     def test_output_shape(self):
         index = pd.bdate_range(start="2026-01-01", periods=3)
         series = pd.Series([1.12345, 2.6789, 3.0])
-        result = TechnicalIndicators._series_to_chart_format(series, index)
+        result = TechnicalIndicators("TEST")._series_to_chart_format(series, index)
         assert len(result) == 3
         assert set(result[0].keys()) == {"time", "value"}
         # Values should be rounded to 4 decimals (pandas uses banker's rounding)
@@ -312,7 +312,7 @@ class TestMacdToChartFormat:
         macd = pd.Series([0.5, 1.0, 1.5])
         signal = pd.Series([0.3, 0.8, 1.2])
         hist = pd.Series([0.2, 0.2, 0.3])
-        result = TechnicalIndicators._macd_to_chart_format(macd, signal, hist, index)
+        result = TechnicalIndicators("TEST")._macd_to_chart_format(macd, signal, hist, index)
         assert len(result) == 3
         assert set(result[0].keys()) == {"time", "macd", "signal", "histogram"}
 
@@ -322,7 +322,7 @@ class TestMacdToChartFormat:
         macd = pd.Series([np.nan, 1.0, 1.5])
         signal = pd.Series([0.3, np.nan, 1.2])
         hist = pd.Series([0.2, 0.2, 0.3])
-        result = TechnicalIndicators._macd_to_chart_format(macd, signal, hist, index)
+        result = TechnicalIndicators("TEST")._macd_to_chart_format(macd, signal, hist, index)
         # Only the third row has all three valid
         assert len(result) == 1
         assert result[0]["time"] == index[2].strftime("%Y-%m-%d")
@@ -336,7 +336,7 @@ class TestBollingerToChartFormat:
         upper = pd.Series([110.0, 112.0, 115.0])
         middle = pd.Series([100.0, 101.0, 103.0])
         lower = pd.Series([90.0, 90.0, 91.0])
-        result = TechnicalIndicators._bollinger_to_chart_format(upper, middle, lower, index)
+        result = TechnicalIndicators("TEST")._bollinger_to_chart_format(upper, middle, lower, index)
         assert len(result) == 3
         assert set(result[0].keys()) == {"time", "upper", "middle", "lower"}
 
@@ -345,6 +345,6 @@ class TestBollingerToChartFormat:
         upper = pd.Series([np.nan, 112.0, 115.0])
         middle = pd.Series([100.0, np.nan, 103.0])
         lower = pd.Series([90.0, 90.0, 91.0])
-        result = TechnicalIndicators._bollinger_to_chart_format(upper, middle, lower, index)
+        result = TechnicalIndicators("TEST")._bollinger_to_chart_format(upper, middle, lower, index)
         assert len(result) == 1
         assert result[0]["time"] == index[2].strftime("%Y-%m-%d")

@@ -27,13 +27,14 @@ class ChartPeriod(str, Enum):
     one_year = "1y"
 
 
-# Map our period values to yfinance period strings
-_PERIOD_MAP = {
-    "1w": "5d",
-    "1mo": "1mo",
-    "3mo": "3mo",
-    "6mo": "6mo",
-    "1y": "1y",
+# Map our period values to yfinance (period, interval) pairs.
+# Short timeframes use intraday intervals for more useful candle density.
+_PERIOD_MAP: dict[str, tuple[str, str]] = {
+    "1w": ("5d", "15m"),     # ~130 candles (15-min bars)
+    "1mo": ("1mo", "1h"),    # ~140 candles (hourly bars)
+    "3mo": ("3mo", "1d"),    # ~63 candles (daily bars)
+    "6mo": ("6mo", "1d"),    # ~126 candles (daily bars)
+    "1y": ("1y", "1d"),      # ~252 candles (daily bars)
 }
 
 # All available chart indicators
@@ -45,10 +46,20 @@ _chart_cache: dict[tuple[str, str], tuple[float, dict]] = {}
 _CACHE_TTL = 60  # seconds
 
 
-def _format_candles(df: pd.DataFrame) -> list[dict]:
-    """Vectorized OHLCV formatting — avoids per-row iloc overhead."""
+def _format_candles(df: pd.DataFrame, intraday: bool = False) -> list[dict]:
+    """Vectorized OHLCV formatting.
+
+    For daily data, uses "YYYY-MM-DD" strings (Lightweight Charts date format).
+    For intraday data, uses Unix timestamps (Lightweight Charts UTCTimestamp).
+    """
+    if intraday:
+        # Convert timezone-aware datetimes to UTC unix timestamps
+        times = (df.index.astype("int64") // 10**9).tolist()
+    else:
+        times = df.index.strftime("%Y-%m-%d").tolist()
+
     candle_df = pd.DataFrame({
-        "time": df.index.strftime("%Y-%m-%d"),
+        "time": times,
         "open": df["Open"].round(2),
         "high": df["High"].round(2),
         "low": df["Low"].round(2),
@@ -95,16 +106,17 @@ async def get_chart_data(
         from agents.technical_workflow.process_technical_indicators import TechnicalIndicators
 
         retriever = YahooFinanceDataRetrieval(ticker)
-        yf_period = _PERIOD_MAP[period.value]
-        df = retriever.get_historical_prices(period=yf_period)
+        yf_period, yf_interval = _PERIOD_MAP[period.value]
+        df = retriever.get_historical_prices(period=yf_period, interval=yf_interval)
 
         if df is None or df.empty:
             raise HTTPException(status_code=404, detail=f"No data found for {ticker}")
 
-        candles = _format_candles(df)
+        intraday = yf_interval != "1d"
+        candles = _format_candles(df, intraday=intraday)
 
         ti = TechnicalIndicators(ticker)
-        all_indicators = ti.calculate_chart_indicators(df)
+        all_indicators = ti.calculate_chart_indicators(df, intraday=intraday)
 
         full_data = {"candles": candles, "all_indicators": all_indicators}
         _chart_cache[cache_key] = (now, full_data)

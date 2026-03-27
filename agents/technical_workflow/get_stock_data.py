@@ -60,18 +60,19 @@ class YahooFinanceDataRetrieval:
         }
         return financials  # Return fetched data, don't save
 
-    def get_historical_prices(self, period: str = "1y") -> Optional[pd.DataFrame]:
+    def get_historical_prices(self, period: str = "1y", interval: str = "1d") -> Optional[pd.DataFrame]:
         """
         Get historical price data for the ticker.
 
         Args:
-            period: Time period to retrieve (e.g., "1y", "3mo")
+            period: Time period to retrieve (e.g., "1y", "3mo", "5d")
+            interval: Candle interval (e.g., "1d", "1h", "15m")
 
         Returns:
             DataFrame containing historical price data, or None if an error occurs.
         """
         try:
-            hist = self.yf_ticker.history(period=period)
+            hist = self.yf_ticker.history(period=period, interval=interval)
             if hist.empty:
                 print(
                     f"Warning: No historical price data retrieved for {self.ticker} for period {period}"
