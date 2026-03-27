@@ -55,20 +55,9 @@ Open http://localhost:5173 and enter your API keys in Settings:
 - **SEC Header** - Your email (SEC requires identification)
 - **Tavily API Key** - Optional, for web research
 
-## API Endpoints
+## API Documentation
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/ws/chat/{ticker}` | WebSocket | Chat interface for stock analysis |
-
-### WebSocket Message Types
-
-- `auth` - Authentication with API keys
-- `query` - User question about the stock
-- `response` - AI agent response
-- `status` - Agent status updates
-- `error` - Error messages
+Interactive API docs are available at `http://localhost:8000/docs` when running locally.
 
 ## Architecture
 
@@ -143,61 +132,6 @@ User Query
 - **Query Planner**: Decomposes complex queries into structured `AnalysisStep` objects
 - **Step Executor**: Executes plan steps sequentially, respecting dependencies
 - **Synthesizer**: Combines multi-step results into comprehensive final response
-
-## Available Tools
-
-### SEC Filing Tools
-- `get_risk_factors_summary` - Analyzed risks with sentiment scores
-- `get_mda_summary` - MD&A analysis with outlook and key points
-- `get_balance_sheet_summary` - Financial health with red flags
-- `get_all_summaries` - Comprehensive overview
-
-### Stock Market Tools
-- `get_stock_price_history` - Last 10 trading days OHLC data
-- `get_technical_analysis` - RSI, MACD, Bollinger Bands, moving averages
-- `get_stock_info` - Current price, P/E, market cap, 52-week range
-
-### Research Tools (Requires Tavily API Key)
-- `web_search` - General company information search
-- `deep_research` - Multi-source comprehensive research
-- `get_company_news` - Latest news and developments
-- `analyze_competitors` - Market positioning analysis
-- `get_industry_trends` - Industry outlook forecasts
-
-## Project Structure
-
-```
-analyst-agent/
-├── api/                        # FastAPI backend
-│   ├── main.py                # WebSocket and HTTP endpoints
-│   └── db.py                  # SQLite database for chat history
-├── agents/                     # AI agent implementation
-│   ├── graph/
-│   │   └── sec_graph.py       # LangGraph planning workflow
-│   ├── planner.py             # Query complexity classification & planning
-│   ├── prompts.py             # System prompts for agents
-│   ├── sec_workflow/          # SEC filings processing
-│   │   ├── get_SEC_data.py
-│   │   └── sec_llm_models.py
-│   ├── technical_workflow/    # Stock data processing
-│   │   ├── get_stock_data.py
-│   │   └── process_technical_indicators.py
-│   └── tools/                 # Tool definitions
-│       ├── sec_tools.py       # SEC filing tools
-│       └── research_tools.py  # Tavily research tools
-├── frontend/                   # Svelte frontend
-│   ├── src/
-│   │   ├── App.svelte
-│   │   └── lib/components/
-│   │       ├── ChatWindow.svelte
-│   │       ├── ChatHistory.svelte
-│   │       ├── ChatViewer.svelte
-│   │       ├── ApiKeyInput.svelte
-│   │       └── TickerInput.svelte
-│   └── package.json
-├── start.sh                    # Start script for local development
-└── pyproject.toml              # Python dependencies
-```
 
 ## License
 
