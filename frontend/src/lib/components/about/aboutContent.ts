@@ -44,109 +44,26 @@ a layer run concurrently, while layers execute in sequence to respect data depen
   },
 };
 
-export const toolsContent = {
-  title: "Available Tools",
+export const capabilitiesContent = {
+  title: "Capabilities",
 
-  secTools: {
-    category: "SEC Filing Tools",
-    description: "Data from SEC EDGAR via edgartools library",
-    tools: [
-      {
-        name: "get_raw_risk_factors",
-        desc: "Complete raw text of Risk Factors section (Item 1A) from 10-K/10-Q filing",
-      },
-      {
-        name: "get_risk_factors_summary",
-        desc: "LLM-analyzed risk factors with sentiment score (1-10), key risks, and risk categories",
-      },
-      {
-        name: "get_raw_management_discussion",
-        desc: "Raw MD&A (Management Discussion & Analysis) text from Item 7",
-      },
-      {
-        name: "get_mda_summary",
-        desc: "Analyzed MD&A with sentiment score, future outlook, financial highlights, and key points",
-      },
-      {
-        name: "get_raw_balance_sheets",
-        desc: "Balance sheet data as JSON from both 10-K and 10-Q filings",
-      },
-      {
-        name: "get_balance_sheet_summary",
-        desc: "Financial health analysis with key metrics, liquidity/solvency analysis, and red flags",
-      },
-      {
-        name: "get_complete_10k_text",
-        desc: "List of all available 10-K sections that can be retrieved as raw text",
-      },
-      {
-        name: "get_business_overview",
-        desc: "Company Business section (10-K Item 1): products, services, segments, and market overview",
-      },
-      {
-        name: "get_cybersecurity_disclosure",
-        desc: "Cybersecurity risk management and governance disclosure (10-K Item 1C, SEC-mandated since 2023)",
-      },
-      {
-        name: "get_legal_proceedings",
-        desc: "Legal Proceedings section (10-K Item 3): pending litigation, regulatory actions, and legal risks",
-      },
-      {
-        name: "get_all_summaries",
-        desc: "Comprehensive overview combining risk factors, MD&A, and financial analysis (runs all three in parallel)",
-      },
-    ],
-  },
-
-  yahooTools: {
-    category: "Yahoo Finance Tools",
-    description: "Real-time market data via yfinance library",
-    tools: [
-      {
-        name: "get_stock_price_history",
-        desc: "Last 10 trading days with OHLC prices, volume, and period change percentage",
-      },
-      {
-        name: "get_technical_analysis",
-        desc: "RSI (14-day), MACD with signal line, Bollinger Bands, Moving Averages (5/10/20/50/200-day), and volatility metrics",
-      },
-      {
-        name: "get_stock_info",
-        desc: "Current price, P/E ratio, market cap, 52-week high/low, average volume, dividend yield, and beta",
-      },
-      {
-        name: "get_financial_metrics",
-        desc: "Year-over-year revenue growth, net income growth, and debt-to-assets ratio from income statement and balance sheet",
-      },
-    ],
-  },
-
-  tavilyTools: {
-    category: "Tavily Research Tools",
-    description: "Web research and news via Tavily API (optional)",
-    tools: [
-      {
-        name: "web_search",
-        desc: "General company information search across the web",
-      },
-      {
-        name: "deep_research",
-        desc: "Multi-source comprehensive research on company topics",
-      },
-      {
-        name: "get_company_news",
-        desc: "Latest news and developments for the company",
-      },
-      {
-        name: "analyze_competitors",
-        desc: "Market positioning and competitor analysis",
-      },
-      {
-        name: "get_industry_trends",
-        desc: "Industry outlook and trend forecasts",
-      },
-    ],
-  },
+  categories: [
+    {
+      category: "SEC Filing Analysis",
+      description:
+        "Raw and AI-analyzed 10-K/10-Q sections — risk factors, MD&A, balance sheets, business overviews, and more — sourced directly from SEC EDGAR.",
+    },
+    {
+      category: "Market Data & Technicals",
+      description:
+        "Price history, financial metrics, and technical indicators (RSI, MACD, Bollinger Bands, moving averages) with interactive charting.",
+    },
+    {
+      category: "Web Research",
+      description:
+        "Company news, competitor analysis, and industry trends via optional Tavily integration.",
+    },
+  ],
 };
 
 export const techStackContent = {
@@ -212,7 +129,7 @@ export const diagrams = {
 │                            │                    │                    │       │
 │                            ▼                    ▼                    ▼       │
 │               ┌────────────────────┐  ┌─────────────────┐  ┌──────────────┐ │
-│               │  SEC Tools (11)   │  │  Yahoo (4)      │  │ Tavily (5)   │ │
+│               │  SEC Tools        │  │  Yahoo Finance  │  │  Tavily      │ │
 │               │                    │  │                 │  │  (optional)  │ │
 │               │ • Risk Factors     │  │ • Price History │  │ • News       │ │
 │               │ • MD&A             │  │ • Technicals    │  │ • Research   │ │
