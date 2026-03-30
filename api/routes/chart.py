@@ -32,7 +32,7 @@ class ChartPeriod(str, Enum):
 _PERIOD_MAP: dict[str, tuple[str, str]] = {
     "1w": ("5d", "15m"),     # ~130 candles (15-min bars)
     "1mo": ("1mo", "1h"),    # ~140 candles (hourly bars)
-    "3mo": ("3mo", "1d"),    # ~63 candles (daily bars)
+    "3mo": ("3mo", "1h"),    # ~130 candles (hourly bars)
     "6mo": ("6mo", "1d"),    # ~126 candles (daily bars)
     "1y": ("1y", "1d"),      # ~252 candles (daily bars)
 }
