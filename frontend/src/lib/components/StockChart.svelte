@@ -461,6 +461,47 @@
       );
     }
 
+    // Support/Resistance price lines
+    // Remove previous S/R lines before adding new ones
+    if ((candleSeries as any)._srLines) {
+      for (const line of (candleSeries as any)._srLines) {
+        candleSeries.removePriceLine(line);
+      }
+    }
+    const srLines: any[] = [];
+    const supportResistance = data.supportResistance || [];
+    for (const level of supportResistance) {
+      const isSupport = level.type === "support";
+      const line = candleSeries.createPriceLine({
+        price: level.price,
+        color: isSupport ? "rgba(38, 166, 154, 0.6)" : "rgba(239, 83, 80, 0.6)",
+        lineWidth: 1,
+        lineStyle: LineStyle.Dotted,
+        axisLabelVisible: false,
+        title: "",
+      });
+      srLines.push(line);
+    }
+    (candleSeries as any)._srLines = srLines;
+
+    // Pattern markers (arrows on the chart)
+    const patternMarkers = (data.patterns || [])
+      .filter((p: any) => p.time)
+      .map((p: any) => ({
+        time: p.time,
+        position: p.direction === "bullish" ? "belowBar" : "aboveBar",
+        color: p.direction === "bullish" ? "#26a69a" : "#ef5350",
+        shape: p.direction === "bullish" ? "arrowUp" : "arrowDown",
+        text: p.type.replace(/_/g, " ").substring(0, 12),
+      }))
+      .sort((a: any, b: any) => (a.time < b.time ? -1 : 1));
+
+    if (patternMarkers.length > 0) {
+      candleSeries.setMarkers(patternMarkers);
+    } else {
+      candleSeries.setMarkers([]);
+    }
+
     // Show time-of-day on x-axis for intraday timeframes
     const intraday = period === "1w" || period === "1mo";
     const timeOpts = { timeVisible: intraday, secondsVisible: false };
