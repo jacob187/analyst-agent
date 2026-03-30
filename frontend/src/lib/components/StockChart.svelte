@@ -38,6 +38,18 @@
   let showRSI = $state(true);
   let showMACD = $state(true);
 
+  // Track which indicators have data (short timeframes lack long MAs)
+  let hasMA20 = $state(false);
+  let hasMA50 = $state(false);
+  let hasMA200 = $state(false);
+  let hasBollinger = $state(false);
+
+  // Current price info for the header
+  let currentPrice = $state(0);
+  let priceChange = $state(0);
+  let priceChangePercent = $state(0);
+  let priceDirection = $state<"up" | "down">("up");
+
   // ── DOM refs ─────────────────────────────────────────────────────────
   let priceContainer: HTMLDivElement;
   let rsiContainer: HTMLDivElement = $state(undefined as any);
@@ -117,34 +129,41 @@
       borderVisible: false,
       wickUpColor: "#26a69a",
       wickDownColor: "#ef5350",
+      lastValueVisible: false,
     });
 
     volumeSeries = priceChart.addSeries(HistogramSeries, {
       priceFormat: { type: "volume" },
       priceScaleId: "volume",
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
     priceChart.priceScale("volume").applyOptions({
       scaleMargins: { top: 0.85, bottom: 0 },
     });
 
+    // Shared options to keep the y-axis clean: hide per-series price labels
+    // and price lines. Only the candlestick series shows its label.
+    const cleanOverlay = { lastValueVisible: false, priceLineVisible: false };
+
     // MA overlays
     ma20Series = priceChart.addSeries(LineSeries, {
       color: "#2196F3",
       lineWidth: 1,
-      title: "MA20",
       visible: showMAs,
+      ...cleanOverlay,
     });
     ma50Series = priceChart.addSeries(LineSeries, {
       color: "#FF9800",
       lineWidth: 1,
-      title: "MA50",
       visible: showMAs,
+      ...cleanOverlay,
     });
     ma200Series = priceChart.addSeries(LineSeries, {
       color: "#F44336",
       lineWidth: 1,
-      title: "MA200",
       visible: showMAs,
+      ...cleanOverlay,
     });
 
     // Bollinger Bands
@@ -153,17 +172,20 @@
       lineWidth: 1,
       lineStyle: LineStyle.Dashed,
       visible: showBollinger,
+      ...cleanOverlay,
     });
     bbMiddleSeries = priceChart.addSeries(LineSeries, {
       color: "rgba(0, 212, 255, 0.15)",
       lineWidth: 1,
       visible: showBollinger,
+      ...cleanOverlay,
     });
     bbLowerSeries = priceChart.addSeries(LineSeries, {
       color: "rgba(0, 212, 255, 0.3)",
       lineWidth: 1,
       lineStyle: LineStyle.Dashed,
       visible: showBollinger,
+      ...cleanOverlay,
     });
 
     // RSI sub-chart
@@ -203,16 +225,33 @@
     if (macdContainer) {
       macdChart = createChart(macdContainer, chartOptions(120));
 
-      macdHistSeries = macdChart.addSeries(HistogramSeries);
+      // Histogram on an overlay scale so it doesn't interfere with line
+      // rendering — same pattern as volume on the price chart. Both scales
+      // auto-center around zero so they visually align.
+      macdHistSeries = macdChart.addSeries(HistogramSeries, {
+        priceScaleId: "macd_hist",
+        color: "#26a69a",
+        lastValueVisible: false,
+        priceLineVisible: false,
+      });
+      macdChart.priceScale("macd_hist").applyOptions({
+        scaleMargins: { top: 0.1, bottom: 0.1 },
+      });
+
+      // Line series on the default right scale — drawn on top of histogram
       macdLineSeries = macdChart.addSeries(LineSeries, {
         color: "#2962FF",
         lineWidth: 1,
-        title: "MACD",
+        title: "MACD (12, 26, 9)",
+        lastValueVisible: false,
+        priceLineVisible: false,
       });
       macdSignalSeries = macdChart.addSeries(LineSeries, {
         color: "#FF6D00",
         lineWidth: 1,
         title: "Signal",
+        lastValueVisible: false,
+        priceLineVisible: false,
       });
     }
 
@@ -292,7 +331,7 @@
   }
 
   function renderData(data: any) {
-    const { candles, indicators } = data;
+    const { candles, indicators, quote } = data;
 
     if (!candleSeries || !volumeSeries) return;
 
@@ -313,6 +352,42 @@
     // Candlesticks
     candleSeries.setData(candles);
 
+    // Current price — prefer live quote over last candle close
+    if (quote?.price) {
+      currentPrice = quote.price;
+      priceChange = quote.change;
+      priceChangePercent = quote.changePercent;
+      priceDirection = priceChange >= 0 ? "up" : "down";
+    } else if (candles.length >= 2) {
+      const last = candles[candles.length - 1];
+      const prev = candles[candles.length - 2];
+      currentPrice = last.close;
+      priceChange = last.close - prev.close;
+      priceChangePercent = (priceChange / prev.close) * 100;
+      priceDirection = priceChange >= 0 ? "up" : "down";
+    } else if (candles.length === 1) {
+      currentPrice = candles[0].close;
+      priceChange = 0;
+      priceChangePercent = 0;
+      priceDirection = "up";
+    }
+
+    // Current price line — dashed horizontal line
+    if (currentPrice > 0) {
+      const priceColor = priceDirection === "up" ? "#26a69a" : "#ef5350";
+      if ((candleSeries as any)._priceLine) {
+        candleSeries.removePriceLine((candleSeries as any)._priceLine);
+      }
+      (candleSeries as any)._priceLine = candleSeries.createPriceLine({
+        price: currentPrice,
+        color: priceColor,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: "",
+      });
+    }
+
     // Volume — colored by direction
     const volumeData = candles.map((c: any) => ({
       time: c.time,
@@ -324,13 +399,17 @@
     }));
     volumeSeries.setData(volumeData);
 
-    // Moving averages
-    if (indicators.ma20) ma20Series?.setData(indicators.ma20);
-    if (indicators.ma50) ma50Series?.setData(indicators.ma50);
-    if (indicators.ma200) ma200Series?.setData(indicators.ma200);
+    // Moving averages — track which ones have data for the legend
+    hasMA20 = !!indicators.ma20?.length;
+    hasMA50 = !!indicators.ma50?.length;
+    hasMA200 = !!indicators.ma200?.length;
+    if (hasMA20) ma20Series?.setData(indicators.ma20);
+    if (hasMA50) ma50Series?.setData(indicators.ma50);
+    if (hasMA200) ma200Series?.setData(indicators.ma200);
 
     // Bollinger Bands
-    if (indicators.bollinger) {
+    hasBollinger = !!indicators.bollinger?.length;
+    if (hasBollinger) {
       const bb = indicators.bollinger;
       bbUpperSeries?.setData(bb.map((p: any) => ({ time: p.time, value: p.upper })));
       bbMiddleSeries?.setData(bb.map((p: any) => ({ time: p.time, value: p.middle })));
@@ -472,6 +551,15 @@
     onToggleMACD={() => (showMACD = !showMACD)}
   />
 
+  {#if currentPrice > 0}
+    <div class="price-header">
+      <span class="price-value">${currentPrice.toFixed(2)}</span>
+      <span class="price-change" class:up={priceDirection === "up"} class:down={priceDirection === "down"}>
+        {priceChange >= 0 ? "+" : ""}{priceChange.toFixed(2)} ({priceChange >= 0 ? "+" : ""}{priceChangePercent.toFixed(2)}%)
+      </span>
+    </div>
+  {/if}
+
   <div class="chart-body">
     {#if loading}
       <div class="overlay">
@@ -498,12 +586,16 @@
   </div>
 
   <div class="chart-legend">
-    {#if showMAs}
+    {#if showMAs && hasMA20}
       <span class="legend-item"><span class="dot" style="background:#2196F3"></span>MA20</span>
+    {/if}
+    {#if showMAs && hasMA50}
       <span class="legend-item"><span class="dot" style="background:#FF9800"></span>MA50</span>
+    {/if}
+    {#if showMAs && hasMA200}
       <span class="legend-item"><span class="dot" style="background:#F44336"></span>MA200</span>
     {/if}
-    {#if showBollinger}
+    {#if showBollinger && hasBollinger}
       <span class="legend-item"><span class="dot" style="background:#00d4ff"></span>BB</span>
     {/if}
   </div>
@@ -513,12 +605,38 @@
   .stock-chart {
     display: flex;
     flex-direction: column;
-    height: 100%;
-    min-height: 400px;
+    min-height: 100%;
     background: var(--bg-darker);
     border: 1px solid var(--border);
     border-radius: 6px;
-    overflow: hidden;
+  }
+
+  .price-header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.4rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .price-value {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .price-change {
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .price-change.up {
+    color: #26a69a;
+  }
+
+  .price-change.down {
+    color: #ef5350;
   }
 
   .chart-body {
@@ -526,16 +644,17 @@
     flex: 1;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    min-height: 0;
   }
 
   .price-chart {
-    flex: 1;
-    min-height: 200px;
+    flex: 1 1 0%;
+    min-height: 150px;
   }
 
   .sub-chart {
     flex: 0 0 120px;
+    min-height: 0;
     border-top: 1px solid var(--border);
   }
 

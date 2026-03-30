@@ -376,7 +376,7 @@
     flex-direction: column;
     gap: 1.5rem;
     min-height: 0; /* prevent flex child from expanding beyond parent */
-    overflow: hidden;
+    overflow-y: auto;
   }
 
   .config-section {
@@ -456,7 +456,7 @@
     grid-template-columns: 3fr 2fr;
     gap: 1rem;
     flex: 1;
-    min-height: 0; /* critical: let grid shrink within flex parent */
+    min-height: 0;
     overflow: hidden;
   }
 
@@ -543,6 +543,9 @@
   @media (max-width: 768px) {
     .app-container {
       padding: 1rem;
+      height: auto;
+      min-height: 100vh;
+      overflow-y: auto;
     }
 
     .logo {
@@ -566,16 +569,20 @@
 
     .terminal-layout {
       grid-template-columns: 1fr;
+      overflow: visible;
       height: auto;
+      flex: none;
     }
 
     .chart-column {
-      height: 500px;
+      height: auto;
+      max-height: 50vh;
       overflow-y: auto;
     }
 
     .chat-column {
-      height: 500px;
+      height: 60vh;
+      overflow: hidden;
     }
 
     .chat-section {
@@ -633,7 +640,11 @@
     }
 
     .chart-column {
-      height: 400px;
+      max-height: 45vh;
+    }
+
+    .chat-column {
+      height: 55vh;
     }
 
     .chat-section {
