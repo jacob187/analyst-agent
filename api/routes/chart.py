@@ -118,27 +118,6 @@ async def get_chart_data(
         ti = TechnicalIndicators(ticker)
         all_indicators = ti.calculate_chart_indicators(df, intraday=intraday)
 
-        # Support/resistance levels
-        sr_levels: list[dict] = []
-        try:
-            from agents.technical_workflow.support_resistance import SupportResistanceDetector
-            sr = SupportResistanceDetector(ticker)
-            sr_result = sr.detect_levels(df)
-            # Flatten to a simple list of {price, type, strength} for the frontend
-            for level in sr_result.get("support_levels", [])[:3]:
-                sr_levels.append({
-                    "price": round(level["price"], 2),
-                    "type": "support",
-                    "strength": round(level.get("strength", 0), 2),
-                })
-            for level in sr_result.get("resistance_levels", [])[:3]:
-                sr_levels.append({
-                    "price": round(level["price"], 2),
-                    "type": "resistance",
-                    "strength": round(level.get("strength", 0), 2),
-                })
-        except Exception:
-            pass  # S/R is supplementary — don't fail the whole request
 
         # Pattern detection
         patterns: list[dict] = []
@@ -179,7 +158,6 @@ async def get_chart_data(
             "candles": candles,
             "all_indicators": all_indicators,
             "quote": quote,
-            "supportResistance": sr_levels,
             "patterns": patterns,
         }
         _chart_cache[cache_key] = (now, full_data)
@@ -194,7 +172,6 @@ async def get_chart_data(
             "candles": full_data["candles"],
             "indicators": filtered_indicators,
             "quote": full_data.get("quote", {}),
-            "supportResistance": full_data.get("supportResistance", []),
             "patterns": full_data.get("patterns", []),
         },
         headers={"Cache-Control": "public, max-age=60"},

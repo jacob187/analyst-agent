@@ -462,29 +462,6 @@
       );
     }
 
-    // Support/Resistance price lines
-    // Remove previous S/R lines before adding new ones
-    if ((candleSeries as any)._srLines) {
-      for (const line of (candleSeries as any)._srLines) {
-        candleSeries.removePriceLine(line);
-      }
-    }
-    const srLines: any[] = [];
-    const supportResistance = data.supportResistance || [];
-    for (const level of supportResistance) {
-      const isSupport = level.type === "support";
-      const line = candleSeries.createPriceLine({
-        price: level.price,
-        color: isSupport ? "rgba(38, 166, 154, 0.6)" : "rgba(239, 83, 80, 0.6)",
-        lineWidth: 1,
-        lineStyle: LineStyle.Dotted,
-        axisLabelVisible: false,
-        title: "",
-      });
-      srLines.push(line);
-    }
-    (candleSeries as any)._srLines = srLines;
-
     // Pattern markers (arrows on the chart) — v5 uses createSeriesMarkers()
     const patternMarkers = (data.patterns || [])
       .filter((p: any) => p.time)
@@ -588,14 +565,13 @@
     updateVisibility();
   });
 
-  // Resize charts when RSI/MACD toggled — flex layout redistributes space
-  // and Lightweight Charts needs to be told about the new dimensions.
-  // requestAnimationFrame waits for the DOM to update after display:none changes.
+  // Resize charts when RSI/MACD toggled
   $effect(() => {
     void showRSI;
     void showMACD;
     requestAnimationFrame(() => resizeAllCharts());
   });
+
 </script>
 
 <div class="stock-chart">
