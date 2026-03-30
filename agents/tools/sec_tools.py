@@ -483,6 +483,166 @@ def _tool_financial_metrics(ticker: str) -> str:
         return f"Failed to calculate financial metrics for {ticker}: {e}"
 
 
+def _tool_advanced_technical_analysis(ticker: str) -> str:
+    """Return advanced technical indicators with contextual explanations.
+
+    Calculates ADX, ATR, Stochastic, Volume Profile, and Fibonacci levels,
+    then formats each with an interpretation so the LLM agent can explain
+    the results without needing to know the formulas.
+    """
+    try:
+        from agents.technical_workflow.process_technical_indicators import TechnicalIndicators
+
+        retriever = _get_shared_stock_retriever(ticker)
+        hist = retriever.get_historical_prices(period="1y")
+        if hist is None or hist.empty:
+            return f"No historical price data available for {ticker}"
+
+        tech = TechnicalIndicators(ticker)
+        indicators = tech.calculate_all_indicators(hist)
+
+        lines = [f"Advanced Technical Analysis for {ticker}:"]
+        lines.append("=" * 55)
+
+        # ADX
+        adx = indicators.get("adx", {})
+        if adx:
+            lines.append(f"\nADX (Trend Strength):")
+            lines.append(f"  ADX: {adx.get('adx', 'N/A')}")
+            lines.append(f"  +DI: {adx.get('plus_di', 'N/A')}  -DI: {adx.get('minus_di', 'N/A')}")
+            lines.append(f"  Trend Strength: {adx.get('trend_strength', 'N/A').upper()}")
+            lines.append(f"  Insight: {adx.get('signal', '')}")
+
+        # ATR
+        atr = indicators.get("atr", {})
+        if atr:
+            lines.append(f"\nATR (Volatility):")
+            lines.append(f"  ATR: ${atr.get('atr', 'N/A')}")
+            lines.append(f"  ATR %: {atr.get('atr_percent', 'N/A')}%")
+            lines.append(f"  Suggested Stop-Loss: ${atr.get('suggested_stop_loss', 'N/A')}")
+            lines.append(f"  Volatility Regime: {atr.get('volatility_regime', 'N/A').upper()}")
+
+        # Stochastic
+        stoch = indicators.get("stochastic", {})
+        if stoch:
+            lines.append(f"\nStochastic Oscillator:")
+            lines.append(f"  %K: {stoch.get('k_percent', 'N/A')}  %D: {stoch.get('d_percent', 'N/A')}")
+            lines.append(f"  Signal: {stoch.get('signal', 'N/A').upper()}")
+            lines.append(f"  Crossover: {stoch.get('crossover', 'none')}")
+
+        # Volume Profile
+        vp = indicators.get("volume_profile", {})
+        if vp:
+            lines.append(f"\nVolume Profile:")
+            lines.append(f"  Point of Control (POC): ${vp.get('poc', 'N/A')}")
+            lines.append(f"  Value Area: ${vp.get('value_area_low', 'N/A')} - ${vp.get('value_area_high', 'N/A')}")
+            lines.append(f"  Price Position: {vp.get('position', 'N/A').replace('_', ' ').upper()}")
+
+        # Fibonacci
+        fib = indicators.get("fibonacci", {})
+        if fib:
+            lines.append(f"\nFibonacci Retracement:")
+            lines.append(f"  Swing High: ${fib.get('swing_high', 'N/A')}  Swing Low: ${fib.get('swing_low', 'N/A')}")
+            lvls = fib.get("levels", {})
+            for label, price in lvls.items():
+                lines.append(f"  {label}: ${price}")
+            lines.append(f"  Closest Level: {fib.get('closest_level', 'N/A')} (${fib.get('closest_price', 'N/A')}, {fib.get('distance_to_closest', 'N/A')}% away)")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Failed to calculate advanced technical indicators for {ticker}: {e}"
+
+
+def _tool_detect_patterns(ticker: str) -> str:
+    """Detect chart patterns and provide analysis."""
+    try:
+        from agents.technical_workflow.pattern_recognition import PatternRecognitionEngine
+
+        retriever = _get_shared_stock_retriever(ticker)
+        hist = retriever.get_historical_prices(period="1y")
+        if hist is None or hist.empty:
+            return f"No historical price data available for {ticker}"
+
+        engine = PatternRecognitionEngine()
+        patterns = engine.detect_all_patterns(hist)
+
+        if not patterns:
+            return f"No significant chart patterns detected for {ticker} in the current data."
+
+        lines = [f"Chart Pattern Detection for {ticker}:"]
+        lines.append("=" * 55)
+
+        for p in patterns:
+            lines.append(f"\n{p['type'].replace('_', ' ').title()}:")
+            lines.append(f"  Direction: {p.get('direction', 'N/A').upper()}")
+            lines.append(f"  Confidence: {p.get('confidence', 0):.0%}")
+            lines.append(f"  Status: {p.get('status', 'N/A')}")
+            if "target" in p:
+                lines.append(f"  Price Target: ${p['target']:.2f}")
+            if "neckline" in p:
+                lines.append(f"  Neckline: ${p['neckline']:.2f}")
+            if "cross_date" in p:
+                lines.append(f"  Cross Date: {p['cross_date']}")
+            if "price_low" in p:
+                lines.append(f"  Price Low: ${p['price_low']:.2f}")
+            if "price_high" in p:
+                lines.append(f"  Price High: ${p['price_high']:.2f}")
+            if "rsi_low" in p:
+                lines.append(f"  RSI Low: {p['rsi_low']:.1f}")
+            if "rsi_high" in p:
+                lines.append(f"  RSI High: {p['rsi_high']:.1f}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Failed to detect patterns for {ticker}: {e}"
+
+
+def _tool_multi_timeframe_analysis(ticker: str) -> str:
+    """Analyze stock across multiple timeframes."""
+    try:
+        from agents.technical_workflow.multi_timeframe import MultiTimeframeAnalyzer
+
+        analyzer = MultiTimeframeAnalyzer(ticker)
+        result = analyzer.analyze_all_timeframes()
+
+        lines = [f"Multi-Timeframe Analysis for {ticker}:"]
+        lines.append("=" * 55)
+
+        for tf_name, tf_data in result.get("timeframes", {}).items():
+            if "error" in tf_data:
+                lines.append(f"\n{tf_name.upper()}: {tf_data['error']}")
+                continue
+            trend = tf_data.get("trend", "unknown")
+            bars = tf_data.get("bars", 0)
+            lines.append(f"\n{tf_name.upper()} ({bars} bars):")
+            lines.append(f"  Trend: {trend.upper()}")
+
+            ind = tf_data.get("indicators", {})
+            rsi = ind.get("rsi", {})
+            if rsi:
+                lines.append(f"  RSI: {rsi.get('current', 'N/A'):.1f} ({rsi.get('signal', 'N/A')})")
+            macd = ind.get("macd", {})
+            if macd:
+                lines.append(f"  MACD Signal: {macd.get('signal', 'N/A').upper()}")
+
+        conflicts = result.get("conflicts", [])
+        if conflicts:
+            lines.append("\nCONFLICTS DETECTED:")
+            for c in conflicts:
+                lines.append(f"  - [{c['type'].upper()}] {c['detail']}")
+
+        rec = result.get("recommendation", {})
+        if rec:
+            lines.append(f"\nRECOMMENDATION:")
+            lines.append(f"  Bias: {rec.get('bias', 'N/A').upper()}")
+            lines.append(f"  Confidence: {rec.get('confidence', 0):.0%}")
+            lines.append(f"  Strategy: {rec.get('strategy', 'N/A')}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Failed to perform multi-timeframe analysis for {ticker}: {e}"
+
+
 def create_sec_tools(ticker: str, llm: BaseChatModel, sec_header: str = "") -> tuple[list, str]:
     """Return the list of SEC tools bound to a specific ticker and LLM.
 
@@ -570,6 +730,21 @@ def create_sec_tools(ticker: str, llm: BaseChatModel, sec_header: str = "") -> t
             name="get_financial_metrics",
             description="Get fundamental financial metrics including year-over-year revenue growth, net income growth, and debt-to-assets ratio from income statement and balance sheet.",
             func=lambda query="": _tool_financial_metrics(ticker),
+        ),
+        Tool.from_function(
+            name="get_advanced_technical_analysis",
+            description="Get advanced technical indicators: ADX (trend strength), ATR (volatility/position sizing), Stochastic (momentum), Volume Profile (institutional levels), and Fibonacci retracement levels.",
+            func=lambda query="": _tool_advanced_technical_analysis(ticker),
+        ),
+        Tool.from_function(
+            name="get_pattern_detection",
+            description="Detect chart patterns: Head & Shoulders, Double Top/Bottom, Golden/Death Cross, RSI divergences. Returns pattern type, confidence, direction, and price targets.",
+            func=lambda query="": _tool_detect_patterns(ticker),
+        ),
+        Tool.from_function(
+            name="get_multi_timeframe_analysis",
+            description="Analyze stock across daily, weekly, and hourly timeframes. Detects conflicts between timeframes and provides weighted trading recommendation.",
+            func=lambda query="": _tool_multi_timeframe_analysis(ticker),
         ),
     ]
 

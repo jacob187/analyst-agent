@@ -88,7 +88,14 @@
   const TEXT_COLOR = "#a0a3b5"; // --text-dim
   const BORDER_COLOR = "#2a2f4a"; // --border
 
+  // On narrow screens (mobile), disable vertical touch drag on charts so that
+  // swiping up/down scrolls the page instead of zooming the chart. Horizontal
+  // drag still pans the time axis. Pinch-to-zoom is also disabled on mobile to
+  // avoid accidental zooms while scrolling.
+  const isMobile = () => window.innerWidth <= 768;
+
   function chartOptions(height: number) {
+    const mobile = isMobile();
     return {
       layout: {
         background: { type: ColorType.Solid as const, color: CHART_BG },
@@ -105,6 +112,13 @@
         timeVisible: false,
       },
       crosshair: { mode: 0 },
+      handleScroll: {
+        vertTouchDrag: !mobile,
+      },
+      handleScale: {
+        axisPressedMouseMove: !mobile,
+        pinch: !mobile,
+      },
       height,
     };
   }

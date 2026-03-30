@@ -72,9 +72,10 @@ class TestCalculateAllIndicatorsRegression:
 
     def test_returns_expected_top_level_keys(self, ti, df_1y):
         result = ti.calculate_all_indicators(df_1y)
-        assert set(result.keys()) == {
-            "moving_averages", "rsi", "macd", "bollinger_bands", "volatility"
-        }
+        # Core keys must always be present; advanced keys (adx, atr, etc.)
+        # are optional extras added by Phase 1 enhancement.
+        core_keys = {"moving_averages", "rsi", "macd", "bollinger_bands", "volatility"}
+        assert core_keys.issubset(set(result.keys()))
 
     def test_moving_averages_keys(self, ti, df_1y):
         ma = ti.calculate_all_indicators(df_1y)["moving_averages"]

@@ -43,6 +43,9 @@ SEC_TOOL_NAMES = {
     "get_technical_analysis",
     "get_stock_info",
     "get_financial_metrics",
+    "get_advanced_technical_analysis",
+    "get_pattern_detection",
+    "get_multi_timeframe_analysis",
 }
 
 # Research tool names (5) — only available when Tavily key is set
