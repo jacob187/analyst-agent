@@ -11,6 +11,7 @@
   import { onMount } from "svelte";
   import {
     createChart,
+    createSeriesMarkers,
     CandlestickSeries,
     HistogramSeries,
     LineSeries,
@@ -484,7 +485,7 @@
     }
     (candleSeries as any)._srLines = srLines;
 
-    // Pattern markers (arrows on the chart)
+    // Pattern markers (arrows on the chart) — v5 uses createSeriesMarkers()
     const patternMarkers = (data.patterns || [])
       .filter((p: any) => p.time)
       .map((p: any) => ({
@@ -496,10 +497,15 @@
       }))
       .sort((a: any, b: any) => (a.time < b.time ? -1 : 1));
 
+    // Clean up previous markers instance
+    if ((candleSeries as any)._markers) {
+      (candleSeries as any)._markers.setMarkers([]);
+    }
     if (patternMarkers.length > 0) {
-      candleSeries.setMarkers(patternMarkers);
-    } else {
-      candleSeries.setMarkers([]);
+      (candleSeries as any)._markers = createSeriesMarkers(
+        candleSeries,
+        patternMarkers
+      );
     }
 
     // Show time-of-day on x-axis for intraday timeframes
