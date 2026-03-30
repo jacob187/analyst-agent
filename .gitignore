@@ -21,6 +21,7 @@ htmlcov/
 
 # Project specific
 /data/
+/docs/
 CLAUDE.md
 
 # Claude Code (private config, shared skills)
