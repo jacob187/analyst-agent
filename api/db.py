@@ -57,6 +57,12 @@ async def init_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS watchlist (
+            ticker TEXT PRIMARY KEY,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     await db.commit()
 
 async def close_db():
@@ -198,6 +204,37 @@ async def save_settings(google_api_key: str, sec_header: str, tavily_api_key: st
             updated_at = CURRENT_TIMESTAMP
     """, (google_api_key, sec_header, tavily_api_key))
     await db.commit()
+
+async def get_watchlist() -> list[dict]:
+    """Return all watchlist tickers ordered by added_at."""
+    db = await get_db()
+    async with db.execute("SELECT ticker, added_at FROM watchlist ORDER BY added_at") as cursor:
+        rows = await cursor.fetchall()
+        return [{"ticker": row["ticker"], "added_at": row["added_at"]} for row in rows]
+
+
+async def add_to_watchlist(ticker: str) -> bool:
+    """Add ticker. Returns False if already present or limit (10) reached."""
+    db = await get_db()
+    ticker = ticker.upper()
+    # Check limit
+    async with db.execute("SELECT COUNT(*) as cnt FROM watchlist") as cursor:
+        row = await cursor.fetchone()
+        if row["cnt"] >= 10:
+            return False
+    # Insert (ignore duplicate)
+    cursor = await db.execute("INSERT OR IGNORE INTO watchlist (ticker) VALUES (?)", (ticker,))
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def remove_from_watchlist(ticker: str) -> bool:
+    """Remove ticker. Returns True if deleted."""
+    db = await get_db()
+    cursor = await db.execute("DELETE FROM watchlist WHERE ticker = ?", (ticker.upper(),))
+    await db.commit()
+    return cursor.rowcount > 0
+
 
 async def delete_session(session_id: str) -> bool:
     """Delete a session and all its messages. Returns True if deleted."""

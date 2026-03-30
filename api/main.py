@@ -23,6 +23,7 @@ from api.routes.health import router as health_router
 from api.routes.sessions import router as sessions_router
 from api.routes.chart import router as chart_router
 from api.routes.chat import router as chat_router
+from api.routes.watchlist import router as watchlist_router
 
 
 @asynccontextmanager
@@ -46,3 +47,4 @@ app.include_router(health_router)
 app.include_router(sessions_router)
 app.include_router(chart_router)
 app.include_router(chat_router)
+app.include_router(watchlist_router)

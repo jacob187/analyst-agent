@@ -7,10 +7,11 @@
   import ChatViewer from './lib/components/ChatViewer.svelte';
   import AboutPage from './lib/components/about/AboutPage.svelte';
   import StockChart from './lib/components/StockChart.svelte';
+  import Watchlist from './lib/components/Watchlist.svelte';
 
   const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-  type Page = 'main' | 'about' | 'history' | 'view-session' | 'continue-session' | 'settings';
+  type Page = 'main' | 'about' | 'history' | 'view-session' | 'continue-session' | 'settings' | 'watchlist';
   let currentPage: Page = 'main';
   let settingsLoaded = false;
 
@@ -55,6 +56,16 @@
 
   function navigateToSettings() {
     currentPage = 'settings';
+  }
+
+  function navigateToWatchlist() {
+    currentPage = 'watchlist';
+  }
+
+  function handleWatchlistSelect(event: CustomEvent<string>) {
+    currentTicker = event.detail;
+    // Route through the same ticker-submission flow to reuse session logic
+    handleTickerSubmit(new CustomEvent('submit', { detail: event.detail }));
   }
 
   function handleSessionSelect(event: CustomEvent<{ sessionId: string; ticker: string }>) {
@@ -146,6 +157,13 @@
         </button>
         <button
           class="nav-link"
+          class:active={currentPage === 'watchlist'}
+          on:click={navigateToWatchlist}
+        >
+          Watchlist
+        </button>
+        <button
+          class="nav-link"
           class:active={currentPage === 'history' || currentPage === 'view-session'}
           on:click={navigateToHistory}
         >
@@ -188,6 +206,8 @@
           ← back
         </button>
       </div>
+    {:else if currentPage === 'watchlist'}
+      <Watchlist apiBase={API_BASE} on:select={handleWatchlistSelect} />
     {:else if currentPage === 'history'}
       <div class="history-section">
         <ChatHistory on:select={handleSessionSelect} on:continue={handleSessionContinue} on:close={navigateToMain} />
