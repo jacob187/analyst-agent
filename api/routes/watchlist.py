@@ -1,10 +1,14 @@
 """Watchlist endpoints — manage tracked tickers and generate daily briefings."""
 
+import json
 import re
 
 from fastapi import APIRouter, HTTPException
 
-from api.db import get_watchlist, add_to_watchlist, remove_from_watchlist, get_settings
+from api.db import (
+    get_watchlist, add_to_watchlist, remove_from_watchlist, get_settings,
+    save_briefing, get_recent_briefings, get_briefing_history,
+)
 
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
 
@@ -13,9 +17,22 @@ _TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,10}$")
 
 @router.get("")
 async def list_watchlist():
-    """Return all tickers in the watchlist."""
+    """Return all tickers in the watchlist, enriched with company name/sector."""
+    from api.db import get_company
+
     tickers = await get_watchlist()
-    return {"tickers": tickers}
+
+    # Enrich each ticker with company metadata (name, sector) if available
+    enriched = []
+    for t in tickers:
+        company = await get_company(t["ticker"])
+        entry = {**t}
+        if company:
+            entry["name"] = company.get("name")
+            entry["sector"] = company.get("sector")
+        enriched.append(entry)
+
+    return {"tickers": enriched}
 
 
 @router.post("")
@@ -31,6 +48,14 @@ async def add_ticker(data: dict):
             status_code=409,
             detail="Ticker already in watchlist or watchlist full (max 10)"
         )
+
+    # Best-effort enrichment — fetch company name/sector in background
+    try:
+        from api.enrichment import enrich_company
+        await enrich_company(ticker)
+    except Exception:
+        pass
+
     return {"success": True, "ticker": ticker}
 
 
@@ -61,6 +86,8 @@ async def get_briefing():
         model="gemini-3-flash-preview",
         google_api_key=settings["google_api_key"],
         temperature=0,
+        thinking_level="medium",
+        include_thoughts=True,
     )
 
     tavily_key = settings.get("tavily_api_key")
@@ -68,12 +95,41 @@ async def get_briefing():
     tickers = [t["ticker"] for t in tickers_list]
 
     try:
-        analysis = service.generate(tickers)
+        result = service.generate(tickers)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Briefing generation failed: {e}")
 
+    # Persist to database (non-blocking — don't fail the response if DB write fails)
+    try:
+        analysis = result.analysis
+        await save_briefing(
+            raw_json=analysis.model_dump_json(),
+            market_regime=analysis.market_regime,
+            market_positioning=analysis.market_positioning,
+            alerts_json=json.dumps(analysis.alerts),
+            thinking=result.thinking or None,
+            tickers=[t.model_dump() for t in analysis.tickers],
+        )
+    except Exception:
+        pass  # DB persistence is best-effort; don't break the response
+
     return {
-        "briefing": analysis.to_markdown(),
-        "structured": analysis.model_dump(),
+        "briefing": result.analysis.to_markdown(),
+        "thinking": result.thinking,
+        "structured": result.analysis.model_dump(),
         "tickers": tickers,
     }
+
+
+@router.get("/briefing/history")
+async def briefing_history():
+    """Return recent briefings."""
+    briefings = await get_recent_briefings(limit=20)
+    return {"briefings": briefings}
+
+
+@router.get("/briefing/history/{ticker}")
+async def briefing_history_by_ticker(ticker: str, days: int = 30):
+    """Return briefing history for a specific ticker."""
+    history = await get_briefing_history(ticker, days=days)
+    return {"ticker": ticker.upper(), "history": history}
