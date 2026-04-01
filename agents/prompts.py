@@ -25,6 +25,10 @@ STOCK MARKET TOOLS:
 - get_pattern_detection: Chart pattern detection (H&S, Double Top/Bottom, Golden/Death Cross, RSI divergences) with confidence scores
 - get_multi_timeframe_analysis: Multi-timeframe analysis (daily/weekly/hourly) with conflict detection and weighted recommendation
 
+MARKET CONTEXT TOOLS (not ticker-bound):
+- get_market_overview: S&P 500, Nasdaq, Dow Jones, VIX current levels and daily changes — use for broad market context
+- get_macro_indicators: Treasury yields (10Y, 5Y), VIX, US Dollar Index with 1-month changes — use for interest rate and macro environment
+
 RESEARCH TOOLS (if available):
 - web_search: Search for current news/information
 - deep_research: Comprehensive multi-source research on a topic
@@ -58,6 +62,8 @@ Tool selection guidance:
 - For chart patterns (Head & Shoulders, divergences, crossovers) -> use pattern detection tool
 - For multi-timeframe analysis and timeframe conflicts -> use multi-timeframe analysis tool
 - For risks, management outlook, financial statements from filings -> use SEC filing tools
+- For broad market conditions, index levels, "how is the market doing" -> use market overview tool
+- For interest rates, Treasury yields, macro environment, dollar strength -> use macro indicators tool
 - For current news, competitors, industry trends -> use research tools (if available)
 
 If you're unsure which tool has the data, try the most likely tool rather than refusing.
