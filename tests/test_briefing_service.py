@@ -3,13 +3,41 @@
 from unittest.mock import MagicMock, patch
 import pytest
 import agents.briefing.briefing_service as briefing_mod
-from agents.briefing.briefing_service import BriefingService
+from agents.briefing.briefing_service import (
+    BriefingService,
+    DailyBriefingAnalysis,
+    TickerBriefing,
+)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+SAMPLE_ANALYSIS = DailyBriefingAnalysis(
+    market_regime="Transitional Bear, High Volatility, Markdown Phase",
+    market_positioning="Defensive posture recommended. Tighten stops and reduce position sizes.",
+    tickers=[
+        TickerBriefing(
+            ticker="AAPL",
+            price=180.50,
+            change_pct=-1.23,
+            technical_signal="RSI at 28.3 indicates oversold; watch for MACD bullish crossover.",
+            news_summary="Apple announced Q2 earnings beat expectations.",
+            outlook="mixed",
+        ),
+    ],
+    alerts=["AAPL RSI oversold while market in markdown — potential bear trap."],
+)
+
+SAMPLE_JSON = SAMPLE_ANALYSIS.model_dump_json()
 
 
 @pytest.fixture
 def mock_llm():
+    """Mock LLM that returns valid JSON for the PydanticOutputParser."""
     llm = MagicMock()
-    llm.invoke.return_value = MagicMock(content="Morning briefing: Markets are bullish.")
+    llm.invoke.return_value = MagicMock(content=SAMPLE_JSON)
     return llm
 
 
@@ -26,17 +54,63 @@ def service(mock_llm):
     return BriefingService(mock_llm)
 
 
+@pytest.fixture
+def service_with_tavily(mock_llm):
+    return BriefingService(mock_llm, tavily_api_key="test-tavily-key")
+
+
+# ---------------------------------------------------------------------------
+# Pydantic model tests
+# ---------------------------------------------------------------------------
+
+class TestPydanticModels:
+    def test_ticker_briefing_fields(self):
+        t = TickerBriefing(
+            ticker="XOM",
+            price=169.66,
+            change_pct=0.99,
+            technical_signal="RSI=72.4 overbought",
+            news_summary="No recent news",
+            outlook="bearish",
+        )
+        assert t.ticker == "XOM"
+        assert t.outlook == "bearish"
+
+    def test_daily_briefing_to_markdown(self):
+        md = SAMPLE_ANALYSIS.to_markdown()
+        assert "## Market Briefing:" in md
+        assert "AAPL" in md
+        assert "$180.50" in md
+        assert "## Alerts" in md
+        assert "bear trap" in md
+        assert "not investment advice" in md
+
+    def test_daily_briefing_roundtrip(self):
+        """Serialize to JSON and back — ensures parser compatibility."""
+        dumped = SAMPLE_ANALYSIS.model_dump()
+        restored = DailyBriefingAnalysis(**dumped)
+        assert restored.market_regime == SAMPLE_ANALYSIS.market_regime
+        assert len(restored.tickers) == 1
+        assert restored.tickers[0].ticker == "AAPL"
+
+
+# ---------------------------------------------------------------------------
+# Format helpers
+# ---------------------------------------------------------------------------
+
 class TestFormatMarketContext:
     def test_with_full_data(self, service):
         regime = {
-            "trend": {"type": "bull", "price": 500.0, "ma50": 490.0, "ma200": 470.0},
-            "volatility": {"regime": "low", "current_vix": 14.5, "description": "Calm"},
-            "phase": {"phase": "markup", "description": "Uptrend"},
+            "trend": "bull",
+            "volatility": "low",
+            "phase": "markup",
             "recommendations": ["Buy dips", "Use trend-following"],
         }
         result = service._format_market_context(regime)
         assert "BULL" in result
-        assert "14.5" in result
+        assert "LOW" in result
+        assert "MARKUP" in result
+        assert "Buy dips" in result
 
     def test_with_error(self, service):
         result = service._format_market_context({"error": "failed"})
@@ -57,41 +131,95 @@ class TestFormatTickerSummary:
         assert "unavailable" in result.lower()
 
 
+class TestFormatNewsContext:
+    def test_formats_news(self, service):
+        news = {"AAPL": "Apple beat earnings", "MSFT": "No recent news"}
+        result = service._format_news_context(news)
+        assert "AAPL: Apple beat earnings" in result
+        assert "MSFT: No recent news" in result
+
+
+# ---------------------------------------------------------------------------
+# News gathering
+# ---------------------------------------------------------------------------
+
+class TestGatherNews:
+    def test_no_tavily_key_returns_placeholder(self, service):
+        """Without a Tavily key, every ticker gets a placeholder message."""
+        result = service._gather_news(["AAPL", "MSFT"])
+        assert "AAPL" in result
+        assert "not configured" in result["AAPL"].lower()
+
+    def test_tavily_search_called(self, service_with_tavily):
+        """With a Tavily key, TavilySearch is invoked for each ticker."""
+        mock_search = MagicMock()
+        mock_search.invoke.return_value = {
+            "answer": "Apple stock rose 3%",
+            "results": [{"title": "AAPL surges"}],
+        }
+
+        with patch("langchain_tavily.TavilySearch", return_value=mock_search):
+            result = service_with_tavily._gather_news(["AAPL"])
+            assert "Apple stock rose 3%" in result["AAPL"]
+            mock_search.invoke.assert_called_once()
+
+    def test_tavily_error_handled(self, service_with_tavily):
+        """Tavily failures degrade gracefully."""
+        mock_search = MagicMock()
+        mock_search.invoke.side_effect = Exception("API down")
+
+        with patch("langchain_tavily.TavilySearch", return_value=mock_search):
+            result = service_with_tavily._gather_news(["AAPL"])
+            assert "failed" in result["AAPL"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Synthesis (prompt | llm | parser chain)
+# ---------------------------------------------------------------------------
+
 class TestSynthesize:
-    def test_calls_llm(self, service, mock_llm):
+    def test_returns_pydantic_model(self):
+        """The prompt | llm | parser chain produces a DailyBriefingAnalysis.
+
+        Uses LangChain's FakeListChatModel so the chain runs end-to-end
+        with a real PydanticOutputParser — no fragile mock wiring.
+        """
+        from langchain_core.language_models import FakeListChatModel
+
+        fake_llm = FakeListChatModel(responses=[SAMPLE_JSON])
+        service = BriefingService(fake_llm)
+
         result = service._synthesize(
             [{"ticker": "AAPL", "price": 180.0}],
-            {
-                "trend": {"type": "bull", "price": 500, "ma50": 490, "ma200": 470},
-                "volatility": {"regime": "low", "current_vix": 14, "description": "Calm"},
-                "phase": {"phase": "markup", "description": "Up"},
-                "recommendations": [],
-            },
+            {"trend": "bull", "volatility": "low", "phase": "markup"},
+            {"AAPL": "Apple beat earnings"},
         )
-        mock_llm.invoke.assert_called_once()
-        assert "briefing" in result.lower()
+        assert isinstance(result, DailyBriefingAnalysis)
+        assert result.tickers[0].ticker == "AAPL"
+        assert result.market_regime == SAMPLE_ANALYSIS.market_regime
 
-    def test_handles_list_content(self, service):
-        """Gemini with thinking returns content as list of dicts."""
-        service.llm.invoke.return_value = MagicMock(
-            content=[{"type": "text", "text": "Briefing text here"}]
-        )
-        result = service._synthesize([{"ticker": "X", "price": 1}], {"error": "no data"})
-        assert "Briefing text here" in result
 
+# ---------------------------------------------------------------------------
+# Caching
+# ---------------------------------------------------------------------------
 
 class TestCaching:
     def test_second_call_cached(self, service, mock_llm):
         with patch.object(service, "_gather_ticker_data", return_value=[{"ticker": "AAPL", "price": 180}]):
             with patch.object(service, "_get_market_regime", return_value={"error": "skip"}):
-                service.generate(["AAPL"])
-                service.generate(["AAPL"])
-                # LLM should only be called once
-                assert mock_llm.invoke.call_count == 1
+                with patch.object(service, "_gather_news", return_value={"AAPL": "news"}):
+                    with patch.object(service, "_synthesize", return_value=SAMPLE_ANALYSIS):
+                        service.generate(["AAPL"])
+                        result = service.generate(["AAPL"])
+                        # _synthesize should only be called once (second call hits cache)
+                        assert service._synthesize.call_count == 1
+                        assert isinstance(result, DailyBriefingAnalysis)
 
     def test_different_tickers_not_cached(self, service, mock_llm):
         with patch.object(service, "_gather_ticker_data", return_value=[{"ticker": "X", "price": 1}]):
             with patch.object(service, "_get_market_regime", return_value={"error": "skip"}):
-                service.generate(["AAPL"])
-                service.generate(["MSFT"])
-                assert mock_llm.invoke.call_count == 2
+                with patch.object(service, "_gather_news", return_value={"X": "news"}):
+                    with patch.object(service, "_synthesize", return_value=SAMPLE_ANALYSIS):
+                        service.generate(["AAPL"])
+                        service.generate(["MSFT"])
+                        assert service._synthesize.call_count == 2
