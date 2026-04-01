@@ -5,6 +5,7 @@ as SECDocumentProcessor in sec_llm_models.py).
 """
 
 import time
+from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -12,6 +13,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
+from agents.llm_utils import parse_llm_response
 from agents.prompts import DAILY_BRIEFING_SYSTEM_PROMPT, DAILY_BRIEFING_USER_TEMPLATE
 
 
@@ -32,6 +34,10 @@ class TickerBriefing(BaseModel):
     news_summary: str = Field(
         description="One-sentence summary of the most relevant recent news or "
         "'No recent news' if unavailable"
+    )
+    news_url: Optional[str] = Field(
+        default=None,
+        description="URL to the most relevant news article (injected post-LLM, not generated)"
     )
     outlook: Literal["bullish", "bearish", "neutral", "mixed"] = Field(
         description="One of: bullish, bearish, neutral, or mixed"
@@ -75,7 +81,10 @@ class DailyBriefingAnalysis(BaseModel):
             icon = direction.get(t.outlook, "~")
             lines.append(f"### {t.ticker} — ${t.price:.2f} ({t.change_pct:+.2f}%) [{icon} {t.outlook.upper()}]")
             lines.append(f"- **Technical:** {t.technical_signal}")
-            lines.append(f"- **News:** {t.news_summary}")
+            if t.news_url:
+                lines.append(f"- **News:** [{t.news_summary}]({t.news_url})")
+            else:
+                lines.append(f"- **News:** {t.news_summary}")
             lines.append("")
 
         if self.alerts:
@@ -88,6 +97,13 @@ class DailyBriefingAnalysis(BaseModel):
         lines.append(f"*{self.disclaimer}*")
 
         return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class BriefingResult:
+    """Container for a briefing analysis plus the LLM's chain-of-thought."""
+    analysis: DailyBriefingAnalysis
+    thinking: str
 
 
 # ---------------------------------------------------------------------------
@@ -114,8 +130,11 @@ class BriefingService:
         self.tavily_api_key = tavily_api_key
         self.parser = PydanticOutputParser(pydantic_object=DailyBriefingAnalysis)
 
-    def generate(self, tickers: list[str]) -> DailyBriefingAnalysis:
-        """Build briefing for the given tickers. Returns structured Pydantic model.
+    def generate(self, tickers: list[str]) -> BriefingResult:
+        """Build briefing for the given tickers.
+
+        Returns a BriefingResult containing the structured analysis and
+        the LLM's chain-of-thought reasoning.
 
         Uses a 15-minute in-memory cache keyed on the sorted ticker list.
         """
@@ -134,10 +153,10 @@ class BriefingService:
         regime_data = self._get_market_regime()
         news_data = self._gather_news(tickers)
 
-        briefing = self._synthesize(ticker_data, regime_data, news_data)
+        result = self._synthesize(ticker_data, regime_data, news_data)
 
-        _briefing_cache = (cache_key, now, briefing)
-        return briefing
+        _briefing_cache = (cache_key, now, result)
+        return result
 
     # --- Data gathering ---------------------------------------------------
 
@@ -209,18 +228,20 @@ class BriefingService:
         except Exception:
             return {"error": "Could not determine market regime"}
 
-    def _gather_news(self, tickers: list[str]) -> dict[str, str]:
-        """Fetch recent news headlines per ticker via Tavily.
+    def _gather_news(self, tickers: list[str]) -> dict[str, dict[str, str]]:
+        """Fetch recent news per ticker via Tavily.
 
-        Returns a dict mapping ticker -> news summary string.
-        Gracefully degrades when Tavily is unavailable.
+        Returns a dict mapping ticker -> {"summary": str, "url": str | None}.
+        The summary is passed to the LLM prompt; the URL is injected into
+        the Pydantic model after the LLM call (so URLs are never hallucinated).
         """
+        empty = {"summary": "No news available (Tavily not configured)", "url": None}
         if not self.tavily_api_key:
-            return {t: "No news available (Tavily not configured)" for t in tickers}
+            return {t: empty for t in tickers}
 
         from langchain_tavily import TavilySearch
 
-        news: dict[str, str] = {}
+        news: dict[str, dict[str, str]] = {}
         search = TavilySearch(
             tavily_api_key=self.tavily_api_key,
             max_results=3,
@@ -234,23 +255,27 @@ class BriefingService:
                 result = search.invoke({"query": f"{ticker} stock latest news"})
 
                 if isinstance(result, str):
-                    news[ticker] = result
+                    news[ticker] = {"summary": result, "url": None}
                 elif isinstance(result, dict):
                     answer = result.get("answer", "")
-                    headlines = [
-                        r.get("title", "")
-                        for r in result.get("results", [])[:3]
-                    ]
+                    results_list = result.get("results", [])
+
+                    # Extract top URL from the first result
+                    top_url = results_list[0].get("url") if results_list else None
+
+                    headlines = [r.get("title", "") for r in results_list[:3]]
                     parts = []
                     if answer:
                         parts.append(answer)
                     if headlines:
                         parts.append("Headlines: " + "; ".join(headlines))
-                    news[ticker] = " | ".join(parts) if parts else "No recent news"
+
+                    summary = " | ".join(parts) if parts else "No recent news"
+                    news[ticker] = {"summary": summary, "url": top_url}
                 else:
-                    news[ticker] = str(result)
+                    news[ticker] = {"summary": str(result), "url": None}
             except Exception:
-                news[ticker] = "News retrieval failed"
+                news[ticker] = {"summary": "News retrieval failed", "url": None}
 
         return news
 
@@ -296,11 +321,11 @@ class BriefingService:
             lines.append(" | ".join(parts))
         return "\n".join(lines)
 
-    def _format_news_context(self, news: dict[str, str]) -> str:
-        """Format news data for the prompt."""
+    def _format_news_context(self, news: dict[str, dict[str, str]]) -> str:
+        """Format news summaries for the prompt (URLs excluded — injected post-LLM)."""
         lines = []
-        for ticker, summary in news.items():
-            lines.append(f"{ticker}: {summary}")
+        for ticker, data in news.items():
+            lines.append(f"{ticker}: {data['summary']}")
         return "\n".join(lines)
 
     # --- Synthesis --------------------------------------------------------
@@ -309,26 +334,41 @@ class BriefingService:
         self,
         ticker_data: list[dict[str, Any]],
         regime_data: dict[str, Any],
-        news_data: dict[str, str],
-    ) -> DailyBriefingAnalysis:
-        """Build prompt chain and invoke LLM with Pydantic output parser.
+        news_data: dict[str, dict[str, str]],
+    ) -> BriefingResult:
+        """Invoke LLM, capture thinking, then parse structured output.
 
-        Uses the same prompt | llm | parser pattern as SECDocumentProcessor.
+        The chain is split into two steps so we can extract the LLM's
+        chain-of-thought reasoning before the parser consumes the response:
+          1. prompt | llm  →  raw AIMessage (may contain thinking blocks)
+          2. parser.invoke(text)  →  DailyBriefingAnalysis
+
+        URLs are injected into the parsed model after the LLM call so the
+        model never has the opportunity to hallucinate them.
         """
         prompt = ChatPromptTemplate.from_messages([
             ("system", DAILY_BRIEFING_SYSTEM_PROMPT),
             ("user", DAILY_BRIEFING_USER_TEMPLATE),
         ])
 
-        chain = (
-            prompt.partial(
-                market_context=self._format_market_context(regime_data),
-                ticker_summaries=self._format_ticker_summary(ticker_data),
-                news_context=self._format_news_context(news_data),
-                format_instructions=self.parser.get_format_instructions(),
-            )
-            | self.llm
-            | self.parser
+        # Step 1: prompt | llm — get raw response with thinking
+        prompt_chain = prompt.partial(
+            market_context=self._format_market_context(regime_data),
+            ticker_summaries=self._format_ticker_summary(ticker_data),
+            news_context=self._format_news_context(news_data),
+            format_instructions=self.parser.get_format_instructions(),
         )
+        raw_response = (prompt_chain | self.llm).invoke({})
 
-        return chain.invoke({})
+        # Step 2: separate thinking from text using the reusable module
+        parsed = parse_llm_response(raw_response)
+
+        # Step 3: parse the text content into the Pydantic model
+        analysis = self.parser.invoke(parsed.text)
+
+        # Inject real URLs from Tavily (post-LLM, never hallucinated)
+        url_map = {t: data.get("url") for t, data in news_data.items()}
+        for ticker_briefing in analysis.tickers:
+            ticker_briefing.news_url = url_map.get(ticker_briefing.ticker)
+
+        return BriefingResult(analysis=analysis, thinking=parsed.thinking)

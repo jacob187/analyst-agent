@@ -75,3 +75,38 @@ class TestBriefingEndpoint:
         mock_settings.return_value = None
         resp = client.get("/watchlist/briefing")
         assert resp.status_code == 400
+
+
+class TestBriefingHistory:
+    @patch("api.routes.watchlist.get_recent_briefings", new_callable=AsyncMock)
+    def test_history_returns_list(self, mock_recent):
+        mock_recent.return_value = [
+            {"id": "abc", "market_regime": "Bull", "tickers": [], "created_at": "2026-04-01"},
+        ]
+        resp = client.get("/watchlist/briefing/history")
+        assert resp.status_code == 200
+        assert len(resp.json()["briefings"]) == 1
+
+    @patch("api.routes.watchlist.get_recent_briefings", new_callable=AsyncMock)
+    def test_history_empty(self, mock_recent):
+        mock_recent.return_value = []
+        resp = client.get("/watchlist/briefing/history")
+        assert resp.status_code == 200
+        assert resp.json()["briefings"] == []
+
+    @patch("api.routes.watchlist.get_briefing_history", new_callable=AsyncMock)
+    def test_history_by_ticker(self, mock_hist):
+        mock_hist.return_value = [
+            {"briefing_id": "abc", "outlook": "bullish", "price": 180.0, "created_at": "2026-04-01"},
+        ]
+        resp = client.get("/watchlist/briefing/history/AAPL")
+        assert resp.status_code == 200
+        assert resp.json()["ticker"] == "AAPL"
+        assert len(resp.json()["history"]) == 1
+
+    @patch("api.routes.watchlist.get_briefing_history", new_callable=AsyncMock)
+    def test_history_by_ticker_with_days_param(self, mock_hist):
+        mock_hist.return_value = []
+        resp = client.get("/watchlist/briefing/history/XOM?days=7")
+        assert resp.status_code == 200
+        mock_hist.assert_called_once_with("XOM", days=7)
