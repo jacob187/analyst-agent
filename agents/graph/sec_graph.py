@@ -77,6 +77,10 @@ def _create_tools(ticker: str, llm: BaseChatModel, tavily_api_key: Optional[str]
         research_tools = create_research_tools(ticker, tavily_api_key)
         tools.extend(research_tools)
 
+    # Briefing history tools (always available — returns "no history" if DB is empty)
+    from agents.tools.briefing_tools import create_briefing_tools
+    tools.extend(create_briefing_tools(ticker))
+
     return tools
 
 

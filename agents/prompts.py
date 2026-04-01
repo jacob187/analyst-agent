@@ -35,6 +35,10 @@ RESEARCH TOOLS (if available):
 - get_company_news: Latest news and developments
 - analyze_competitors: Competitive landscape analysis
 - get_industry_trends: Industry trends and forecasts
+
+BRIEFING HISTORY TOOLS:
+- get_briefing_history: Recent daily briefing analyses for the ticker (outlook trends, signals, alerts over past N days)
+- get_latest_briefing: Most recent full morning briefing summary with market regime, all tickers, and alerts
 """
 
 
