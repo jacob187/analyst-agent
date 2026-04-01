@@ -13,11 +13,15 @@
 
   const dispatch = createEventDispatcher<{ select: string }>();
 
-  let tickers: Array<{ ticker: string; added_at: string }> = [];
+  let tickers: Array<{ ticker: string; added_at: string; name?: string; sector?: string }> = [];
   let prices: Record<string, { price: number; change: number; changePercent: number }> = {};
   let newTicker = '';
   let briefing = '';
+  let thinking = '';
+  let briefingHistory: Array<{ id: string; market_regime: string; created_at: string; tickers: any[] }> = [];
+  let showHistory = false;
   let loadingBriefing = false;
+  let loadingHistory = false;
   let loadingList = true;
   let error = '';
   let addError = '';
@@ -99,6 +103,7 @@
   async function getBriefing() {
     loadingBriefing = true;
     briefing = '';
+    thinking = '';
     error = '';
 
     try {
@@ -110,10 +115,42 @@
       }
       const data = await res.json();
       briefing = data.briefing || '';
+      thinking = data.thinking || '';
     } catch {
       error = 'Failed to generate briefing';
     } finally {
       loadingBriefing = false;
+    }
+  }
+
+  async function fetchBriefingHistory() {
+    loadingHistory = true;
+    try {
+      const res = await fetch(`${apiBase}/watchlist/briefing/history`);
+      if (res.ok) {
+        const data = await res.json();
+        briefingHistory = data.briefings || [];
+      }
+    } catch {
+      // History fetch is best-effort
+    } finally {
+      loadingHistory = false;
+    }
+  }
+
+  function toggleHistory() {
+    showHistory = !showHistory;
+    if (showHistory && briefingHistory.length === 0) {
+      fetchBriefingHistory();
+    }
+  }
+
+  function formatDate(dateStr: string): string {
+    try {
+      const d = new Date(dateStr);
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    } catch {
+      return dateStr;
     }
   }
 
@@ -164,9 +201,14 @@
       {#each tickers as t}
         {@const p = prices[t.ticker]}
         <div class="ticker-row">
-          <button class="ticker-name" on:click={() => selectTicker(t.ticker)}>
-            {t.ticker}
-          </button>
+          <div class="ticker-info">
+            <button class="ticker-name" on:click={() => selectTicker(t.ticker)}>
+              {t.ticker}
+            </button>
+            {#if t.name}
+              <span class="company-name">{t.name}</span>
+            {/if}
+          </div>
           <div class="ticker-price">
             {#if p}
               <span class="price">${p.price.toFixed(2)}</span>
@@ -200,10 +242,52 @@
         <div class="briefing-error">{error}</div>
       {/if}
 
+      {#if thinking}
+        <details class="thinking-block">
+          <summary>View AI reasoning</summary>
+          <div class="thinking-content">{@html renderMarkdown(thinking)}</div>
+        </details>
+      {/if}
+
       {#if briefing}
         <div class="briefing-content">
           {@html renderMarkdown(briefing)}
         </div>
+      {/if}
+
+      <!-- Briefing history -->
+      <button class="history-toggle" on:click={toggleHistory}>
+        {showHistory ? 'Hide' : 'Show'} Past Briefings
+      </button>
+
+      {#if showHistory}
+        {#if loadingHistory}
+          <div class="loading-msg">Loading history...</div>
+        {:else if briefingHistory.length === 0}
+          <div class="empty-msg">No past briefings yet.</div>
+        {:else}
+          <div class="history-list">
+            {#each briefingHistory as b}
+              <details class="history-entry">
+                <summary>
+                  <span class="history-date">{formatDate(b.created_at)}</span>
+                  <span class="history-regime">{b.market_regime}</span>
+                </summary>
+                <div class="history-tickers">
+                  {#each b.tickers as t}
+                    <div class="history-ticker">
+                      <span class="ht-symbol">{t.ticker}</span>
+                      <span class="ht-price">${t.price.toFixed(2)}</span>
+                      <span class="ht-outlook" class:bullish={t.outlook === 'bullish'} class:bearish={t.outlook === 'bearish'}>
+                        {t.outlook}
+                      </span>
+                    </div>
+                  {/each}
+                </div>
+              </details>
+            {/each}
+          </div>
+        {/if}
       {/if}
     </div>
   {/if}
@@ -309,6 +393,13 @@
     border-radius: 4px;
   }
 
+  .ticker-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 80px;
+  }
+
   .ticker-name {
     background: none;
     border: none;
@@ -318,12 +409,20 @@
     font-weight: 600;
     cursor: pointer;
     padding: 0;
-    min-width: 60px;
     text-align: left;
   }
 
   .ticker-name:hover {
     text-decoration: underline;
+  }
+
+  .company-name {
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 140px;
   }
 
   .ticker-price {
@@ -427,5 +526,146 @@
 
   .briefing-content :global(strong) {
     color: var(--accent);
+  }
+
+  .thinking-block {
+    margin-top: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .thinking-block summary {
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-card);
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    cursor: pointer;
+    user-select: none;
+    transition: color 0.15s;
+  }
+
+  .thinking-block summary:hover {
+    color: var(--text);
+  }
+
+  .thinking-content {
+    padding: 0.75rem;
+    background: var(--bg-darker);
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    line-height: 1.5;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  .thinking-content :global(p) {
+    margin: 0 0 0.5rem 0;
+  }
+
+  .thinking-content :global(p:last-child) {
+    margin-bottom: 0;
+  }
+
+  .history-toggle {
+    width: 100%;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 0.4rem;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.8rem;
+    cursor: pointer;
+    margin-top: 0.75rem;
+    transition: color 0.15s;
+  }
+
+  .history-toggle:hover {
+    color: var(--text);
+    border-color: var(--text-muted);
+  }
+
+  .history-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-top: 0.5rem;
+  }
+
+  .history-entry {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .history-entry summary {
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-card);
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.8rem;
+  }
+
+  .history-date {
+    color: var(--text-muted);
+  }
+
+  .history-regime {
+    color: var(--text);
+    font-weight: 500;
+    text-align: right;
+    max-width: 60%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .history-tickers {
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-darker);
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .history-ticker {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+  }
+
+  .ht-symbol {
+    color: var(--accent);
+    font-weight: 600;
+    min-width: 45px;
+  }
+
+  .ht-price {
+    color: var(--text);
+  }
+
+  .ht-outlook {
+    margin-left: auto;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-muted);
+  }
+
+  .ht-outlook.bullish {
+    color: #26a69a;
+    background: rgba(38, 166, 154, 0.1);
+  }
+
+  .ht-outlook.bearish {
+    color: #ef5350;
+    background: rgba(239, 83, 80, 0.1);
   }
 </style>
