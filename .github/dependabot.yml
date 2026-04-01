@@ -1,0 +1,44 @@
+version: 2
+
+updates:
+  # Python dependencies (uv/pip ecosystem)
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      # Batch minor/patch updates into one PR to reduce noise
+      langchain:
+        patterns:
+          - "langchain*"
+          - "langgraph*"
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+        exclude-patterns:
+          - "langchain*"
+          - "langgraph*"
+    # Only open 5 PRs at a time so it doesn't flood
+    open-pull-requests-limit: 5
+
+  # Frontend dependencies
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    open-pull-requests-limit: 5
+
+  # GitHub Actions versions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
