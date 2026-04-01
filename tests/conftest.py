@@ -26,7 +26,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 DATASETS_DIR = Path(__file__).parent / "datasets"
 DEFAULT_TICKER = "AAPL"
 
-# All SEC tool names (12) — no research tools
+# SEC filing tool names (11)
 SEC_TOOL_NAMES = {
     "get_raw_risk_factors",
     "get_risk_factors_summary",
@@ -39,6 +39,10 @@ SEC_TOOL_NAMES = {
     "get_business_overview",
     "get_cybersecurity_disclosure",
     "get_legal_proceedings",
+}
+
+# Stock / technical analysis tool names (7)
+STOCK_TOOL_NAMES = {
     "get_stock_price_history",
     "get_technical_analysis",
     "get_stock_info",
@@ -46,6 +50,12 @@ SEC_TOOL_NAMES = {
     "get_advanced_technical_analysis",
     "get_pattern_detection",
     "get_multi_timeframe_analysis",
+}
+
+# Market-wide context tool names (2)
+MARKET_TOOL_NAMES = {
+    "get_market_overview",
+    "get_macro_indicators",
 }
 
 # Research tool names (5) — only available when Tavily key is set
@@ -57,7 +67,7 @@ RESEARCH_TOOL_NAMES = {
     "get_industry_trends",
 }
 
-VALID_TOOLS = SEC_TOOL_NAMES | RESEARCH_TOOL_NAMES
+VALID_TOOLS = SEC_TOOL_NAMES | STOCK_TOOL_NAMES | MARKET_TOOL_NAMES | RESEARCH_TOOL_NAMES
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +89,7 @@ def llm():
     from langchain_google_genai import ChatGoogleGenerativeAI
 
     return ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
+        model="gemini-3-flash-lite",
         google_api_key=api_key,
         temperature=0,
     )
@@ -117,10 +127,14 @@ def sec_header():
 
 @pytest.fixture(scope="session")
 def tools(llm, sec_header):
-    """List of Tool objects for AAPL."""
+    """List of Tool objects for AAPL (SEC + stock + market)."""
     from agents.tools.sec_tools import create_sec_tools
+    from agents.tools.stock_tools import create_stock_tools
+    from agents.tools.market_tools import create_market_tools
 
     tool_list, _ = create_sec_tools(DEFAULT_TICKER, llm, sec_header)
+    tool_list.extend(create_stock_tools(DEFAULT_TICKER))
+    tool_list.extend(create_market_tools())
     return tool_list
 
 

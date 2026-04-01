@@ -58,16 +58,22 @@ async def get_briefing():
     from agents.briefing.briefing_service import BriefingService
 
     llm = ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash",
+        model="gemini-3-flash-preview",
         google_api_key=settings["google_api_key"],
+        temperature=0,
     )
 
-    service = BriefingService(llm)
+    tavily_key = settings.get("tavily_api_key")
+    service = BriefingService(llm, tavily_api_key=tavily_key)
     tickers = [t["ticker"] for t in tickers_list]
 
     try:
-        briefing = service.generate(tickers)
+        analysis = service.generate(tickers)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Briefing generation failed: {e}")
 
-    return {"briefing": briefing, "tickers": tickers}
+    return {
+        "briefing": analysis.to_markdown(),
+        "structured": analysis.model_dump(),
+        "tickers": tickers,
+    }
