@@ -64,8 +64,12 @@ def _get_latest_query(messages: List[BaseMessage]) -> str:
 def _create_tools(ticker: str, llm: BaseChatModel, tavily_api_key: Optional[str] = None, sec_header: str = ""):
     """Create all available tools for the ticker."""
     from agents.tools.sec_tools import create_sec_tools
+    from agents.tools.stock_tools import create_stock_tools
+    from agents.tools.market_tools import create_market_tools
 
     tools, _ = create_sec_tools(ticker, llm, sec_header)
+    tools.extend(create_stock_tools(ticker))
+    tools.extend(create_market_tools())
 
     if tavily_api_key:
         from agents.tools.research_tools import create_research_tools
