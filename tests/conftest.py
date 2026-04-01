@@ -152,7 +152,7 @@ def tools_dict(tools):
 @pytest.fixture(scope="session")
 def agent(llm, sec_header):
     """Full PlanningAgent for AAPL."""
-    from agents.graph.sec_graph import create_planning_agent
+    from agents.graph.analyst_graph import create_planning_agent
 
     return create_planning_agent(ticker=DEFAULT_TICKER, llm=llm, sec_header=sec_header)
 

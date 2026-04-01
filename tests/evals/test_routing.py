@@ -9,7 +9,7 @@ logic by constructing state dicts directly and calling the routing functions.
 
 import pytest
 
-from agents.graph.sec_graph import route_by_complexity, check_more_steps
+from agents.graph.analyst_graph import route_by_complexity, check_more_steps
 from agents.planner import QueryPlan, AnalysisStep
 
 

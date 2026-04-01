@@ -1,5 +1,5 @@
 """
-LangGraph workflow for SEC financial analysis with query planning.
+LangGraph workflow for financial analysis with query planning.
 
 Architecture:
 - Simple queries → ReAct agent directly
@@ -19,6 +19,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import create_react_agent
 
+from agents.llm_utils import extract_text, parse_llm_response
 from agents.prompts import (
     SEC_AGENT_SYSTEM_PROMPT,
     SYNTHESIS_SYSTEM_PROMPT,
@@ -127,9 +128,9 @@ def create_react_node(react_agent: Any):
         result = react_agent.invoke({"messages": state["messages"]})
 
         if result and "messages" in result:
-            # _extract_text_content handles the case where Gemini 3 returns
+            # extract_text handles the case where Gemini 3 returns
             # content as a list of blocks instead of a plain string
-            response = _extract_text_content(result["messages"][-1].content)
+            response = extract_text(result["messages"][-1].content)
         else:
             response = str(result)
 
@@ -260,59 +261,22 @@ def _build_synthesis_prompt(state: AnalysisState, ticker: str) -> str:
     )
 
 
-def _extract_text_content(content) -> str:
-    """Extract plain text from an LLM response content field.
-
-    With include_thoughts=True, Gemini returns content as a list of blocks:
-    [{"type": "thinking", "thinking": "..."}, {"type": "text", "text": "..."}]
-    This helper extracts just the text portions, ignoring thinking blocks.
-    If content is already a string, returns it as-is.
-    """
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict) and block.get("type") == "text":
-                parts.append(block.get("text", ""))
-        return "".join(parts)
-    return str(content)
-
-
 def _process_streaming_chunk(chunk, writer) -> str:
     """Process a single LLM streaming chunk, emitting events via writer.
 
-    Handles two content formats from Gemini:
-    - str: regular text token (most common during streaming)
-    - list[dict]: structured blocks with thinking/reasoning or text parts
-      (appears when include_thoughts=True is set on the LLM)
+    Uses parse_llm_response from llm_utils for consistent parsing,
+    then emits thinking/token events via the stream writer.
 
     Returns the text content extracted from this chunk (for accumulation).
     """
-    content = chunk.content
-    text_content = ""
+    parsed = parse_llm_response(chunk)
 
-    if isinstance(content, str) and content:
-        text_content = content
-        writer({"type": "token", "message": content})
-    elif isinstance(content, list):
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            block_type = block.get("type", "")
-            if block_type in ("thinking", "reasoning"):
-                thinking_text = block.get(block_type, "")
-                if thinking_text:
-                    writer({"type": "thinking", "message": thinking_text})
-            elif block_type == "text":
-                text = block.get("text", "")
-                if text:
-                    text_content += text
-                    writer({"type": "token", "message": text})
+    if parsed.thinking:
+        writer({"type": "thinking", "message": parsed.thinking})
+    if parsed.text:
+        writer({"type": "token", "message": parsed.text})
 
-    return text_content
+    return parsed.text
 
 
 def create_synthesizer_node(llm: BaseChatModel, ticker: str):
@@ -345,10 +309,10 @@ def create_synthesizer_node(llm: BaseChatModel, ticker: str):
             state["final_response"] = full_response
         else:
             # Non-streaming fallback: invoke and return complete response.
-            # _extract_text_content handles the case where include_thoughts=True
+            # extract_text handles the case where include_thoughts=True
             # causes response.content to be a list of blocks instead of a string.
             response = llm.invoke(prompt)
-            state["final_response"] = _extract_text_content(response.content)
+            state["final_response"] = extract_text(response.content)
 
         return state
 
@@ -571,7 +535,7 @@ class PlanningAgent:
                     # Emit final response (from react_agent or synthesizer)
                     final = state_update.get("final_response")
                     if final:
-                        yield {"type": "response", "message": _extract_text_content(final)}
+                        yield {"type": "response", "message": extract_text(final)}
 
     async def stream(self, inputs: Dict[str, Any]):
         """
@@ -617,7 +581,7 @@ class PlanningAgent:
                 final = state_update.get("final_response")
                 if final:
                     # Safety net: ensure response is always a string
-                    yield {"type": "response", "message": _extract_text_content(final)}
+                    yield {"type": "response", "message": extract_text(final)}
 
 
 def create_planning_agent(

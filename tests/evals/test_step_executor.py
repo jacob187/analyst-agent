@@ -14,7 +14,7 @@ bypassing the LangGraph runtime entirely. This isolates the executor logic.
 
 import pytest
 
-from agents.graph.sec_graph import create_step_executor_node
+from agents.graph.analyst_graph import create_step_executor_node
 from agents.planner import QueryPlan, AnalysisStep
 
 

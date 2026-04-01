@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from langchain_core.messages import HumanMessage, AIMessage
 
-from agents.graph.sec_graph import (
+from agents.graph.analyst_graph import (
     _process_streaming_chunk,
     _extract_text_content,
     PlanningAgent,

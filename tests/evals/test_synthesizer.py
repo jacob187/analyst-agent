@@ -12,7 +12,7 @@ import pytest
 
 from langchain_core.messages import HumanMessage
 
-from agents.graph.sec_graph import create_synthesizer_node
+from agents.graph.analyst_graph import create_synthesizer_node
 from agents.planner import QueryPlan, AnalysisStep
 
 

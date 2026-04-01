@@ -18,7 +18,7 @@ import time
 
 import pytest
 
-from agents.graph.sec_graph import (
+from agents.graph.analyst_graph import (
     create_step_executor_node,
     _build_dependency_layers,
 )

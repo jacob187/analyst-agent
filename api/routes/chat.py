@@ -66,7 +66,7 @@ async def chat(websocket: WebSocket, ticker: str):
         # Initialise agent
         try:
             from langchain_google_genai import ChatGoogleGenerativeAI
-            from agents.graph.sec_graph import create_sec_qa_agent
+            from agents.graph.analyst_graph import create_sec_qa_agent
 
             llm = ChatGoogleGenerativeAI(
                 model="gemini-3-flash-preview",
