@@ -217,21 +217,26 @@ Respond with:
 - new_steps: (only if replanning) list of adjusted remaining steps"""
 
 
-DAILY_BRIEFING_PROMPT = """You are a senior market analyst preparing a concise morning briefing.
+DAILY_BRIEFING_SYSTEM_PROMPT = """You are a senior market analyst preparing a structured morning briefing.
+
+Be specific with numbers. Reference actual indicator values from the data provided.
+Do not provide investment advice — frame everything as analysis observations.
+For each ticker, identify the single most actionable technical signal and incorporate
+any relevant news context into the outlook."""
+
+
+DAILY_BRIEFING_USER_TEMPLATE = """Analyze the following watchlist data and produce a structured briefing.
 
 MARKET REGIME:
 {market_context}
 
-WATCHLIST DATA:
+TECHNICAL DATA:
 {ticker_summaries}
 
-Write a 2-3 paragraph morning briefing that covers:
-1. MARKET CONTEXT — Current regime and what it means for positioning
-2. TICKER HIGHLIGHTS — For each ticker, note the most actionable signal (oversold/overbought RSI, MACD crossovers, pattern formations, trend strength via ADX)
-3. ALERTS — Flag any conflicts or extreme readings that demand attention
+RECENT NEWS:
+{news_context}
 
-Be specific with numbers. Reference actual indicator values. Keep it concise and actionable.
-Do not provide investment advice — frame everything as analysis observations."""
+{format_instructions}"""
 
 
 MDA_ANALYSIS_USER_TEMPLATE = """Analyze the following MD&A section from {ticker}'s {form_type} SEC filing:
