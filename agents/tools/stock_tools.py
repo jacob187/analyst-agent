@@ -66,6 +66,10 @@ def _tool_technical_analysis(ticker: str) -> str:
         tech = TechnicalIndicators(ticker)
         indicators = tech.calculate_all_indicators(hist)
 
+        # Fetch a fresh live price (separate from the cached Ticker instance)
+        live = retriever.get_live_price()
+        current_price = live.get("price")
+
         lines = [f"Technical Analysis for {ticker}:"]
         lines.append("=" * 50)
 
@@ -73,7 +77,9 @@ def _tool_technical_analysis(ticker: str) -> str:
         if "moving_averages" in indicators:
             ma = indicators["moving_averages"]
             lines.append("\n📈 PRICE & MOVING AVERAGES:")
-            lines.append(f"  Current Price: ${ma.get('latest_close', 0):.2f}")
+            # Use live quote; fall back to last historical close only if unavailable
+            display_price = current_price or ma.get('latest_close', 0)
+            lines.append(f"  Current Price: ${display_price:.2f}")
             lines.append(f"  5-day MA: ${ma.get('MA_5', 0):.2f}")
             lines.append(f"  10-day MA: ${ma.get('MA_10', 0):.2f}")
             lines.append(f"  20-day MA: ${ma.get('MA_20', 0):.2f}")
@@ -130,6 +136,14 @@ def _tool_stock_info(ticker: str) -> str:
         info = retriever.get_info()
         if not info:
             return f"No stock info available for {ticker}"
+
+        # Override currentPrice with a fresh live quote to avoid stale data
+        # from the cached Ticker instance
+        live = retriever.get_live_price()
+        if live.get("price") is not None:
+            info["currentPrice"] = live["price"]
+        if live.get("previousClose") is not None:
+            info["previousClose"] = live["previousClose"]
 
         lines = [f"Stock Info for {ticker}:"]
         lines.append("-" * 50)

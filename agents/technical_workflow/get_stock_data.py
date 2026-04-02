@@ -83,6 +83,46 @@ class YahooFinanceDataRetrieval:
             print(f"Error retrieving historical prices for {self.ticker}: {e}")
             return None
 
+    def get_live_price(self) -> Dict[str, Any]:
+        """Get a fresh live quote by creating a new Ticker instance.
+
+        The main self.yf_ticker caches data internally after first access,
+        so reusing it for live price in a long-lived process returns stale
+        values. This method creates a throwaway Ticker to guarantee a fresh
+        network fetch from Yahoo Finance's quote endpoint.
+
+        Returns:
+            Dict with 'price', 'previousClose', 'change', 'changePercent',
+            or empty dict on failure.
+        """
+        try:
+            fresh_ticker = yf.Ticker(self.ticker)
+            info = fresh_ticker.info
+            price = info.get("regularMarketPrice") or info.get("currentPrice")
+            prev_close = info.get("regularMarketPreviousClose") or info.get("previousClose")
+
+            if price is None:
+                # Last-resort fallback: fresh fast_info
+                fi = fresh_ticker.fast_info
+                price = float(fi["last_price"])
+                prev_close = prev_close or float(fi["previous_close"])
+
+            if price is None:
+                return {}
+
+            result: Dict[str, Any] = {"price": round(float(price), 2)}
+            if prev_close is not None:
+                prev_close = float(prev_close)
+                result["previousClose"] = round(prev_close, 2)
+                result["change"] = round(float(price) - prev_close, 2)
+                result["changePercent"] = round(
+                    (float(price) - prev_close) / prev_close * 100, 2
+                )
+            return result
+        except Exception as e:
+            print(f"Error fetching live price for {self.ticker}: {e}")
+            return {}
+
     def get_info(self) -> Dict[str, Any]:
         """
         Get company information from Yahoo Finance.
