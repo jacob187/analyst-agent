@@ -1,9 +1,11 @@
 import aiosqlite
+import os
 import uuid
 from pathlib import Path
 
-# Store db in project root/data directory
-DB_PATH = Path(__file__).parent.parent / "data" / "chats.db"
+# Configurable via env var for deployment (e.g., DB_PATH=/data/analyst.db on Fly/Koyeb).
+# Defaults to project root/data/chats.db for local development.
+DB_PATH = Path(os.getenv("DB_PATH", Path(__file__).parent.parent / "data" / "chats.db"))
 
 # Persistent connection
 _db: aiosqlite.Connection | None = None
@@ -48,15 +50,8 @@ async def init_db():
         CREATE INDEX IF NOT EXISTS idx_messages_session
         ON messages(session_id)
     """)
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            google_api_key TEXT,
-            sec_header TEXT,
-            tavily_api_key TEXT,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+    # NOTE: settings table removed — API keys now live in browser localStorage
+    # and are sent per-request (WebSocket auth message or request headers).
     await db.execute("""
         CREATE TABLE IF NOT EXISTS watchlist (
             ticker TEXT PRIMARY KEY,
@@ -262,35 +257,6 @@ async def get_session(session_id: str) -> dict | None:
             }
         return None
 
-async def get_settings() -> dict | None:
-    """Get global API settings."""
-    db = await get_db()
-    async with db.execute(
-        "SELECT google_api_key, sec_header, tavily_api_key, updated_at FROM settings WHERE id = 1"
-    ) as cursor:
-        row = await cursor.fetchone()
-        if row:
-            return {
-                "google_api_key": row["google_api_key"],
-                "sec_header": row["sec_header"],
-                "tavily_api_key": row["tavily_api_key"],
-                "updated_at": row["updated_at"]
-            }
-        return None
-
-async def save_settings(google_api_key: str, sec_header: str, tavily_api_key: str | None = None) -> None:
-    """Save or update global API settings."""
-    db = await get_db()
-    await db.execute("""
-        INSERT INTO settings (id, google_api_key, sec_header, tavily_api_key, updated_at)
-        VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(id) DO UPDATE SET
-            google_api_key = excluded.google_api_key,
-            sec_header = excluded.sec_header,
-            tavily_api_key = excluded.tavily_api_key,
-            updated_at = CURRENT_TIMESTAMP
-    """, (google_api_key, sec_header, tavily_api_key))
-    await db.commit()
 
 async def get_watchlist() -> list[dict]:
     """Return all watchlist tickers ordered by added_at."""

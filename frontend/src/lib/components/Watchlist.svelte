@@ -107,7 +107,13 @@
     error = '';
 
     try {
-      const res = await fetch(`${apiBase}/watchlist/briefing`);
+      const headers: Record<string, string> = {};
+      const gKey = localStorage.getItem('google_api_key');
+      const tKey = localStorage.getItem('tavily_api_key');
+      if (gKey) headers['X-Google-Api-Key'] = gKey;
+      if (tKey) headers['X-Tavily-Api-Key'] = tKey;
+
+      const res = await fetch(`${apiBase}/watchlist/briefing`, { headers });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         error = data.detail || 'Failed to generate briefing';

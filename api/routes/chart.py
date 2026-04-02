@@ -139,20 +139,8 @@ async def get_chart_data(
         except Exception:
             pass  # Patterns are supplementary
 
-        # Live quote from yfinance fast_info (lightweight, ~50ms)
-        quote = {}
-        try:
-            fi = retriever.yf_ticker.fast_info
-            prev_close = float(fi["previous_close"])
-            last_price = float(fi["last_price"])
-            quote = {
-                "price": round(last_price, 2),
-                "previousClose": round(prev_close, 2),
-                "change": round(last_price - prev_close, 2),
-                "changePercent": round((last_price - prev_close) / prev_close * 100, 2),
-            }
-        except Exception:
-            pass  # Fall back to candle data on frontend
+        # Live quote — uses a fresh Ticker instance for reliable pricing
+        quote = retriever.get_live_price()
 
         full_data = {
             "candles": candles,

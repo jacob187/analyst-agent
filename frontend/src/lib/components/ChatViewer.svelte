@@ -23,8 +23,8 @@
     loading = true;
     error = '';
     try {
-      const apiHost = import.meta.env.VITE_API_URL || 'localhost:8000';
-      const response = await fetch(`http://${apiHost}/sessions/${sessionId}/messages`);
+      const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      const response = await fetch(`${apiBase}/sessions/${sessionId}/messages`);
       if (!response.ok) throw new Error('Failed to load messages');
       const data = await response.json();
       messages = data.messages;

@@ -61,18 +61,16 @@ class TestRemoveTicker:
 
 
 class TestBriefingEndpoint:
-    @patch("api.routes.watchlist.get_settings", new_callable=AsyncMock)
     @patch("api.routes.watchlist.get_watchlist", new_callable=AsyncMock)
-    def test_empty_watchlist(self, mock_wl, mock_settings):
+    def test_empty_watchlist(self, mock_wl):
         mock_wl.return_value = []
-        resp = client.get("/watchlist/briefing")
+        resp = client.get("/watchlist/briefing", headers={"X-Google-Api-Key": "test"})
         assert resp.status_code == 400
 
-    @patch("api.routes.watchlist.get_settings", new_callable=AsyncMock)
+    @patch.dict("os.environ", {}, clear=True)
     @patch("api.routes.watchlist.get_watchlist", new_callable=AsyncMock)
-    def test_no_api_key(self, mock_wl, mock_settings):
+    def test_no_api_key(self, mock_wl):
         mock_wl.return_value = [{"ticker": "AAPL", "added_at": "2026-01-01"}]
-        mock_settings.return_value = None
         resp = client.get("/watchlist/briefing")
         assert resp.status_code == 400
 

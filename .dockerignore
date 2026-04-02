@@ -1,0 +1,11 @@
+frontend/
+data/
+docs/
+tests/
+.git/
+.github/
+.venv/
+__pycache__/
+*.pyc
+*.md
+.env

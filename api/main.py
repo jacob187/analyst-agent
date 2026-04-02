@@ -2,7 +2,7 @@
 
 Business logic lives in:
 - api/routes/health.py    — health check
-- api/routes/sessions.py  — session + settings CRUD
+- api/routes/sessions.py  — session CRUD
 - api/routes/chart.py     — stock chart data (OHLCV + indicators)
 - api/routes/chat.py      — WebSocket chat with LLM agent
 - api/memory.py           — conversation compression + context reconstruction
@@ -37,7 +37,7 @@ app = FastAPI(title="Analyst Agent API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[os.getenv("FRONTEND_URL", "http://localhost:5173")],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

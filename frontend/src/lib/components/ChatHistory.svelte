@@ -25,8 +25,8 @@
     loading = true;
     error = '';
     try {
-      const apiHost = import.meta.env.VITE_API_URL || 'localhost:8000';
-      const response = await fetch(`http://${apiHost}/sessions`);
+      const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      const response = await fetch(`${apiBase}/sessions`);
       if (!response.ok) throw new Error('Failed to load sessions');
       const data = await response.json();
       sessions = data.sessions;
@@ -66,8 +66,8 @@
     if (!confirm(`Delete chat with ${session.ticker}?`)) return;
 
     try {
-      const apiHost = import.meta.env.VITE_API_URL || 'localhost:8000';
-      const response = await fetch(`http://${apiHost}/sessions/${session.id}`, {
+      const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      const response = await fetch(`${apiBase}/sessions/${session.id}`, {
         method: 'DELETE'
       });
       if (!response.ok) throw new Error('Failed to delete session');

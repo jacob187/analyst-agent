@@ -1,8 +1,11 @@
 """WebSocket chat endpoint — real-time agent interaction."""
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+logger = logging.getLogger(__name__)
 from langchain_core.messages import HumanMessage, AIMessage
 
 from api.db import (
@@ -13,6 +16,7 @@ from api.memory import (
     estimate_tokens, compress_history, build_context_from_session,
     TOKEN_THRESHOLD,
 )
+from api.rate_limit import check_rate_limit
 
 router = APIRouter()
 
@@ -96,19 +100,28 @@ async def chat(websocket: WebSocket, ticker: str):
             })
 
         except Exception as e:
+            logger.error("Failed to initialize agent for %s: %s", ticker, e, exc_info=True)
             await websocket.send_json({
                 "type": "error",
-                "message": f"Failed to initialize agent: {str(e)}"
+                "message": "Failed to initialize agent. Check your API keys and try again."
             })
             await websocket.close()
             return
 
         # Chat loop
+        client_ip = websocket.client.host if websocket.client else "unknown"
         while True:
             try:
                 message = await websocket.receive_json()
 
                 if message.get("type") == "query":
+                    if not check_rate_limit(client_ip):
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "Rate limited — please wait before sending more messages"
+                        })
+                        continue
+
                     user_query = message.get("message", "")
 
                     asyncio.create_task(save_message(session_id, "user", user_query))
@@ -123,9 +136,10 @@ async def chat(websocket: WebSocket, ticker: str):
                             if event["type"] == "response":
                                 full_response = event["message"]
                     except Exception as e:
+                        logger.error("Error processing query for %s: %s", ticker, e, exc_info=True)
                         await websocket.send_json({
                             "type": "error",
-                            "message": f"Error processing query: {str(e)}"
+                            "message": "Error processing your query. Please try again."
                         })
 
                     if full_response:
@@ -142,19 +156,21 @@ async def chat(websocket: WebSocket, ticker: str):
             except WebSocketDisconnect:
                 break
             except Exception as e:
+                logger.error("Unexpected error in chat loop for %s: %s", ticker, e, exc_info=True)
                 await websocket.send_json({
                     "type": "error",
-                    "message": f"Error: {str(e)}"
+                    "message": "An unexpected error occurred."
                 })
                 break
 
     except WebSocketDisconnect:
         pass
     except Exception as e:
+        logger.error("Connection error for %s: %s", ticker, e, exc_info=True)
         try:
             await websocket.send_json({
                 "type": "error",
-                "message": f"Connection error: {str(e)}"
+                "message": "Connection error."
             })
-        except:
+        except Exception:
             pass

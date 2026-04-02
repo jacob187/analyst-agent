@@ -56,8 +56,8 @@
 
   async function loadExistingMessages() {
     try {
-      const apiHost = import.meta.env.VITE_API_URL || 'localhost:8000';
-      const response = await fetch(`http://${apiHost}/sessions/${sessionId}/messages`);
+      const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      const response = await fetch(`${apiBase}/sessions/${sessionId}/messages`);
       if (response.ok) {
         const data = await response.json();
         messages = data.messages.map((m: { role: string; content: string }) => ({
@@ -85,9 +85,8 @@
   }
 
   function connectWebSocket(isReconnect = false) {
-    const apiHost = import.meta.env.VITE_API_URL || 'localhost:8000';
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${apiHost}/ws/chat/${ticker}`;
+    const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+    const wsUrl = apiBase.replace(/^http/, 'ws') + `/ws/chat/${ticker}`;
     socket = new WebSocket(wsUrl);
 
     if (isReconnect) {

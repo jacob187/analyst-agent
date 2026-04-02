@@ -25,18 +25,10 @@
   let viewingSessionTicker: string | null = null;
   let continuingSessionId: string | null = null;
 
-  onMount(async () => {
-    try {
-      const res = await fetch(`${API_BASE}/settings`);
-      const data = await res.json();
-      if (data.settings) {
-        googleApiKey = data.settings.google_api_key;
-        secHeader = data.settings.sec_header;
-        tavilyApiKey = data.settings.tavily_api_key || '';
-      }
-    } catch (e) {
-      console.error('Failed to load settings:', e);
-    }
+  onMount(() => {
+    googleApiKey = localStorage.getItem('google_api_key');
+    secHeader = localStorage.getItem('sec_header');
+    tavilyApiKey = localStorage.getItem('tavily_api_key') || '';
     settingsLoaded = true;
   });
 
@@ -85,27 +77,19 @@
     }
   }
 
-  async function handleApiKeySubmit(event: CustomEvent<{ googleApiKey: string; secHeader: string; tavilyApiKey: string }>) {
+  function handleApiKeySubmit(event: CustomEvent<{ googleApiKey: string; secHeader: string; tavilyApiKey: string }>) {
     googleApiKey = event.detail.googleApiKey;
     secHeader = event.detail.secHeader;
     tavilyApiKey = event.detail.tavilyApiKey || '';
 
-    // Save to database
-    try {
-      await fetch(`${API_BASE}/settings`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          google_api_key: googleApiKey,
-          sec_header: secHeader,
-          tavily_api_key: tavilyApiKey || null
-        })
-      });
-    } catch (e) {
-      console.error('Failed to save settings:', e);
+    localStorage.setItem('google_api_key', googleApiKey);
+    localStorage.setItem('sec_header', secHeader);
+    if (tavilyApiKey) {
+      localStorage.setItem('tavily_api_key', tavilyApiKey);
+    } else {
+      localStorage.removeItem('tavily_api_key');
     }
 
-    // If we were on settings page, go back to main
     if (currentPage === 'settings') {
       currentPage = 'main';
     }
