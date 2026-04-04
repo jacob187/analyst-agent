@@ -25,7 +25,6 @@
 <div class="api-key-input">
   <div class="header">
     <h2>Configure API Access</h2>
-    <p>Keys are stored in your browser only. They never leave your device.</p>
   </div>
 
   <div class="input-group">
