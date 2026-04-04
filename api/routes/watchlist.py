@@ -1,15 +1,15 @@
 """Watchlist endpoints — manage tracked tickers and generate daily briefings."""
 
 import json
-import os
 import re
 
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException
 
 from api.db import (
     get_watchlist, add_to_watchlist, remove_from_watchlist,
     save_briefing, get_recent_briefings, get_briefing_history,
 )
+from api.dependencies import ApiKeys, get_api_keys
 
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
 
@@ -70,36 +70,27 @@ async def remove_ticker(ticker: str):
 
 
 @router.get("/briefing")
-async def get_briefing(
-    x_google_api_key: str | None = Header(None),
-    x_tavily_api_key: str | None = Header(None),
-):
-    """Generate AI briefing for all watchlist tickers.
-
-    API keys are passed via headers (from browser localStorage) with env var
-    fallback for local development.
-    """
+async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
+    """Generate AI briefing for all watchlist tickers."""
     tickers_list = await get_watchlist()
     if not tickers_list:
         raise HTTPException(status_code=400, detail="Watchlist is empty")
 
-    google_api_key = x_google_api_key or os.getenv("GOOGLE_API_KEY")
-    if not google_api_key:
-        raise HTTPException(status_code=400, detail="Google API key required (X-Google-Api-Key header)")
+    if not keys.google_api_key:
+        raise HTTPException(status_code=400, detail="Google API key required")
 
     from langchain_google_genai import ChatGoogleGenerativeAI
     from agents.briefing.briefing_service import BriefingService
 
     llm = ChatGoogleGenerativeAI(
         model="gemini-3-flash-preview",
-        google_api_key=google_api_key,
+        google_api_key=keys.google_api_key,
         temperature=0,
         thinking_level="medium",
         include_thoughts=True,
     )
 
-    tavily_key = x_tavily_api_key or os.getenv("TAVILY_API_KEY")
-    service = BriefingService(llm, tavily_api_key=tavily_key)
+    service = BriefingService(llm, tavily_api_key=keys.tavily_api_key)
     tickers = [t["ticker"] for t in tickers_list]
 
     try:
