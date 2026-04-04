@@ -4,8 +4,6 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-
-logger = logging.getLogger(__name__)
 from langchain_core.messages import HumanMessage, AIMessage
 
 from api.db import (
@@ -16,7 +14,10 @@ from api.memory import (
     estimate_tokens, compress_history, build_context_from_session,
     TOKEN_THRESHOLD,
 )
+from api.dependencies import resolve_ws_keys
 from api.rate_limit import check_rate_limit
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -36,11 +37,9 @@ async def chat(websocket: WebSocket, ticker: str):
             await websocket.close()
             return
 
-        google_api_key = auth_message.get("google_api_key")
-        sec_header = auth_message.get("sec_header")
-        tavily_api_key = auth_message.get("tavily_api_key")
+        keys = resolve_ws_keys(auth_message)
 
-        if not google_api_key or not sec_header:
+        if not keys.google_api_key or not keys.sec_header:
             await websocket.send_json({
                 "type": "error",
                 "message": "Both google_api_key and sec_header are required"
@@ -59,7 +58,7 @@ async def chat(websocket: WebSocket, ticker: str):
         all_messages = await get_session_messages(session_id)
         conversation_history = build_context_from_session(session, all_messages)
 
-        research_status = "Web research enabled" if tavily_api_key else "Web research disabled (no Tavily API key)"
+        research_status = "Web research enabled" if keys.tavily_api_key else "Web research disabled (no Tavily API key)"
         await websocket.send_json({
             "type": "auth_success",
             "message": f"Connected to {ticker}. {research_status}. Ready to analyze.",
@@ -74,13 +73,13 @@ async def chat(websocket: WebSocket, ticker: str):
 
             llm = ChatGoogleGenerativeAI(
                 model="gemini-3-flash-preview",
-                google_api_key=google_api_key,
+                google_api_key=keys.google_api_key,
                 temperature=0,
                 thinking_level="low",
             )
             synthesizer_llm = ChatGoogleGenerativeAI(
                 model="gemini-3-flash-preview",
-                google_api_key=google_api_key,
+                google_api_key=keys.google_api_key,
                 temperature=0,
                 thinking_level="medium",
                 include_thoughts=True,
@@ -88,12 +87,12 @@ async def chat(websocket: WebSocket, ticker: str):
 
             agent = create_sec_qa_agent(
                 ticker, llm,
-                tavily_api_key=tavily_api_key,
+                tavily_api_key=keys.tavily_api_key,
                 synthesizer_llm=synthesizer_llm,
-                sec_header=sec_header,
+                sec_header=keys.sec_header,
             )
 
-            tools_count = "16 tools" if tavily_api_key else "11 tools"
+            tools_count = "16 tools" if keys.tavily_api_key else "11 tools"
             await websocket.send_json({
                 "type": "system",
                 "message": f"Planning agent initialized for {ticker} with {tools_count}. Complex queries will be auto-decomposed."

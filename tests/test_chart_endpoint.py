@@ -46,6 +46,12 @@ def mock_retriever(mock_yfinance_data):
     ) as MockClass:
         instance = MagicMock()
         instance.get_historical_prices.return_value = mock_yfinance_data
+        instance.get_live_price.return_value = {
+            "price": 150.00,
+            "previousClose": 149.50,
+            "change": 0.50,
+            "changePercent": 0.33,
+        }
         MockClass.return_value = instance
         yield instance
 
