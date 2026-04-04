@@ -12,9 +12,15 @@ Business logic lives in:
 import sys
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# Load .env from project root so GOOGLE_API_KEY, TAVILY_API_KEY, etc.
+# are available via os.getenv() as fallbacks for local development.
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
