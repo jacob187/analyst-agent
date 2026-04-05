@@ -23,15 +23,18 @@ A full-stack AI-powered financial analysis application that combines SEC filings
 ## Features
 
 - **Interactive Chat Interface**: Real-time WebSocket communication with AI agent
+- **Stock Charts**: Candlestick charts with technical indicators (RSI, MACD, Bollinger Bands, moving averages) via TradingView Lightweight Charts
+- **Watchlist & Briefings**: Track tickers and generate AI-powered morning briefings with market regime analysis
 - **Intelligent Query Routing**: Automatically classifies queries and routes to optimal execution path
 - **Multi-Step Planning**: Complex queries are decomposed into structured execution plans
 - **SEC Filings Analysis**: Extracts and analyzes MD&A, Risk Factors, and Balance Sheets
-- **Technical Analysis**: RSI, MACD, Bollinger Bands, moving averages, and more
+- **Technical Analysis**: RSI, MACD, Bollinger Bands, moving averages, pattern detection, and more
 - **Web Research**: Company news, competitor analysis, and industry trends (with Tavily)
 - **Hybrid Agent Architecture**:
   - Simple queries → ReAct agent (dynamic tool selection)
   - Complex queries → Planner → Step-by-step execution → Synthesis
-- **Smart Caching**: Minimizes redundant API calls for efficient data retrieval
+- **Smart Caching**: 3-tier caching system minimizes redundant API calls
+- **Privacy-First**: API keys stay in your browser — the server never stores credentials
 
 ## Quick Start
 
@@ -50,10 +53,28 @@ This installs dependencies (if needed) and starts both the backend (port 8000) a
 
 ### Configure API Keys
 
-Open http://localhost:5173 and enter your API keys in Settings:
-- **Google API Key** - For Gemini LLM
-- **SEC Header** - Your email (SEC requires identification)
-- **Tavily API Key** - Optional, for web research
+**Option 1: Settings UI (recommended for hosted demo)**
+
+Open http://localhost:5173 and enter your API keys in **Settings**:
+- **Google API Key** - Get one free at [Google AI Studio](https://aistudio.google.com/app/apikey)
+- **SEC Header** - Your name and email (SEC requires identification per their [fair access policy](https://www.sec.gov/os/webmaster-faq#code-support))
+- **Tavily API Key** - Optional, enables web research ([sign up](https://app.tavily.com/sign-in))
+
+Keys are stored in your browser's `localStorage` only — they are never saved on the server.
+
+**Option 2: `.env` file (recommended for local development)**
+
+Create a `.env` file in the project root:
+
+```bash
+GOOGLE_API_KEY=AIza...
+SEC_HEADER=Your Name your.email@example.com
+TAVILY_API_KEY=tvly-...  # optional
+```
+
+The backend loads `.env` at startup and uses these as fallbacks when no key is provided via the frontend. Chat, briefings, and all endpoints will use the `.env` values automatically — no need to enter keys in the Settings UI.
+
+> **Note:** `.env` is gitignored — your keys will never be committed.
 
 ## API Documentation
 
