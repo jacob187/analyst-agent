@@ -76,19 +76,20 @@ async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
     if not tickers_list:
         raise HTTPException(status_code=400, detail="Watchlist is empty")
 
-    if not keys.google_api_key:
-        raise HTTPException(status_code=400, detail="Google API key required")
-
-    from langchain_google_genai import ChatGoogleGenerativeAI
     from agents.briefing.briefing_service import BriefingService
+    from agents.llm_factory import ThinkingConfig, create_llm
+    from agents.model_registry import get_default_model, get_model
 
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-3-flash-preview",
-        google_api_key=keys.google_api_key,
-        temperature=0,
-        thinking_level="medium",
-        include_thoughts=True,
-    )
+    model_id = keys.model_id or get_default_model().id
+    model = get_model(model_id) or get_default_model()
+
+    api_key = keys.get_provider_key(model.provider)
+    if not api_key:
+        provider_display = model.provider.replace("_", " ").title()
+        raise HTTPException(status_code=400, detail=f"{provider_display} API key required for {model.display_name}")
+
+    thinking = ThinkingConfig(enabled=True, level="medium") if model.thinking_capable else None
+    llm = create_llm(model.id, api_key, thinking=thinking)
 
     service = BriefingService(llm, tavily_api_key=keys.tavily_api_key)
     tickers = [t["ticker"] for t in tickers_list]
