@@ -187,22 +187,7 @@ class BriefingService:
 
                 ti = TechnicalIndicators(ticker)
                 indicators = ti.calculate_all_indicators(hist)
-
-                if "rsi" in indicators:
-                    entry["rsi"] = round(indicators["rsi"].get("current", 0), 1)
-                    entry["rsi_signal"] = indicators["rsi"].get("signal", "neutral")
-
-                if "macd" in indicators:
-                    entry["macd_signal"] = indicators["macd"].get("signal", "neutral")
-                    entry["macd_histogram"] = round(
-                        indicators["macd"].get("histogram", 0), 4
-                    )
-
-                if "adx" in indicators:
-                    entry["adx"] = indicators["adx"].get("adx", 0)
-                    entry["trend_strength"] = indicators["adx"].get(
-                        "trend_strength", "unknown"
-                    )
+                self._merge_indicators(entry, indicators)
 
                 engine = PatternRecognitionEngine()
                 patterns = engine.detect_all_patterns(hist)
@@ -217,6 +202,20 @@ class BriefingService:
 
             results.append(entry)
         return results
+
+    def _merge_indicators(self, entry: dict[str, Any], indicators: dict[str, Any]) -> None:
+        """Copy RSI, MACD, and ADX values from indicators dict into the entry dict."""
+        if "rsi" in indicators:
+            entry["rsi"] = round(indicators["rsi"].get("current", 0), 1)
+            entry["rsi_signal"] = indicators["rsi"].get("signal", "neutral")
+
+        if "macd" in indicators:
+            entry["macd_signal"] = indicators["macd"].get("signal", "neutral")
+            entry["macd_histogram"] = round(indicators["macd"].get("histogram", 0), 4)
+
+        if "adx" in indicators:
+            entry["adx"] = indicators["adx"].get("adx", 0)
+            entry["trend_strength"] = indicators["adx"].get("trend_strength", "unknown")
 
     def _get_market_regime(self) -> dict[str, Any]:
         """Get current market regime from SPY/VIX."""
