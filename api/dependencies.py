@@ -12,7 +12,8 @@ Usage in a route:
 
     @router.get("/example")
     async def example(keys: ApiKeys = Depends(get_api_keys)):
-        llm = ChatGoogleGenerativeAI(google_api_key=keys.google_api_key, ...)
+        api_key = keys.require_provider_key(model.provider)
+        llm = create_llm(model_id, api_key)
 """
 
 import os
@@ -21,12 +22,23 @@ from dataclasses import dataclass
 from fastapi import Header
 
 
+# Maps provider name → ApiKeys field name for key lookup.
+_PROVIDER_KEY_FIELDS: dict[str, str] = {
+    "google_genai": "google_api_key",
+    "openai": "openai_api_key",
+    "anthropic": "anthropic_api_key",
+}
+
+
 @dataclass
 class ApiKeys:
     """Resolved API keys available for the current request."""
     google_api_key: str | None
+    openai_api_key: str | None
+    anthropic_api_key: str | None
     sec_header: str | None
     tavily_api_key: str | None
+    model_id: str | None
 
     def require_google(self) -> str:
         """Return google_api_key or raise ValueError if missing."""
@@ -40,17 +52,38 @@ class ApiKeys:
             raise ValueError("SEC header required")
         return self.sec_header
 
+    def get_provider_key(self, provider: str) -> str | None:
+        """Return the API key for a provider, or None if not set."""
+        field = _PROVIDER_KEY_FIELDS.get(provider)
+        if field is None:
+            return None
+        return getattr(self, field, None)
+
+    def require_provider_key(self, provider: str) -> str:
+        """Return the API key for a provider, or raise ValueError."""
+        key = self.get_provider_key(provider)
+        if not key:
+            provider_display = provider.replace("_", " ").title()
+            raise ValueError(f"{provider_display} API key required")
+        return key
+
 
 async def get_api_keys(
     x_google_api_key: str | None = Header(None),
+    x_openai_api_key: str | None = Header(None),
+    x_anthropic_api_key: str | None = Header(None),
     x_sec_header: str | None = Header(None),
     x_tavily_api_key: str | None = Header(None),
+    x_model_id: str | None = Header(None),
 ) -> ApiKeys:
     """FastAPI dependency that resolves API keys from headers → env vars."""
     return ApiKeys(
         google_api_key=x_google_api_key or os.getenv("GOOGLE_API_KEY"),
+        openai_api_key=x_openai_api_key or os.getenv("OPENAI_API_KEY"),
+        anthropic_api_key=x_anthropic_api_key or os.getenv("ANTHROPIC_API_KEY"),
         sec_header=x_sec_header or os.getenv("SEC_HEADER"),
         tavily_api_key=x_tavily_api_key or os.getenv("TAVILY_API_KEY"),
+        model_id=x_model_id,
     )
 
 
@@ -62,6 +95,9 @@ def resolve_ws_keys(auth_message: dict) -> ApiKeys:
     """
     return ApiKeys(
         google_api_key=auth_message.get("google_api_key") or os.getenv("GOOGLE_API_KEY"),
+        openai_api_key=auth_message.get("openai_api_key") or os.getenv("OPENAI_API_KEY"),
+        anthropic_api_key=auth_message.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY"),
         sec_header=auth_message.get("sec_header") or os.getenv("SEC_HEADER"),
         tavily_api_key=auth_message.get("tavily_api_key") or os.getenv("TAVILY_API_KEY"),
+        model_id=auth_message.get("model_id"),
     )

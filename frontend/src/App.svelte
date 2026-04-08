@@ -16,8 +16,12 @@
   let settingsLoaded = false;
 
   let googleApiKey: string | null = null;
+  let openaiApiKey: string | null = null;
+  let anthropicApiKey: string | null = null;
   let secHeader: string | null = null;
   let tavilyApiKey: string = '';
+  let selectedModelId: string = '';
+  let models: any[] = [];
   let currentTicker: string | null = null;
 
   // For viewing/continuing past sessions
@@ -25,11 +29,42 @@
   let viewingSessionTicker: string | null = null;
   let continuingSessionId: string | null = null;
 
-  onMount(() => {
+  // Which keys are available in the server's environment (.env / local dev)
+  let envKeys = { google: false, openai: false, anthropic: false, sec_header: false };
+
+  // True if any LLM key is set — either in localStorage or in server env vars
+  $: hasLlmKey = !!(googleApiKey || openaiApiKey || anthropicApiKey || envKeys.google || envKeys.openai || envKeys.anthropic);
+  $: hasSecHeader = !!(secHeader || envKeys.sec_header);
+
+  onMount(async () => {
     googleApiKey = localStorage.getItem('google_api_key');
+    openaiApiKey = localStorage.getItem('openai_api_key');
+    anthropicApiKey = localStorage.getItem('anthropic_api_key');
     secHeader = localStorage.getItem('sec_header');
     tavilyApiKey = localStorage.getItem('tavily_api_key') || '';
+    selectedModelId = localStorage.getItem('model_id') || '';
     settingsLoaded = true;
+
+    // Fetch available models and server-side env key availability in parallel
+    const [modelsRes, envKeysRes] = await Promise.allSettled([
+      fetch(`${API_BASE}/models`),
+      fetch(`${API_BASE}/env-keys`),
+    ]);
+
+    if (modelsRes.status === 'fulfilled' && modelsRes.value.ok) {
+      const data = await modelsRes.value.json();
+      models = data.models || [];
+      if (!selectedModelId && models.length > 0) {
+        const defaultModel = models.find((m: any) => m.default) || models[0];
+        selectedModelId = defaultModel.id;
+      }
+    } else {
+      console.error('Failed to fetch models');
+    }
+
+    if (envKeysRes.status === 'fulfilled' && envKeysRes.value.ok) {
+      envKeys = await envKeysRes.value.json();
+    }
   });
 
   function navigateToAbout() {
@@ -70,20 +105,39 @@
     continuingSessionId = event.detail.sessionId;
     currentTicker = event.detail.ticker;
     // If no API keys yet, go to config first
-    if (!googleApiKey || !secHeader) {
-      currentPage = 'continue-session';
-    } else {
-      currentPage = 'continue-session';
-    }
+    currentPage = 'continue-session';
   }
 
-  function handleApiKeySubmit(event: CustomEvent<{ googleApiKey: string; secHeader: string; tavilyApiKey: string }>) {
+  function handleApiKeySubmit(event: CustomEvent<{
+    googleApiKey: string;
+    openaiApiKey: string;
+    anthropicApiKey: string;
+    secHeader: string;
+    tavilyApiKey: string;
+    modelId: string;
+  }>) {
     googleApiKey = event.detail.googleApiKey;
+    openaiApiKey = event.detail.openaiApiKey;
+    anthropicApiKey = event.detail.anthropicApiKey;
     secHeader = event.detail.secHeader;
     tavilyApiKey = event.detail.tavilyApiKey || '';
+    selectedModelId = event.detail.modelId;
 
-    localStorage.setItem('google_api_key', googleApiKey);
-    localStorage.setItem('sec_header', secHeader);
+    // Persist all keys to localStorage
+    const keyMap: Record<string, string> = {
+      google_api_key: googleApiKey,
+      openai_api_key: openaiApiKey,
+      anthropic_api_key: anthropicApiKey,
+      sec_header: secHeader,
+      model_id: selectedModelId,
+    };
+    for (const [key, value] of Object.entries(keyMap)) {
+      if (value) {
+        localStorage.setItem(key, value);
+      } else {
+        localStorage.removeItem(key);
+      }
+    }
     if (tavilyApiKey) {
       localStorage.setItem('tavily_api_key', tavilyApiKey);
     } else {
@@ -182,8 +236,12 @@
         <h2 class="page-title">Settings</h2>
         <ApiKeyInput
           googleApiKey={googleApiKey || ''}
+          openaiApiKey={openaiApiKey || ''}
+          anthropicApiKey={anthropicApiKey || ''}
           secHeader={secHeader || ''}
           tavilyApiKey={tavilyApiKey}
+          selectedModelId={selectedModelId}
+          {models}
           on:submit={handleApiKeySubmit}
         />
         <button class="btn" style="margin-top: 1rem;" on:click={navigateToMain}>
@@ -209,7 +267,7 @@
         </button>
       </div>
     {:else if currentPage === 'continue-session' && continuingSessionId && currentTicker}
-      {#if !googleApiKey || !secHeader}
+      {#if !hasLlmKey || !hasSecHeader}
         <!-- Need API keys to continue - point to Settings -->
         <div class="setup-prompt">
           <div class="setup-icon">⚙️</div>
@@ -229,8 +287,11 @@
             <ChatWindow
               ticker={currentTicker}
               googleApiKey={googleApiKey}
+              openaiApiKey={openaiApiKey}
+              anthropicApiKey={anthropicApiKey}
               secHeader={secHeader}
               tavilyApiKey={tavilyApiKey}
+              modelId={selectedModelId}
               sessionId={continuingSessionId}
             />
           </div>
@@ -244,7 +305,7 @@
           </button>
         </div>
       {/if}
-    {:else if !googleApiKey || !secHeader}
+    {:else if !hasLlmKey || !hasSecHeader}
       <!-- No API keys configured - point to Settings -->
       <div class="setup-prompt">
         <div class="setup-icon">⚙️</div>
@@ -282,8 +343,11 @@
           <ChatWindow
             ticker={currentTicker}
             googleApiKey={googleApiKey}
+            openaiApiKey={openaiApiKey}
+            anthropicApiKey={anthropicApiKey}
             secHeader={secHeader}
             tavilyApiKey={tavilyApiKey}
+            modelId={selectedModelId}
           />
         </div>
       </div>

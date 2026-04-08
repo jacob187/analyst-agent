@@ -4,8 +4,11 @@
 
   export let ticker: string;
   export let googleApiKey: string;
+  export let openaiApiKey: string = '';
+  export let anthropicApiKey: string = '';
   export let secHeader: string;
   export let tavilyApiKey: string = '';
+  export let modelId: string = '';
   export let sessionId: string | null = null;  // For continuing existing sessions
 
   interface Message {
@@ -104,8 +107,17 @@
         google_api_key: googleApiKey,
         sec_header: secHeader
       };
+      if (openaiApiKey?.trim()) {
+        authPayload.openai_api_key = openaiApiKey;
+      }
+      if (anthropicApiKey?.trim()) {
+        authPayload.anthropic_api_key = anthropicApiKey;
+      }
       if (tavilyApiKey.trim()) {
         authPayload.tavily_api_key = tavilyApiKey;
+      }
+      if (modelId) {
+        authPayload.model_id = modelId;
       }
       if (sessionId) {
         authPayload.session_id = sessionId;

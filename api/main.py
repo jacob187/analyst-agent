@@ -5,6 +5,7 @@ Business logic lives in:
 - api/routes/sessions.py  — session CRUD
 - api/routes/chart.py     — stock chart data (OHLCV + indicators)
 - api/routes/chat.py      — WebSocket chat with LLM agent
+- api/routes/models.py    — available LLM models
 - api/memory.py           — conversation compression + context reconstruction
 - api/db.py               — SQLite database layer
 """
@@ -30,6 +31,7 @@ from api.routes.sessions import router as sessions_router
 from api.routes.chart import router as chart_router
 from api.routes.chat import router as chat_router
 from api.routes.watchlist import router as watchlist_router
+from api.routes.models import router as models_router
 
 
 @asynccontextmanager
@@ -54,3 +56,4 @@ app.include_router(sessions_router)
 app.include_router(chart_router)
 app.include_router(chat_router)
 app.include_router(watchlist_router)
+app.include_router(models_router)

@@ -36,6 +36,12 @@ async def init_db():
         await db.commit()
     except Exception:
         pass  # Column already exists
+    # Migration: add model column for multi-model support
+    try:
+        await db.execute("ALTER TABLE sessions ADD COLUMN model TEXT")
+        await db.commit()
+    except Exception:
+        pass  # Column already exists
     await db.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,
@@ -148,7 +154,7 @@ async def close_db():
         await _db.close()
         _db = None
 
-async def create_session(ticker: str) -> str:
+async def create_session(ticker: str, model: str | None = None) -> str:
     """Create a new chat session. Returns session ID.
 
     Also ensures a companies row exists for the ticker.
@@ -158,13 +164,13 @@ async def create_session(ticker: str) -> str:
     ticker = ticker.upper()
     await db.execute("INSERT OR IGNORE INTO companies (ticker) VALUES (?)", (ticker,))
     await db.execute(
-        "INSERT INTO sessions (id, ticker) VALUES (?, ?)",
-        (session_id, ticker)
+        "INSERT INTO sessions (id, ticker, model) VALUES (?, ?, ?)",
+        (session_id, ticker, model)
     )
     await db.commit()
     return session_id
 
-async def get_or_create_session(ticker: str) -> str:
+async def get_or_create_session(ticker: str, model: str | None = None) -> str:
     """
     Return the existing session ID for this ticker, or create one.
 
@@ -184,7 +190,8 @@ async def get_or_create_session(ticker: str) -> str:
     session_id = str(uuid.uuid4())
     await db.execute("INSERT OR IGNORE INTO companies (ticker) VALUES (?)", (ticker,))
     await db.execute(
-        "INSERT INTO sessions (id, ticker) VALUES (?, ?)", (session_id, ticker)
+        "INSERT INTO sessions (id, ticker, model) VALUES (?, ?, ?)",
+        (session_id, ticker, model),
     )
     await db.commit()
     return session_id
@@ -193,12 +200,12 @@ async def get_session_by_ticker(ticker: str) -> dict | None:
     """Return session metadata for a ticker, or None if no session exists."""
     db = await get_db()
     async with db.execute(
-        "SELECT id, ticker, created_at FROM sessions WHERE ticker = ?",
+        "SELECT id, ticker, model, created_at FROM sessions WHERE ticker = ?",
         (ticker.upper(),)
     ) as cursor:
         row = await cursor.fetchone()
         if row:
-            return {"id": row["id"], "ticker": row["ticker"], "created_at": row["created_at"]}
+            return {"id": row["id"], "ticker": row["ticker"], "model": row["model"], "created_at": row["created_at"]}
         return None
 
 async def update_session_summary(session_id: str, summary: str) -> None:
@@ -234,17 +241,17 @@ async def get_sessions(limit: int = 50) -> list[dict]:
     """Get recent sessions."""
     db = await get_db()
     async with db.execute(
-        "SELECT id, ticker, created_at FROM sessions ORDER BY created_at DESC LIMIT ?",
+        "SELECT id, ticker, model, created_at FROM sessions ORDER BY created_at DESC LIMIT ?",
         (limit,)
     ) as cursor:
         rows = await cursor.fetchall()
-        return [{"id": row["id"], "ticker": row["ticker"], "created_at": row["created_at"]} for row in rows]
+        return [{"id": row["id"], "ticker": row["ticker"], "model": row["model"], "created_at": row["created_at"]} for row in rows]
 
 async def get_session(session_id: str) -> dict | None:
-    """Get a specific session by ID, including any stored summary."""
+    """Get a specific session by ID, including any stored summary and model."""
     db = await get_db()
     async with db.execute(
-        "SELECT id, ticker, summary, created_at FROM sessions WHERE id = ?",
+        "SELECT id, ticker, summary, model, created_at FROM sessions WHERE id = ?",
         (session_id,)
     ) as cursor:
         row = await cursor.fetchone()
@@ -253,6 +260,7 @@ async def get_session(session_id: str) -> dict | None:
                 "id": row["id"],
                 "ticker": row["ticker"],
                 "summary": row["summary"],
+                "model": row["model"],
                 "created_at": row["created_at"],
             }
         return None

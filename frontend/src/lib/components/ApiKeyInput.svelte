@@ -1,16 +1,92 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
 
-  const dispatch = createEventDispatcher<{ submit: { googleApiKey: string; secHeader: string; tavilyApiKey: string } }>();
+  interface ModelDef {
+    id: string;
+    provider: string;
+    display_name: string;
+    max_context: number;
+    thinking_capable: boolean;
+    default: boolean;
+  }
+
+  const dispatch = createEventDispatcher<{
+    submit: {
+      googleApiKey: string;
+      openaiApiKey: string;
+      anthropicApiKey: string;
+      secHeader: string;
+      tavilyApiKey: string;
+      modelId: string;
+    }
+  }>();
 
   export let googleApiKey = '';
+  export let openaiApiKey = '';
+  export let anthropicApiKey = '';
   export let secHeader = '';
   export let tavilyApiKey = '';
+  export let selectedModelId = '';
+  export let models: ModelDef[] = [];
+
   let showKeys = false;
 
+  // Derive unique providers from the models list
+  $: providers = [...new Set(models.map(m => m.provider))];
+
+  // Derive current provider from selected model
+  $: selectedModel = models.find(m => m.id === selectedModelId);
+  $: selectedProvider = selectedModel?.provider || 'google_genai';
+
+  // Filter models by current provider
+  $: providerModels = models.filter(m => m.provider === selectedProvider);
+
+  // Check if the required key for the current provider is filled
+  $: currentProviderKey = selectedProvider === 'google_genai' ? googleApiKey
+    : selectedProvider === 'openai' ? openaiApiKey
+    : selectedProvider === 'anthropic' ? anthropicApiKey
+    : '';
+
+  $: canSubmit = currentProviderKey.trim() && secHeader.trim();
+
+  const providerLabels: Record<string, string> = {
+    google_genai: 'Google Gemini',
+    openai: 'OpenAI',
+    anthropic: 'Anthropic',
+  };
+
+  const providerKeyLinks: Record<string, { label: string; url: string }> = {
+    google_genai: { label: 'Google AI Studio', url: 'https://aistudio.google.com/app/apikey' },
+    openai: { label: 'OpenAI Platform', url: 'https://platform.openai.com/api-keys' },
+    anthropic: { label: 'Anthropic Console', url: 'https://console.anthropic.com/settings/keys' },
+  };
+
+  const providerPlaceholders: Record<string, string> = {
+    google_genai: 'AIza...',
+    openai: 'sk-...',
+    anthropic: 'sk-ant-...',
+  };
+
+  function handleProviderChange(e: Event) {
+    const newProvider = (e.target as HTMLSelectElement).value;
+    // Select the first model for the new provider (or the default if available)
+    const providerDefault = models.find(m => m.provider === newProvider && m.default)
+      || models.find(m => m.provider === newProvider);
+    if (providerDefault) {
+      selectedModelId = providerDefault.id;
+    }
+  }
+
   function handleSubmit() {
-    if (googleApiKey.trim() && secHeader.trim()) {
-      dispatch('submit', { googleApiKey, secHeader, tavilyApiKey });
+    if (canSubmit) {
+      dispatch('submit', {
+        googleApiKey,
+        openaiApiKey,
+        anthropicApiKey,
+        secHeader,
+        tavilyApiKey,
+        modelId: selectedModelId,
+      });
     }
   }
 
@@ -27,20 +103,71 @@
     <h2>Configure API Access</h2>
   </div>
 
+  {#if models.length > 0}
+    <div class="model-selection">
+      <div class="input-group">
+        <label for="provider-select">
+          <span class="label-text">LLM Provider</span>
+        </label>
+        <select id="provider-select" value={selectedProvider} on:change={handleProviderChange}>
+          {#each providers as provider}
+            <option value={provider}>{providerLabels[provider] || provider}</option>
+          {/each}
+        </select>
+      </div>
+
+      <div class="input-group">
+        <label for="model-select">
+          <span class="label-text">Model</span>
+        </label>
+        <select id="model-select" bind:value={selectedModelId}>
+          {#each providerModels as model}
+            <option value={model.id}>{model.display_name}</option>
+          {/each}
+        </select>
+      </div>
+    </div>
+  {/if}
+
   <div class="input-group">
-    <label for="google-api-key">
-      <span class="label-text">Google API Key</span>
-      <span class="label-hint">From Google AI Studio</span>
+    <label for="provider-api-key">
+      <span class="label-text">{providerLabels[selectedProvider] || selectedProvider} API Key</span>
+      <span class="label-hint">
+        From
+        <a href={providerKeyLinks[selectedProvider]?.url || '#'} target="_blank" rel="noopener">
+          {providerKeyLinks[selectedProvider]?.label || selectedProvider}
+        </a>
+      </span>
     </label>
     <div class="input-wrapper">
-      <input
-        id="google-api-key"
-        type={showKeys ? 'text' : 'password'}
-        bind:value={googleApiKey}
-        on:keydown={handleKeydown}
-        placeholder="AIza..."
-        autocomplete="off"
-      />
+      {#if selectedProvider === 'google_genai'}
+        <input
+          id="provider-api-key"
+          type={showKeys ? 'text' : 'password'}
+          bind:value={googleApiKey}
+          on:keydown={handleKeydown}
+          placeholder={providerPlaceholders[selectedProvider]}
+          autocomplete="off"
+        />
+      {:else if selectedProvider === 'openai'}
+        <input
+          id="provider-api-key"
+          type={showKeys ? 'text' : 'password'}
+          bind:value={openaiApiKey}
+          on:keydown={handleKeydown}
+          placeholder={providerPlaceholders[selectedProvider]}
+          autocomplete="off"
+        />
+      {:else if selectedProvider === 'anthropic'}
+        <input
+          id="provider-api-key"
+          type={showKeys ? 'text' : 'password'}
+          bind:value={anthropicApiKey}
+          on:keydown={handleKeydown}
+          placeholder={providerPlaceholders[selectedProvider]}
+          autocomplete="off"
+        />
+      {/if}
     </div>
   </div>
 
@@ -86,7 +213,7 @@
 
     <button
       on:click={handleSubmit}
-      disabled={!googleApiKey.trim() || !secHeader.trim()}
+      disabled={!canSubmit}
       class="submit-btn"
     >
       Continue →
@@ -94,12 +221,6 @@
   </div>
 
   <div class="help">
-    <div class="help-item">
-      <strong>Google API Key:</strong> Get one free at
-      <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">
-        Google AI Studio
-      </a>
-    </div>
     <div class="help-item">
       <strong>SEC requires</strong> a valid email in the User-Agent header per their
       <a href="https://www.sec.gov/os/webmaster-faq#code-support" target="_blank" rel="noopener">
@@ -138,6 +259,35 @@
   .header p {
     color: var(--text-dim);
     font-size: 0.85rem;
+  }
+
+  .model-selection {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .model-selection .input-group {
+    margin-bottom: 0;
+  }
+
+  select {
+    width: 100%;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.8rem;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: border-color 0.2s;
+  }
+
+  select:focus {
+    outline: none;
+    border-color: var(--accent);
   }
 
   .input-group {
@@ -282,6 +432,10 @@
 
   /* Tablet breakpoint */
   @media (max-width: 768px) {
+    .model-selection {
+      grid-template-columns: 1fr;
+    }
+
     .api-key-input {
       padding: 1.5rem;
       max-width: 100%;
