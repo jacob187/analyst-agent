@@ -89,6 +89,10 @@ class TestGetTokenThreshold:
         # 1_000_000 // 4 = 250_000
         assert get_token_threshold("gpt-4.1-mini") == 250_000
 
+    def test_o4_mini_threshold(self):
+        # 200_000 // 4 = 50_000
+        assert get_token_threshold("o4-mini") == 50_000
+
     def test_unknown_model_returns_fallback(self):
         assert get_token_threshold("nonexistent-model") == 30_000
 
