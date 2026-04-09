@@ -8,10 +8,11 @@
   import AboutPage from './lib/components/about/AboutPage.svelte';
   import StockChart from './lib/components/StockChart.svelte';
   import Watchlist from './lib/components/Watchlist.svelte';
+  import CompanyDashboard from './lib/components/CompanyDashboard.svelte';
 
   const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-  type Page = 'main' | 'about' | 'history' | 'view-session' | 'continue-session' | 'settings' | 'watchlist';
+  type Page = 'main' | 'about' | 'history' | 'view-session' | 'continue-session' | 'settings' | 'watchlist' | 'company-profile';
   let currentPage: Page = 'main';
   let settingsLoaded = false;
   let menuOpen = false;
@@ -83,8 +84,8 @@
   function navigateToWatchlist() { currentPage = 'watchlist'; closeMenu(); }
 
   function handleWatchlistSelect(event: CustomEvent<string>) {
-    currentTicker = event.detail;
-    handleTickerSubmit(new CustomEvent('submit', { detail: event.detail }));
+    currentTicker = event.detail.toUpperCase();
+    currentPage = 'company-profile';
   }
 
   function handleSessionSelect(event: CustomEvent<{ sessionId: string; ticker: string }>) {
@@ -179,7 +180,7 @@
   <div class="drawer-nav">
     <button
       class="drawer-link"
-      class:active={currentPage === 'main' || currentPage === 'continue-session'}
+      class:active={currentPage === 'main' || currentPage === 'continue-session' || currentPage === 'company-profile'}
       on:click={navigateToMain}
     >
       <span class="drawer-icon">⌨</span> Terminal
@@ -231,7 +232,7 @@
       <nav class="nav-links">
         <button
           class="nav-link"
-          class:active={currentPage === 'main' || currentPage === 'continue-session'}
+          class:active={currentPage === 'main' || currentPage === 'continue-session' || currentPage === 'company-profile'}
           on:click={navigateToMain}
         >
           Terminal
@@ -304,6 +305,19 @@
       </div>
     {:else if currentPage === 'watchlist'}
       <Watchlist apiBase={API_BASE} on:select={handleWatchlistSelect} />
+    {:else if currentPage === 'company-profile' && currentTicker}
+      <CompanyDashboard
+        ticker={currentTicker}
+        apiBase={API_BASE}
+        {googleApiKey}
+        {openaiApiKey}
+        {anthropicApiKey}
+        {secHeader}
+        {tavilyApiKey}
+        modelId={selectedModelId}
+        sessionId={continuingSessionId}
+        on:back={navigateToWatchlist}
+      />
     {:else if currentPage === 'history'}
       <div class="history-section">
         <ChatHistory on:select={handleSessionSelect} on:continue={handleSessionContinue} on:close={navigateToMain} />

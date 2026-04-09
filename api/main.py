@@ -32,6 +32,7 @@ from api.routes.chart import router as chart_router
 from api.routes.chat import router as chat_router
 from api.routes.watchlist import router as watchlist_router
 from api.routes.models import router as models_router
+from api.routes.company import router as company_router
 
 
 @asynccontextmanager
@@ -57,3 +58,4 @@ app.include_router(chart_router)
 app.include_router(chat_router)
 app.include_router(watchlist_router)
 app.include_router(models_router)
+app.include_router(company_router)

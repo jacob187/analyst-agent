@@ -139,6 +139,25 @@ async def init_db():
         ON briefing_tickers(briefing_id)
     """)
 
+    # --- Filing analysis persistence (LLM-generated summaries, cached per accession) ---
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS filing_analyses (
+            id TEXT PRIMARY KEY,
+            ticker TEXT NOT NULL,
+            form_type TEXT NOT NULL,
+            accession_number TEXT NOT NULL,
+            analysis_type TEXT NOT NULL,
+            analysis_json TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (ticker) REFERENCES companies(ticker),
+            UNIQUE(ticker, form_type, accession_number, analysis_type)
+        )
+    """)
+    await db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_filing_analyses_lookup
+        ON filing_analyses(ticker, form_type, accession_number)
+    """)
+
     # Migration: backfill companies from existing watchlist rows
     await db.execute("""
         INSERT OR IGNORE INTO companies (ticker, added_at)
@@ -576,3 +595,74 @@ async def mark_filing_downloaded(filing_id: str) -> bool:
     )
     await db.commit()
     return cursor.rowcount > 0
+
+
+# =============================================================================
+# Filing Analyses (LLM-generated summaries, cached per accession number)
+# =============================================================================
+
+async def save_filing_analysis(ticker: str, form_type: str, accession_number: str,
+                               analysis_type: str, analysis_json: str) -> str:
+    """Persist an LLM filing analysis. Returns analysis ID.
+
+    Uses INSERT OR REPLACE keyed on the UNIQUE(ticker, form_type,
+    accession_number, analysis_type) constraint. If the same analysis
+    is re-run for the same filing, it overwrites the previous result.
+    """
+    analysis_id = str(uuid.uuid4())
+    db = await get_db()
+    ticker = ticker.upper()
+    await db.execute("INSERT OR IGNORE INTO companies (ticker) VALUES (?)", (ticker,))
+    await db.execute("""
+        INSERT OR REPLACE INTO filing_analyses
+            (id, ticker, form_type, accession_number, analysis_type, analysis_json)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (analysis_id, ticker, form_type, accession_number, analysis_type, analysis_json))
+    await db.commit()
+    return analysis_id
+
+
+async def get_filing_analysis(ticker: str, form_type: str,
+                              accession_number: str,
+                              analysis_type: str) -> dict | None:
+    """Return a cached filing analysis, or None on cache miss.
+
+    Cache miss happens when:
+    - The analysis was never run for this filing
+    - A new filing was published (different accession number)
+    """
+    db = await get_db()
+    async with db.execute("""
+        SELECT id, analysis_json, created_at
+        FROM filing_analyses
+        WHERE ticker = ? AND form_type = ? AND accession_number = ? AND analysis_type = ?
+    """, (ticker.upper(), form_type, accession_number, analysis_type)) as cursor:
+        row = await cursor.fetchone()
+        if row:
+            return {
+                "id": row["id"],
+                "analysis_json": row["analysis_json"],
+                "created_at": row["created_at"],
+            }
+        return None
+
+
+async def get_all_filing_analyses(ticker: str, accession_number: str) -> list[dict]:
+    """Return all cached analyses for a specific filing (by accession number)."""
+    db = await get_db()
+    async with db.execute("""
+        SELECT id, form_type, analysis_type, analysis_json, created_at
+        FROM filing_analyses
+        WHERE ticker = ? AND accession_number = ?
+        ORDER BY analysis_type
+    """, (ticker.upper(), accession_number)) as cursor:
+        rows = await cursor.fetchall()
+        return [
+            {
+                "id": r["id"], "form_type": r["form_type"],
+                "analysis_type": r["analysis_type"],
+                "analysis_json": r["analysis_json"],
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
