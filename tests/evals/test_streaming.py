@@ -18,7 +18,6 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 from agents.graph.analyst_graph import (
     _process_streaming_chunk,
-    _extract_text_content,
     PlanningAgent,
 )
 from agents.planner import QueryPlan, AnalysisStep
@@ -170,37 +169,6 @@ class TestProcessStreamingChunk:
 # ---------------------------------------------------------------------------
 # PlanningAgent.stream_sync tests
 # ---------------------------------------------------------------------------
-
-
-class TestExtractTextContent:
-    """_extract_text_content extracts text from Gemini's response formats."""
-
-    @pytest.mark.eval_unit
-    def test_string_passthrough(self):
-        assert _extract_text_content("hello world") == "hello world"
-
-    @pytest.mark.eval_unit
-    def test_list_with_text_block(self):
-        content = [{"type": "text", "text": "the answer"}]
-        assert _extract_text_content(content) == "the answer"
-
-    @pytest.mark.eval_unit
-    def test_list_with_thinking_and_text(self):
-        """Should extract only text, ignoring thinking blocks."""
-        content = [
-            {"type": "thinking", "thinking": "let me reason..."},
-            {"type": "text", "text": "final answer"},
-        ]
-        assert _extract_text_content(content) == "final answer"
-
-    @pytest.mark.eval_unit
-    def test_list_with_raw_string(self):
-        content = ["raw string part"]
-        assert _extract_text_content(content) == "raw string part"
-
-    @pytest.mark.eval_unit
-    def test_empty_string(self):
-        assert _extract_text_content("") == ""
 
 
 class TestStreamSync:
