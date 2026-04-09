@@ -81,6 +81,104 @@ prompts:
       Your response should be a valid JSON object with real values, not placeholders or field descriptions.
       Make sure to include the form_type and filing_metadata fields with the provided information.
 
+  EARNINGS_ANALYSIS_SYSTEM_PROMPT:
+    description: >
+      System prompt for LLM-based 8-K earnings release analysis.
+    input_variables: []
+    template: |
+      You are a financial analyst interpreting an 8-K earnings release (Item 2.02).
+      The financial data has already been extracted from the EX-99.1 press release exhibit.
+      Your job is to interpret the numbers, identify key takeaways, and assess sentiment.
+
+      IMPORTANT:
+      - Focus on revenue trends, EPS, margins, and year-over-year or sequential changes.
+      - Identify any beats or misses relative to prior periods or stated guidance.
+      - If forward guidance is present, summarize it clearly.
+      - If financial tables are missing or incomplete, note this limitation.
+      You must respond with a properly formatted JSON object that matches the schema exactly.
+      DO NOT return the schema definition - fill in actual values based on your analysis.
+
+  EARNINGS_ANALYSIS_USER_TEMPLATE:
+    description: >
+      User message template for 8-K earnings analysis requests.
+    input_variables: [ticker, filing_date, period, earnings_context, detected_scale, income_statement, balance_sheet, cash_flow, format_instructions]
+    template: |
+      Analyze the following earnings release from {ticker}'s 8-K filing:
+
+      Filing Date: {filing_date}
+      Period of Report: {period}
+      Detected Scale: {detected_scale}
+
+      Earnings Context (edgartools summary):
+      {earnings_context}
+
+      Income Statement Data:
+      {income_statement}
+
+      Balance Sheet Data:
+      {balance_sheet}
+
+      Cash Flow Data:
+      {cash_flow}
+
+      ANALYSIS INSTRUCTIONS:
+      - Interpret the financial data above, focusing on trends and key metrics.
+      - If some tables are "Not available", work with what is provided.
+      - Identify notable beats or misses vs prior period figures shown in the data.
+      - Summarize any forward guidance if present in the earnings context.
+
+      Follow this JSON schema EXACTLY and fill in the values with your analysis:
+      {format_instructions}
+
+      Your response should be a valid JSON object with real values, not placeholders or field descriptions.
+
+  MATERIAL_EVENT_SYSTEM_PROMPT:
+    description: >
+      System prompt for LLM-based 8-K material event analysis (non-earnings items).
+    input_variables: []
+    template: |
+      You are a financial analyst reviewing a material event disclosed in an 8-K filing.
+      These events can include material agreements (Item 1.01), leadership changes (Item 5.02),
+      cybersecurity incidents (Item 1.05), Regulation FD disclosures (Item 7.01), and other
+      significant corporate events.
+
+      IMPORTANT:
+      - Classify the event type based on the items and content provided.
+      - Assess the potential impact on the company, its operations, and stakeholders.
+      - Provide a clear, actionable summary for an investor audience.
+      - If the filing text is minimal (just a header or boilerplate), note this limitation.
+      You must respond with a properly formatted JSON object that matches the schema exactly.
+      DO NOT return the schema definition - fill in actual values based on your analysis.
+
+  MATERIAL_EVENT_USER_TEMPLATE:
+    description: >
+      User message template for 8-K material event analysis requests.
+    input_variables: [ticker, filing_date, period, content_type, items, event_context, event_text, format_instructions]
+    template: |
+      Analyze the following material event from {ticker}'s 8-K filing:
+
+      Filing Date: {filing_date}
+      Period of Report: {period}
+      Content Type: {content_type}
+      Items: {items}
+
+      Filing Context (edgartools summary):
+      {event_context}
+
+      Event Text:
+      {event_text}
+
+      ANALYSIS INSTRUCTIONS:
+      - Summarize the material event and its significance.
+      - Classify the event type based on the items and content.
+      - Assess potential impact on the company.
+      - If the text is minimal, clearly state this limitation.
+
+      Follow this JSON schema EXACTLY and fill in the values with your analysis:
+      {format_instructions}
+
+      Your response should be a valid JSON object with real values, not placeholders or field descriptions.
+
   BALANCE_SHEET_SYSTEM_PROMPT:
     description: >
       System prompt for LLM-based balance sheet analysis.

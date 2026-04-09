@@ -1,4 +1,4 @@
-from edgar import Company, set_identity
+from edgar import Company, CompanyNotFoundError, set_identity
 import json
 from typing import Literal, Optional, Dict, Any
 from datetime import datetime
@@ -68,14 +68,22 @@ class SECDataRetrieval:
     def __init__(self, ticker: str, sec_header: str):
         set_identity(sec_header)
         self.ticker = ticker
-        self.company = Company(ticker)
+        try:
+            self.company = Company(ticker)
+        except CompanyNotFoundError as e:
+            suggestions = [s["ticker"] for s in e.suggestions[:3]]
+            hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
+            raise ValueError(f"Company not found: '{ticker}'.{hint}") from e
         # Lazy caches
         self._tenk_filing = None
         self._tenq_filing = None
+        self._eightk_filing = None
         self._tenk_obj = None
         self._tenq_obj = None
+        self._eightk_obj = None
         self._tenk_metadata = None
         self._tenq_metadata = None
+        self._eightk_metadata = None
 
     def check_filing_availability(self) -> Dict[str, Any]:
         """Check what filings are available for this company.
@@ -88,6 +96,7 @@ class SECDataRetrieval:
             "company_name": self.company.name,
             "has_10k": False,
             "has_10q": False,
+            "has_8k": False,
         }
         try:
             filing_10k = self.company.latest(form="10-K")
@@ -97,6 +106,11 @@ class SECDataRetrieval:
         try:
             filing_10q = self.company.latest(form="10-Q")
             result["has_10q"] = filing_10q is not None
+        except Exception:
+            pass
+        try:
+            filing_8k = self.company.get_filings(form="8-K").latest(1)
+            result["has_8k"] = filing_8k is not None
         except Exception:
             pass
         return result
@@ -128,6 +142,19 @@ class SECDataRetrieval:
             filing = self.get_tenq_filing()
             self._tenq_obj = filing.obj()
         return self._tenq_obj
+
+    def get_eightk_filing(self):
+        if self._eightk_filing is None:
+            self._eightk_filing = self._fetch_latest_eightk_filing()
+            if self._eightk_filing is None:
+                raise ValueError(f"No 8-K available for {self.ticker}")
+        return self._eightk_filing
+
+    def get_eightk(self):
+        if self._eightk_obj is None:
+            filing = self.get_eightk_filing()
+            self._eightk_obj = filing.obj()
+        return self._eightk_obj
 
     # Private fetchers
     def _fetch_company_tenk_filing(self):
@@ -165,6 +192,112 @@ class SECDataRetrieval:
             company_name=filing.company,
         )
         return filing
+
+    def _fetch_latest_eightk_filing(self):
+        filing = self.company.get_filings(form="8-K").latest(1)
+        if filing is None:
+            print(f"No 8-K filing found for {self.company.name}")
+            return None
+        print("8-K filing found")
+
+        self._eightk_metadata = FilingMetadata(
+            form=filing.form,
+            cik=str(filing.cik),
+            accession=filing.accession_number,
+            filing_date=str(filing.filing_date),
+            period_of_report=str(filing.period_of_report),
+            company_name=filing.company,
+        )
+        return filing
+
+    # ── 8-K public methods ────────────────────────────────────────────────
+
+    def get_8k_overview(self) -> Dict[str, Any]:
+        """Overview of the latest 8-K: items, content type, earnings flag, dates.
+
+        The ``content_type`` field is rule-based (no LLM call) and classifies the
+        filing as 'earnings', 'cybersecurity', 'director_change', etc.
+        ``to_context(detail="standard")`` returns a ~300-token LLM-friendly summary.
+        """
+        try:
+            eightk = self.get_eightk()
+            return {
+                "items": eightk.items,
+                "content_type": eightk.content_type,
+                "is_amendment": eightk.is_amendment,
+                "has_earnings": eightk.has_earnings,
+                "has_press_release": eightk.has_press_release,
+                "date_of_report": eightk.date_of_report,
+                "context": eightk.to_context(detail="standard"),
+                "metadata": self._eightk_metadata.to_dict() if self._eightk_metadata else {},
+                "found": True,
+            }
+        except Exception as e:
+            return {"found": False, "text": f"Error fetching 8-K overview: {e}", "metadata": {}}
+
+    def get_8k_item(self, item: str) -> Dict[str, Any]:
+        """Extract text for a specific 8-K item number (e.g. '2.02', '1.01').
+
+        Uses ``EightK.__getitem__`` which accepts formats like '2.02',
+        'Item 2.02', or 'item_202'.  Returns the same dict shape as
+        ``get_section`` for consistency.
+        """
+        try:
+            eightk = self.get_eightk()
+            text = eightk[item]
+            found = text is not None and bool(str(text).strip())
+            return {
+                "text": str(text) if found else f"Item {item} not found in 8-K",
+                "metadata": self._eightk_metadata.to_dict() if self._eightk_metadata else {},
+                "found": found,
+            }
+        except Exception as e:
+            return {"text": f"Error extracting 8-K item {item}: {e}", "metadata": {}, "found": False}
+
+    def get_earnings_data(self) -> Dict[str, Any]:
+        """Structured earnings from 8-K Item 2.02 + EX-99.1 press release.
+
+        Uses edgartools v5 ``EarningsRelease`` to parse income statement,
+        balance sheet, and cash flow tables from the press release exhibit.
+        Returns raw JSON-serializable dicts — the LLM analysis layer in
+        ``sec_llm_models.py`` handles interpretation.
+        """
+        try:
+            eightk = self.get_eightk()
+            metadata = self._eightk_metadata.to_dict() if self._eightk_metadata else {}
+
+            if not eightk.has_earnings:
+                return {
+                    "has_earnings": False,
+                    "reason": "Latest 8-K does not contain Item 2.02 earnings or lacks parseable EX-99.1",
+                    "metadata": metadata,
+                }
+
+            earnings = eightk.earnings
+            result: Dict[str, Any] = {
+                "has_earnings": True,
+                "detected_scale": str(earnings.detected_scale),
+                "context": earnings.to_context(detail="standard"),
+                "metadata": metadata,
+            }
+
+            # Each financial table is optional — some press releases omit them
+            if earnings.income_statement:
+                result["income_statement"] = json.loads(
+                    earnings.income_statement.dataframe.to_json(orient="split")
+                )
+            if earnings.balance_sheet:
+                result["balance_sheet"] = json.loads(
+                    earnings.balance_sheet.dataframe.to_json(orient="split")
+                )
+            if earnings.cash_flow_statement:
+                result["cash_flow"] = json.loads(
+                    earnings.cash_flow_statement.dataframe.to_json(orient="split")
+                )
+
+            return result
+        except Exception as e:
+            return {"has_earnings": False, "reason": f"Error parsing earnings: {e}", "metadata": {}}
 
     def get_section(self, form: Literal["10-K", "10-Q"], item: str) -> Dict[str, Any]:
         """Extract one section from a 10-K or 10-Q filing.
@@ -271,13 +404,13 @@ class SECDataRetrieval:
         if include_tenk:
             tenk = self.get_tenk()
             out["tenk"] = (
-                tenk.financials.get_balance_sheet().get_dataframe().to_string()
+                tenk.financials.balance_sheet().to_dataframe().to_string()
             )
         if include_tenq:
             try:
                 tenq = self.get_tenq()
                 out["tenq"] = (
-                    tenq.financials.get_balance_sheet().get_dataframe().to_string()
+                    tenq.financials.balance_sheet().to_dataframe().to_string()
                 )
             except Exception as e:
                 out["tenq_error"] = str(e)
@@ -300,8 +433,8 @@ class SECDataRetrieval:
         if include_tenk:
             tenk = self.get_tenk()
             out["tenk"] = json.loads(
-                tenk.financials.get_balance_sheet()
-                .get_dataframe()
+                tenk.financials.balance_sheet()
+                .to_dataframe()
                 .to_json(orient="split")
             )
             # Add metadata for provenance
@@ -312,8 +445,8 @@ class SECDataRetrieval:
             try:
                 tenq = self.get_tenq()
                 out["tenq"] = json.loads(
-                    tenq.financials.get_balance_sheet()
-                    .get_dataframe()
+                    tenq.financials.balance_sheet()
+                    .to_dataframe()
                     .to_json(orient="split")
                 )
                 # Add metadata for provenance

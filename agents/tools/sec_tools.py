@@ -16,24 +16,31 @@ _processed_cache: Dict[str, Dict[str, Any]] = {}
 def _get_shared_retriever(ticker: str, sec_header: str) -> SECDataRetrieval:
     """Get or create a shared SEC data retriever for the ticker.
 
-    Validates that the company has 10-K filings available before proceeding.
-    Raises ValueError if no 10-K filing is found.
+    The retriever is created once per ticker and cached for the process
+    lifetime.  Filing availability is NOT checked here -- tools that need
+    a 10-K should call ``_require_10k()`` before accessing 10-K data.
     """
     if ticker not in _shared_retrievers:
         print(f"Making single SEC API call for {ticker}...")
         retriever = SECDataRetrieval(ticker, sec_header)
-
-        # Validate that 10-K filings are available
-        availability = retriever.check_filing_availability()
-        if not availability["has_10k"]:
-            raise ValueError(
-                f"No 10-K filing found for {availability['company_name']} ({ticker}). "
-                f"This company may file different forms (e.g., N-CSR for investment trusts)."
-            )
-
         _shared_retrievers[ticker] = retriever
         _processed_cache[ticker] = {}
     return _shared_retrievers[ticker]
+
+
+def _require_10k(retriever: SECDataRetrieval) -> None:
+    """Raise ValueError if the company has no 10-K filing.
+
+    Called lazily by tools that need 10-K data, rather than at retriever
+    creation time.  This allows 8-K-only queries to work for companies
+    that don't file 10-Ks (SPACs, foreign filers, etc.).
+    """
+    availability = retriever.check_filing_availability()
+    if not availability["has_10k"]:
+        raise ValueError(
+            f"No 10-K filing found for {availability['company_name']} ({retriever.ticker}). "
+            f"This company may file different forms (e.g., N-CSR for investment trusts)."
+        )
 
 
 def _get_shared_processor(ticker: str, llm: BaseChatModel) -> SECDocumentProcessor:
@@ -81,6 +88,7 @@ def _tool_raw_risk_factors(ticker: str, llm: BaseChatModel, sec_header: str = ""
     """Return raw Risk Factors text, preferring 10-Q (most recent) with 10-K fallback."""
     try:
         retriever = _get_shared_retriever(ticker, sec_header)
+        _require_10k(retriever)
         result = _fetch_best_section(retriever.get_risk_factors_raw)
         if not result.get("found"):
             return f"Risk Factors section not found for {ticker}."
@@ -95,6 +103,7 @@ def _tool_risk_factors_summary(ticker: str, llm: BaseChatModel, sec_header: str 
     if cache_key not in _processed_cache.get(ticker, {}):
         try:
             retriever = _get_shared_retriever(ticker, sec_header)
+            _require_10k(retriever)
             processor = _get_shared_processor(ticker, llm)
             risk_data = _fetch_best_section(retriever.get_risk_factors_raw)
             if not risk_data.get("found", False):
@@ -117,6 +126,7 @@ def _tool_raw_mda(ticker: str, llm: BaseChatModel, sec_header: str = "") -> str:
     """Return raw MD&A text, preferring 10-Q (most recent) with 10-K fallback."""
     try:
         retriever = _get_shared_retriever(ticker, sec_header)
+        _require_10k(retriever)
         result = _fetch_best_section(retriever.get_mda_raw)
         if not result.get("found"):
             return f"Management Discussion section not found for {ticker}."
@@ -131,6 +141,7 @@ def _tool_mda_summary(ticker: str, llm: BaseChatModel, sec_header: str = "") -> 
     if cache_key not in _processed_cache.get(ticker, {}):
         try:
             retriever = _get_shared_retriever(ticker, sec_header)
+            _require_10k(retriever)
             processor = _get_shared_processor(ticker, llm)
             mda_data = _fetch_best_section(retriever.get_mda_raw)
             if not mda_data.get("found", False):
@@ -158,6 +169,7 @@ def _tool_raw_balance_sheets(ticker: str, llm: BaseChatModel, sec_header: str = 
     """Return availability list of balance sheet JSON sections for the given ticker."""
     try:
         retriever = _get_shared_retriever(ticker, sec_header)
+        _require_10k(retriever)
         result = retriever.extract_balance_sheet_as_json()
         if isinstance(result, dict) and "error" not in result:
             return f"Balance sheet data available for: {list(result.keys())}"
@@ -172,6 +184,7 @@ def _tool_balance_sheet_summary(ticker: str, llm: BaseChatModel, sec_header: str
     if cache_key not in _processed_cache.get(ticker, {}):
         try:
             retriever = _get_shared_retriever(ticker, sec_header)
+            _require_10k(retriever)
             processor = _get_shared_processor(ticker, llm)
             balance_data = retriever.extract_balance_sheet_as_json()
             analysis = processor.analyze_balance_sheet(
@@ -198,6 +211,7 @@ def _tool_business_overview(ticker: str, sec_header: str = "") -> str:
     """Return raw Business Overview text (10-K Item 1)."""
     try:
         retriever = _get_shared_retriever(ticker, sec_header)
+        _require_10k(retriever)
         result = retriever.get_business_raw()
         if not result.get("found"):
             return f"Business overview not found for {ticker}."
@@ -210,6 +224,7 @@ def _tool_cybersecurity_disclosure(ticker: str, sec_header: str = "") -> str:
     """Return Cybersecurity risk management disclosure (10-K Item 1C)."""
     try:
         retriever = _get_shared_retriever(ticker, sec_header)
+        _require_10k(retriever)
         result = retriever.get_cybersecurity_raw()
         if not result.get("found"):
             return f"Cybersecurity disclosure not found for {ticker} (may not be present in older filings)."
@@ -222,6 +237,7 @@ def _tool_legal_proceedings(ticker: str, sec_header: str = "") -> str:
     """Return Legal Proceedings text (10-K Item 3)."""
     try:
         retriever = _get_shared_retriever(ticker, sec_header)
+        _require_10k(retriever)
         result = retriever.get_legal_proceedings_raw()
         if not result.get("found"):
             return f"Legal proceedings section not found for {ticker}."
@@ -234,6 +250,7 @@ def _tool_complete_10k_text(ticker: str, llm: BaseChatModel, sec_header: str = "
     """Return list of available major 10-K sections for the given ticker."""
     try:
         retriever = _get_shared_retriever(ticker, sec_header)
+        _require_10k(retriever)
         mda_data = retriever.get_mda_raw("10-K")
         risk_data = retriever.get_risk_factors_raw("10-K")
         
@@ -272,6 +289,123 @@ def _tool_all_summaries(ticker: str, llm: BaseChatModel, sec_header: str = "") -
     summary += f"=== MANAGEMENT OUTLOOK ===\n{mda_summary}\n\n"
     summary += f"=== FINANCIAL HEALTH ===\n{balance_summary}\n"
     return summary
+
+
+# ── 8-K tool functions ────────────────────────────────────────────────────────
+
+
+def _tool_8k_overview(ticker: str, sec_header: str = "") -> str:
+    """Return overview of the latest 8-K filing: items, event type, dates."""
+    try:
+        retriever = _get_shared_retriever(ticker, sec_header)
+        result = retriever.get_8k_overview()
+        if not result.get("found"):
+            return f"No 8-K filing found for {ticker}."
+        items = result.get("items", [])
+        return (
+            f"Latest 8-K for {ticker}:\n"
+            f"Event Type: {result.get('content_type', 'unknown')}\n"
+            f"Items: {', '.join(items)}\n"
+            f"Date of Report: {result.get('date_of_report', 'Unknown')}\n"
+            f"Has Earnings: {result.get('has_earnings', False)}\n\n"
+            f"{result.get('context', '')}"
+        )
+    except Exception as e:
+        return f"Failed to retrieve 8-K overview for {ticker}: {e}"
+
+
+def _tool_8k_item(ticker: str, item: str, sec_header: str = "") -> str:
+    """Return raw text of a specific 8-K item (e.g. '2.02', '1.01')."""
+    try:
+        retriever = _get_shared_retriever(ticker, sec_header)
+        result = retriever.get_8k_item(item)
+        if not result.get("found"):
+            return f"8-K Item {item} not found for {ticker}."
+        return result["text"]
+    except Exception as e:
+        return f"Failed to retrieve 8-K item {item} for {ticker}: {e}"
+
+
+def _tool_earnings_summary(ticker: str, llm: BaseChatModel, sec_header: str = "") -> str:
+    """Return structured earnings analysis from 8-K Item 2.02 (cached)."""
+    cache_key = _get_cache_key(ticker, "earnings_summary")
+    if cache_key not in _processed_cache.get(ticker, {}):
+        try:
+            retriever = _get_shared_retriever(ticker, sec_header)
+            processor = _get_shared_processor(ticker, llm)
+            earnings_data = retriever.get_earnings_data()
+            if not earnings_data.get("has_earnings"):
+                return (
+                    f"No earnings data in latest 8-K for {ticker}. "
+                    f"Reason: {earnings_data.get('reason', 'Unknown')}"
+                )
+            analysis = processor.analyze_earnings(ticker, earnings_data)
+            _processed_cache[ticker][cache_key] = analysis.model_dump()
+        except Exception as e:
+            return f"Failed to analyze earnings for {ticker}: {e}"
+    result = _processed_cache[ticker][cache_key]
+    if isinstance(result, dict) and "error" not in result:
+        sentiment = result.get("sentiment_score", "N/A")
+        key_metrics = result.get("key_metrics", [])
+        beats = result.get("beats_misses", [])
+        summary = result.get("summary", "")
+        guidance = result.get("guidance", "")
+        response = (
+            f"Earnings Analysis:\n{summary}\n\n"
+            f"Sentiment: {sentiment}/10\n\n"
+            f"Key Metrics:\n{_format_top_n(key_metrics, 5)}"
+        )
+        if beats:
+            response += f"\n\nBeats/Misses:\n{_format_top_n(beats, 3)}"
+        if guidance:
+            response += f"\n\nGuidance: {guidance}"
+        return response
+    return str(result)
+
+
+def _tool_material_event_summary(ticker: str, llm: BaseChatModel, sec_header: str = "") -> str:
+    """Return structured analysis of non-earnings 8-K material event (cached)."""
+    cache_key = _get_cache_key(ticker, "material_event_summary")
+    if cache_key not in _processed_cache.get(ticker, {}):
+        try:
+            retriever = _get_shared_retriever(ticker, sec_header)
+            processor = _get_shared_processor(ticker, llm)
+            overview = retriever.get_8k_overview()
+            if not overview.get("found"):
+                return f"No 8-K filing found for {ticker}."
+            # Get the text of the primary (first) item for analysis
+            items = overview.get("items", [])
+            primary_item = items[0] if items else None
+            item_text = ""
+            if primary_item:
+                item_result = retriever.get_8k_item(primary_item)
+                item_text = item_result.get("text", "") if item_result.get("found") else ""
+            event_data = {
+                "content_type": overview.get("content_type", "other"),
+                "items": items,
+                "context": overview.get("context", ""),
+                "text": item_text,
+                "metadata": overview.get("metadata", {}),
+            }
+            analysis = processor.analyze_material_event(ticker, event_data)
+            _processed_cache[ticker][cache_key] = analysis.model_dump()
+        except Exception as e:
+            return f"Failed to analyze material event for {ticker}: {e}"
+    result = _processed_cache[ticker][cache_key]
+    if isinstance(result, dict) and "error" not in result:
+        event_type = result.get("event_type", "Unknown")
+        summary = result.get("summary", "")
+        impact = result.get("impact_assessment", "")
+        key_points = result.get("key_points", [])
+        sentiment = result.get("sentiment_score", "N/A")
+        response = (
+            f"Material Event ({event_type}):\n{summary}\n\n"
+            f"Sentiment: {sentiment}/10\n\n"
+            f"Key Points:\n{_format_top_n(key_points, 3)}\n\n"
+            f"Impact: {impact}"
+        )
+        return response
+    return str(result)
 
 
 def create_sec_tools(ticker: str, llm: BaseChatModel, sec_header: str = "") -> tuple[list, str]:
@@ -341,6 +475,40 @@ def create_sec_tools(ticker: str, llm: BaseChatModel, sec_header: str = "") -> t
             name="get_all_summaries",
             description="Get a comprehensive overview across risks, MD&A, and financials.",
             func=lambda query="": _tool_all_summaries(ticker, llm, sec_header),
+        ),
+        # ── 8-K tools ────────────────────────────────────────────────────
+        Tool.from_function(
+            name="get_8k_overview",
+            description=(
+                "Get overview of the latest 8-K filing: event type, items, dates, "
+                "and whether it contains earnings data."
+            ),
+            func=lambda query="": _tool_8k_overview(ticker, sec_header),
+        ),
+        Tool.from_function(
+            name="get_8k_item",
+            description=(
+                "Get raw text of a specific 8-K item by number (e.g. '2.02' for earnings, "
+                "'1.01' for material agreements, '5.02' for leadership changes). "
+                "Pass the item number as the query."
+            ),
+            func=lambda item="2.02": _tool_8k_item(ticker, item, sec_header),
+        ),
+        Tool.from_function(
+            name="get_earnings_summary",
+            description=(
+                "Get structured analysis of the latest 8-K earnings release (Item 2.02). "
+                "Includes key metrics, beats/misses, sentiment, and forward guidance."
+            ),
+            func=lambda query="": _tool_earnings_summary(ticker, llm, sec_header),
+        ),
+        Tool.from_function(
+            name="get_material_event_summary",
+            description=(
+                "Get structured analysis of the latest 8-K material event (non-earnings). "
+                "Covers agreements, leadership changes, cybersecurity incidents, etc."
+            ),
+            func=lambda query="": _tool_material_event_summary(ticker, llm, sec_header),
         ),
     ]
 

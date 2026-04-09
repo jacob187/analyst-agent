@@ -26,7 +26,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 DATASETS_DIR = Path(__file__).parent / "datasets"
 DEFAULT_TICKER = "AAPL"
 
-# SEC filing tool names (11)
+# SEC filing tool names (15)
 SEC_TOOL_NAMES = {
     "get_raw_risk_factors",
     "get_risk_factors_summary",
@@ -39,6 +39,10 @@ SEC_TOOL_NAMES = {
     "get_business_overview",
     "get_cybersecurity_disclosure",
     "get_legal_proceedings",
+    "get_8k_overview",
+    "get_8k_item",
+    "get_earnings_summary",
+    "get_material_event_summary",
 }
 
 # Stock / technical analysis tool names (7)

@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 from agents.tools.sec_tools import _is_substantive, _fetch_best_section
 from agents.sec_workflow.get_SEC_data import SECDataRetrieval, _TENK_ITEM_KEYS, _TENQ_ITEM_KEYS
+from edgar import CompanyNotFoundError
 
 
 # ── _is_substantive ──────────────────────────────────────────────────────────
@@ -230,3 +231,156 @@ class TestNewRetrievalMethods:
         r = self._make_retriever_with_real_methods()
         r.get_mda_raw("10-Q")
         r.get_section.assert_called_with("10-Q", "2")
+
+
+# ── CompanyNotFoundError handling ─────────────────────────────────────────────
+
+@pytest.mark.eval_unit
+class TestCompanyNotFoundError:
+    """SECDataRetrieval translates CompanyNotFoundError to ValueError."""
+
+    def test_invalid_ticker_raises_value_error(self):
+        with patch("agents.sec_workflow.get_SEC_data.Company") as MockCompany:
+            MockCompany.side_effect = CompanyNotFoundError("FAKE", suggestions=[])
+            with pytest.raises(ValueError, match="Company not found"):
+                SECDataRetrieval("FAKE", "test test@test.com")
+
+    def test_invalid_ticker_includes_suggestions(self):
+        suggestions = [{"ticker": "AAPL", "company": "Apple Inc"}]
+        with patch("agents.sec_workflow.get_SEC_data.Company") as MockCompany:
+            MockCompany.side_effect = CompanyNotFoundError(
+                "AAPL1", suggestions=suggestions
+            )
+            with pytest.raises(ValueError, match="Did you mean: AAPL"):
+                SECDataRetrieval("AAPL1", "test test@test.com")
+
+    def test_valid_ticker_no_error(self):
+        with patch("agents.sec_workflow.get_SEC_data.Company") as MockCompany:
+            with patch("agents.sec_workflow.get_SEC_data.set_identity"):
+                MockCompany.return_value = MagicMock()
+                retriever = SECDataRetrieval("AAPL", "test test@test.com")
+                assert retriever.ticker == "AAPL"
+
+
+# ── 8-K retrieval methods ────────────────────────────────────────────────────
+
+@pytest.mark.eval_unit
+class TestGet8kOverview:
+    """get_8k_overview returns expected dict shape from EightK object."""
+
+    def _make_retriever_with_eightk(self, items=None, content_type="earnings",
+                                     has_earnings=True):
+        r = MagicMock(spec=SECDataRetrieval)
+        mock_eightk = MagicMock()
+        mock_eightk.items = items or ["Item 2.02", "Item 9.01"]
+        mock_eightk.content_type = content_type
+        mock_eightk.is_amendment = False
+        mock_eightk.has_earnings = has_earnings
+        mock_eightk.has_press_release = has_earnings
+        mock_eightk.date_of_report = "April 01, 2026"
+        mock_eightk.to_context.return_value = "8-K context summary"
+        r.get_eightk.return_value = mock_eightk
+        r._eightk_metadata = MagicMock()
+        r._eightk_metadata.to_dict.return_value = {"form": "8-K", "filing_date": "2026-04-01"}
+        r.get_8k_overview = lambda: SECDataRetrieval.get_8k_overview(r)
+        return r
+
+    def test_returns_expected_fields(self):
+        r = self._make_retriever_with_eightk()
+        result = r.get_8k_overview()
+        assert result["found"] is True
+        assert result["content_type"] == "earnings"
+        assert result["has_earnings"] is True
+        assert result["items"] == ["Item 2.02", "Item 9.01"]
+        assert result["context"] == "8-K context summary"
+
+    def test_non_earnings_event(self):
+        r = self._make_retriever_with_eightk(
+            items=["Item 5.02", "Item 9.01"],
+            content_type="director_change",
+            has_earnings=False,
+        )
+        result = r.get_8k_overview()
+        assert result["content_type"] == "director_change"
+        assert result["has_earnings"] is False
+
+
+@pytest.mark.eval_unit
+class TestGet8kItem:
+    """get_8k_item dispatches to EightK.__getitem__ correctly."""
+
+    def _make_retriever(self, item_text="Earnings release text"):
+        r = MagicMock(spec=SECDataRetrieval)
+        mock_eightk = MagicMock()
+        mock_eightk.__getitem__ = MagicMock(return_value=item_text)
+        r.get_eightk.return_value = mock_eightk
+        r._eightk_metadata = MagicMock()
+        r._eightk_metadata.to_dict.return_value = {"form": "8-K"}
+        r.get_8k_item = lambda item: SECDataRetrieval.get_8k_item(r, item)
+        return r
+
+    def test_found_item_returns_text(self):
+        r = self._make_retriever("Item 2.02 content here")
+        result = r.get_8k_item("2.02")
+        assert result["found"] is True
+        assert "Item 2.02 content here" in result["text"]
+
+    def test_missing_item_returns_not_found(self):
+        r = self._make_retriever(None)
+        result = r.get_8k_item("1.01")
+        assert result["found"] is False
+
+
+@pytest.mark.eval_unit
+class TestGetEarningsData:
+    """get_earnings_data handles both earnings and non-earnings 8-Ks."""
+
+    def _make_retriever(self, has_earnings=True):
+        r = MagicMock(spec=SECDataRetrieval)
+        mock_eightk = MagicMock()
+        mock_eightk.has_earnings = has_earnings
+        r._eightk_metadata = MagicMock()
+        r._eightk_metadata.to_dict.return_value = {"form": "8-K"}
+
+        if has_earnings:
+            mock_earnings = MagicMock()
+            mock_earnings.detected_scale = "MILLIONS"
+            mock_earnings.to_context.return_value = "Earnings context"
+            # income_statement returns a FinancialTable with .dataframe
+            mock_income = MagicMock()
+            mock_income.dataframe.to_json.return_value = '{"columns":[],"data":[]}'
+            mock_earnings.income_statement = mock_income
+            mock_earnings.balance_sheet = None
+            mock_earnings.cash_flow_statement = None
+            mock_eightk.earnings = mock_earnings
+
+        r.get_eightk.return_value = mock_eightk
+        r.get_earnings_data = lambda: SECDataRetrieval.get_earnings_data(r)
+        return r
+
+    def test_has_earnings_returns_data(self):
+        r = self._make_retriever(has_earnings=True)
+        result = r.get_earnings_data()
+        assert result["has_earnings"] is True
+        assert "income_statement" in result
+        assert result["detected_scale"] == "MILLIONS"
+
+    def test_no_earnings_returns_reason(self):
+        r = self._make_retriever(has_earnings=False)
+        result = r.get_earnings_data()
+        assert result["has_earnings"] is False
+        assert "reason" in result
+
+
+@pytest.mark.eval_unit
+class TestGetEightkFiling:
+    """get_eightk_filing raises ValueError when no 8-K exists."""
+
+    def test_no_8k_raises_value_error(self):
+        r = MagicMock(spec=SECDataRetrieval)
+        r.ticker = "FAKE"
+        r._eightk_filing = None
+        r._fetch_latest_eightk_filing = MagicMock(return_value=None)
+        r.get_eightk_filing = lambda: SECDataRetrieval.get_eightk_filing(r)
+        with pytest.raises(ValueError, match="No 8-K available"):
+            r.get_eightk_filing()
