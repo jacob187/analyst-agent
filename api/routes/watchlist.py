@@ -6,7 +6,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.db import (
-    get_watchlist, add_to_watchlist, remove_from_watchlist,
+    get_db, get_watchlist, add_to_watchlist, remove_from_watchlist,
     save_briefing, get_recent_briefings, get_briefing_history,
 )
 from api.dependencies import ApiKeys, get_api_keys
@@ -18,20 +18,30 @@ _TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,10}$")
 
 @router.get("")
 async def list_watchlist():
-    """Return all tickers in the watchlist, enriched with company name/sector."""
-    from api.db import get_company
+    """Return all tickers in the watchlist, enriched with company name/sector.
 
-    tickers = await get_watchlist()
+    Uses a single JOIN query instead of N+1 individual get_company() calls.
+    """
+    from api.db import get_db
 
-    # Enrich each ticker with company metadata (name, sector) if available
-    enriched = []
-    for t in tickers:
-        company = await get_company(t["ticker"])
-        entry = {**t}
-        if company:
-            entry["name"] = company.get("name")
-            entry["sector"] = company.get("sector")
-        enriched.append(entry)
+    db = await get_db()
+    async with db.execute("""
+        SELECT w.ticker, w.added_at, c.name, c.sector
+        FROM watchlist w
+        LEFT JOIN companies c ON w.ticker = c.ticker
+        ORDER BY w.added_at
+    """) as cursor:
+        rows = await cursor.fetchall()
+
+    enriched = [
+        {
+            "ticker": row["ticker"],
+            "added_at": row["added_at"],
+            "name": row["name"],
+            "sector": row["sector"],
+        }
+        for row in rows
+    ]
 
     return {"tickers": enriched}
 
