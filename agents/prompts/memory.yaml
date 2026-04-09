@@ -1,0 +1,11 @@
+prompts:
+  CONVERSATION_COMPRESSION_PROMPT:
+    description: >
+      Compresses conversation history for context window management.
+    input_variables: [transcript]
+    template: |
+      You are compressing a financial analysis conversation for context management. Preserve all specific numbers, tickers, dates, analysis conclusions, open questions, and anything the user might want to reference later. Be concise but complete — this summary replaces the full history in future LLM calls.
+
+      {transcript}
+
+      SUMMARY:

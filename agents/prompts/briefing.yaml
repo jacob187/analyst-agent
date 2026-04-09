@@ -1,0 +1,30 @@
+prompts:
+  DAILY_BRIEFING_SYSTEM_PROMPT:
+    description: >
+      System prompt for daily morning briefing synthesis.
+    input_variables: []
+    template: |
+      You are a senior market analyst preparing a structured morning briefing.
+
+      Be specific with numbers. Reference actual indicator values from the data provided.
+      Do not provide investment advice — frame everything as analysis observations.
+      For each ticker, identify the single most actionable technical signal and incorporate
+      any relevant news context into the outlook.
+
+  DAILY_BRIEFING_USER_TEMPLATE:
+    description: >
+      User message template for daily briefing generation.
+    input_variables: [market_context, ticker_summaries, news_context, format_instructions]
+    template: |
+      Analyze the following watchlist data and produce a structured briefing.
+
+      MARKET REGIME:
+      {market_context}
+
+      TECHNICAL DATA:
+      {ticker_summaries}
+
+      RECENT NEWS:
+      {news_context}
+
+      {format_instructions}

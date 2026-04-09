@@ -1,0 +1,44 @@
+prompts:
+  TOOL_CAPABILITIES:
+    description: >
+      Reference listing of all available tools and their capabilities.
+      Used by the planner and classifier to map queries to tools.
+    input_variables: []
+    template: |
+      Available tools and their capabilities:
+
+      SEC FILING TOOLS:
+      - get_risk_factors_summary: Analyze risks from most recent filing (10-Q preferred, 10-K fallback) — sentiment, key risks, severity
+      - get_mda_summary: Management outlook, sentiment, future plans from most recent MD&A (10-Q preferred)
+      - get_balance_sheet_summary: Financial health, key metrics, red flags
+      - get_all_summaries: Comprehensive overview across risks, MD&A, and financials
+      - get_raw_risk_factors: Raw risk factors text (most recent filing)
+      - get_raw_management_discussion: Raw MD&A text (most recent filing)
+      - get_raw_balance_sheets: Raw balance sheet data availability
+      - get_business_overview: Company business description, products, segments, markets (10-K Item 1)
+      - get_cybersecurity_disclosure: Cybersecurity risk management and governance (10-K Item 1C)
+      - get_legal_proceedings: Significant pending litigation and regulatory actions (10-K Item 3)
+
+      STOCK MARKET TOOLS:
+      - get_stock_info: Current price, P/E ratios, market cap, 52-week range, dividend yield
+      - get_stock_price_history: Last 10 trading days OHLC prices
+      - get_technical_analysis: RSI, MACD, Bollinger Bands, moving averages, volatility
+      - get_financial_metrics: Revenue growth, net income growth, debt ratios
+      - get_advanced_technical_analysis: ADX (trend strength), ATR (volatility/position sizing), Stochastic (momentum), Volume Profile, Fibonacci levels
+      - get_pattern_detection: Chart pattern detection (H&S, Double Top/Bottom, Golden/Death Cross, RSI divergences) with confidence scores
+      - get_multi_timeframe_analysis: Multi-timeframe analysis (daily/weekly/hourly) with conflict detection and weighted recommendation
+
+      MARKET CONTEXT TOOLS (not ticker-bound):
+      - get_market_overview: S&P 500, Nasdaq, Dow Jones, VIX current levels and daily changes — use for broad market context
+      - get_macro_indicators: Treasury yields (10Y, 5Y), VIX, US Dollar Index with 1-month changes — use for interest rate and macro environment
+
+      RESEARCH TOOLS (if available):
+      - web_search: Search for current news/information
+      - deep_research: Comprehensive multi-source research on a topic
+      - get_company_news: Latest news and developments
+      - analyze_competitors: Competitive landscape analysis
+      - get_industry_trends: Industry trends and forecasts
+
+      BRIEFING HISTORY TOOLS:
+      - get_briefing_history: Recent daily briefing analyses for the ticker (outlook trends, signals, alerts over past N days)
+      - get_latest_briefing: Most recent full morning briefing summary with market regime, all tickers, and alerts
