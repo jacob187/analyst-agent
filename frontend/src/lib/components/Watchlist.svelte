@@ -36,8 +36,8 @@
       const res = await fetch(`${apiBase}/watchlist`);
       const data = await res.json();
       tickers = data.tickers || [];
-      // Fetch prices for each ticker in parallel
-      await Promise.all(tickers.map(t => fetchPrice(t.ticker)));
+      // Fetch all prices in a single batch request instead of N chart calls
+      await fetchPrices(tickers.map(t => t.ticker));
     } catch (e) {
       error = 'Failed to load watchlist';
     } finally {
@@ -45,19 +45,27 @@
     }
   }
 
-  async function fetchPrice(ticker: string) {
+  async function fetchPrices(tickerList: string[]) {
+    if (tickerList.length === 0) return;
     try {
-      const res = await fetch(`${apiBase}/stock/${ticker}/chart?period=1y&indicators=`);
+      const res = await fetch(`${apiBase}/stock/quotes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tickers: tickerList }),
+      });
       if (res.ok) {
         const data = await res.json();
-        if (data.quote?.price) {
-          prices[ticker] = {
-            price: data.quote.price,
-            change: data.quote.change,
-            changePercent: data.quote.changePercent,
-          };
-          prices = prices; // trigger reactivity
+        const quotes = data.quotes || {};
+        for (const [ticker, q] of Object.entries(quotes) as [string, any][]) {
+          if (q?.price != null) {
+            prices[ticker] = {
+              price: q.price,
+              change: q.change,
+              changePercent: q.changePercent,
+            };
+          }
         }
+        prices = prices; // trigger reactivity
       }
     } catch {
       // Price fetch is best-effort
