@@ -85,9 +85,9 @@ class TestGetTokenThreshold:
         # 1_000_000 // 4 = 250_000
         assert get_token_threshold("gemini-3-flash-preview") == 250_000
 
-    def test_gpt4o_mini_threshold(self):
-        # 128_000 // 4 = 32_000
-        assert get_token_threshold("gpt-4o-mini") == 32_000
+    def test_gpt41_mini_threshold(self):
+        # 1_000_000 // 4 = 250_000
+        assert get_token_threshold("gpt-4.1-mini") == 250_000
 
     def test_unknown_model_returns_fallback(self):
         assert get_token_threshold("nonexistent-model") == 30_000
