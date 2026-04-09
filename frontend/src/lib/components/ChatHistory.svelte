@@ -11,6 +11,7 @@
     id: string;
     ticker: string;
     created_at: string;
+    model: string | null;
   }
 
   let sessions: Session[] = [];
@@ -96,6 +97,9 @@
         <div class="session-item">
           <div class="session-info">
             <span class="ticker">{session.ticker}</span>
+            {#if session.model}
+              <span class="model-badge">{session.model}</span>
+            {/if}
             <span class="date">{formatDate(session.created_at)}</span>
           </div>
           <div class="session-actions">
@@ -205,6 +209,16 @@
   .date {
     color: var(--text-muted);
     font-size: 0.8rem;
+  }
+
+  .model-badge {
+    display: inline-block;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    background: var(--bg-darker);
+    border-radius: 3px;
+    padding: 0.1rem 0.4rem;
+    letter-spacing: 0.01em;
   }
 
   @media (max-width: 480px) {

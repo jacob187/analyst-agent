@@ -30,7 +30,7 @@ class TestBuildThinkingKwargs:
 
     def test_disabled_config_returns_empty(self):
         config = ThinkingConfig(enabled=False, level="high")
-        assert _build_thinking_kwargs("openai", "gpt-4o-mini", config) == {}
+        assert _build_thinking_kwargs("openai", "gpt-4.1-mini", config) == {}
 
     def test_google_genai(self):
         config = ThinkingConfig(enabled=True, level="medium")
@@ -54,7 +54,7 @@ class TestBuildThinkingKwargs:
 
     def test_openai(self):
         config = ThinkingConfig(enabled=True, level="medium")
-        result = _build_thinking_kwargs("openai", "o3-mini", config)
+        result = _build_thinking_kwargs("openai", "o3", config)
         assert result == {"reasoning_effort": "medium"}
 
     def test_unknown_provider_returns_empty(self):
@@ -77,10 +77,10 @@ class TestCreateLlm:
     @patch("langchain.chat_models.init_chat_model")
     def test_openai_model(self, mock_init):
         mock_init.return_value = MagicMock()
-        create_llm("gpt-4o-mini", "fake-openai-key")
+        create_llm("gpt-4.1-mini", "fake-openai-key")
 
         mock_init.assert_called_once_with(
-            "openai:gpt-4o-mini",
+            "openai:gpt-4.1-mini",
             temperature=0,
             api_key="fake-openai-key",
         )
@@ -112,14 +112,14 @@ class TestCreateLlm:
 
     @patch("langchain.chat_models.init_chat_model")
     def test_thinking_ignored_for_non_capable_model(self, mock_init):
-        """gpt-4o-mini is not thinking-capable — thinking config should be ignored."""
+        """gpt-4.1-mini is not thinking-capable — thinking config should be ignored."""
         mock_init.return_value = MagicMock()
         thinking = ThinkingConfig(enabled=True, level="high")
-        create_llm("gpt-4o-mini", "fake-key", thinking=thinking)
+        create_llm("gpt-4.1-mini", "fake-key", thinking=thinking)
 
         # Should NOT include reasoning_effort or any thinking kwargs
         mock_init.assert_called_once_with(
-            "openai:gpt-4o-mini",
+            "openai:gpt-4.1-mini",
             temperature=0,
             api_key="fake-key",
         )
@@ -157,7 +157,7 @@ class TestCreateLlmPair:
         """For a non-thinking model, both LLMs should be the same instance."""
         mock_llm = MagicMock()
         mock_init.return_value = mock_llm
-        main, synth = create_llm_pair("gpt-4o-mini", "fake-key")
+        main, synth = create_llm_pair("gpt-4.1-mini", "fake-key")
 
         assert main is synth
         assert mock_init.call_count == 1
