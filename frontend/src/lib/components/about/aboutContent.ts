@@ -51,17 +51,27 @@ export const capabilitiesContent = {
     {
       category: "SEC Filing Analysis",
       description:
-        "Raw and AI-analyzed 10-K/10-Q sections — risk factors, MD&A, balance sheets, business overviews, and more — sourced directly from SEC EDGAR.",
+        "11 tools powered by edgartools. Raw and AI-analyzed 10-K/10-Q sections — risk factors, MD&A, balance sheets, business overview, cybersecurity disclosure, legal proceedings, and a concurrent all-summaries tool. Prefers 10-Q for recency with 10-K fallback.",
     },
     {
       category: "Market Data & Technicals",
       description:
-        "Price history, financial metrics, and technical indicators (RSI, MACD, Bollinger Bands, moving averages) with interactive charting.",
+        "7 tools via Yahoo Finance. Price history, stock info (P/E, market cap, beta), financial metrics (revenue/income growth, debt ratios), core technicals (RSI, MACD, Bollinger Bands, 5/10/20/50/200-day MAs), advanced technicals (ADX, ATR, Stochastic, Volume Profile, Fibonacci), chart pattern detection (Head & Shoulders, Double Top/Bottom, Golden/Death Cross), and multi-timeframe analysis with conflict detection.",
+    },
+    {
+      category: "Market Overview",
+      description:
+        "2 tools for broad market context. Current levels and daily changes for S&P 500, Nasdaq, Dow Jones, and VIX. Macro indicators including 10-Year and 5-Year Treasury yields, VIX, and US Dollar Index with 1-month changes.",
     },
     {
       category: "Web Research",
       description:
-        "Company news, competitor analysis, and industry trends via optional Tavily integration.",
+        "5 optional tools via Tavily. General web search, deep research (async polling), company news, competitor analysis, and industry trend forecasting. Requires a Tavily API key.",
+    },
+    {
+      category: "Briefing History",
+      description:
+        "2 tools for daily briefing data. Retrieve recent briefing analyses for a ticker (outlook trends, technical signals, news summaries) or the latest full morning briefing (market regime, positioning, alerts).",
     },
   ],
 };
@@ -73,7 +83,7 @@ export const techStackContent = {
     { label: "Frontend", value: "Svelte 5 + TypeScript + Vite" },
     { label: "Backend", value: "FastAPI + WebSocket" },
     { label: "AI Framework", value: "LangGraph + LangChain" },
-    { label: "LLM", value: "Google Gemini" },
+    { label: "LLM", value: "Multi-provider (Google Gemini, OpenAI, Anthropic)" },
     { label: "SEC Data", value: "edgartools (EDGAR API)" },
     { label: "Market Data", value: "yfinance (Yahoo Finance)" },
     { label: "Web Research", value: "Tavily API (optional)" },
@@ -84,64 +94,64 @@ export const techStackContent = {
 export const diagrams = {
   systemArchitecture: `
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                      ANALYST AGENT ARCHITECTURE (v2)                         │
+│                         ANALYST AGENT ARCHITECTURE                          │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│   ┌──────────────┐         WebSocket          ┌──────────────────────────┐  │
-│   │   Frontend   │ ◄─────────────────────────►│     FastAPI Backend      │  │
-│   │   (Svelte)   │                            │    /ws/chat/{ticker}     │  │
-│   └──────────────┘                            └────────────┬─────────────┘  │
-│                                                            │                 │
-│                                                            ▼                 │
-│                                               ┌──────────────────────────┐  │
-│                                               │ LangGraph Planning Agent │  │
-│                                               │  (StateGraph workflow)   │  │
-│                                               └────────────┬─────────────┘  │
-│                                                            │                 │
-│                                  ┌─────────────────────────┴─────────────┐  │
-│                                  │      Query Complexity Router          │  │
-│                                  │  (LLM-based classification)           │  │
-│                                  └──────────┬───────────────┬────────────┘  │
-│                                             │               │                │
-│                                  SIMPLE     │               │    COMPLEX     │
-│                                             │               │                │
-│                                             ▼               ▼                │
-│                              ┌────────────────┐   ┌────────────────────┐    │
-│                              │  ReAct Agent   │   │  Query Planner     │    │
-│                              │  (Dynamic)     │   │  (Structured)      │    │
-│                              └───────┬────────┘   └─────────┬──────────┘    │
-│                                      │                      │                │
-│                                      │                      ▼                │
-│                                      │            ┌─────────────────────┐    │
-│                                      │            │  Step Executor      │    │
-│                                      │            │  (Parallel layers)  │    │
-│                                      │            └─────────┬───────────┘    │
-│                                      │                      │                │
-│                                      │                      ▼                │
-│                                      │            ┌─────────────────────┐    │
-│                                      │            │   Synthesizer       │    │
-│                                      │            │  (Combine results)  │    │
-│                                      │            └─────────┬───────────┘    │
-│                                      │                      │                │
-│                                      └──────────┬───────────┘                │
-│                                                 │                            │
-│                            ┌────────────────────┼────────────────────┐       │
-│                            │                    │                    │       │
-│                            ▼                    ▼                    ▼       │
-│               ┌────────────────────┐  ┌─────────────────┐  ┌──────────────┐ │
-│               │  SEC Tools        │  │  Yahoo Finance  │  │  Tavily      │ │
-│               │                    │  │                 │  │  (optional)  │ │
-│               │ • Risk Factors     │  │ • Price History │  │ • News       │ │
-│               │ • MD&A             │  │ • Technicals    │  │ • Research   │ │
-│               │ • Balance Sheets   │  │ • Stock Info    │  │ • Industry   │ │
-│               └────────────────────┘  └─────────────────┘  └──────────────┘ │
-│                                                                              │
-│                           ┌────────────────────────────────┐                 │
-│                           │      Google Gemini LLM         │                 │
-│                           │  (Powers classification,       │                 │
-│                           │   planning, and synthesis)     │                 │
-│                           └────────────────────────────────┘                 │
-│                                                                              │
+│                                                                             │
+│  ┌──────────────┐          WebSocket           ┌─────────────────────────┐  │
+│  │   Frontend   │ ◄──────────────────────────► │    FastAPI Backend      │  │
+│  │  (Svelte 5)  │                              │   /ws/chat/{ticker}     │  │
+│  └──────────────┘                              └───────────┬─────────────┘  │
+│                                                            │                │
+│                                                            ▼                │
+│                                               ┌─────────────────────────┐   │
+│                                               │ LangGraph StateGraph    │   │
+│                                               │  (Planning Agent)       │   │
+│                                               └───────────┬─────────────┘   │
+│                                                           │                 │
+│                                 ┌─────────────────────────┴──────────────┐  │
+│                                 │      Query Complexity Router           │  │
+│                                 │  (LLM-based classification)            │  │
+│                                 └─────────┬──────────────────┬───────────┘  │
+│                                           │                  │              │
+│                                SIMPLE     │                  │   COMPLEX    │
+│                                           ▼                  ▼              │
+│                            ┌────────────────┐   ┌────────────────────┐      │
+│                            │  ReAct Agent   │   │  Query Planner     │      │
+│                            │  (Dynamic)     │   │  (Structured)      │      │
+│                            └───────┬────────┘   └─────────┬──────────┘      │
+│                                    │                      │                 │
+│                                    │                      ▼                 │
+│                                    │            ┌────────────────────┐      │
+│                                    │            │  Step Executor     │      │
+│                                    │            │  (Parallel layers) │      │
+│                                    │            └─────────┬──────────┘      │
+│                                    │                      │                 │
+│                                    │                      ▼                 │
+│                                    │            ┌────────────────────┐      │
+│                                    │            │   Synthesizer      │      │
+│                                    │            │  (Thinking LLM)    │      │
+│                                    │            └─────────┬──────────┘      │
+│                                    │                      │                 │
+│                                    └──────────┬───────────┘                 │
+│                                               │                             │
+│          ┌──────────────┬─────────────┬───────┼───────────┬──────────┐      │
+│          ▼              ▼             ▼       ▼           ▼          ▼      │
+│  ┌──────────────┐ ┌───────────┐ ┌─────────┐ ┌─────────┐ ┌────────────┐    │
+│  │  SEC Tools   │ │  Stock    │ │ Market  │ │ Tavily  │ │  Briefing  │    │
+│  │  (11 tools)  │ │  Tools    │ │ Tools   │ │ Tools   │ │  Tools     │    │
+│  │              │ │ (7 tools) │ │(2 tools)│ │(5 tools)│ │ (2 tools)  │    │
+│  │ • Filings   │ │ • Price   │ │ • Index │ │ • News  │ │ • History  │    │
+│  │ • Analysis  │ │ • Technls │ │ • Macro │ │ • Deep  │ │ • Latest   │    │
+│  │ • Balance   │ │ • Patterns│ │ • Yields│ │ • Comps │ │   briefing │    │
+│  └──────────────┘ └───────────┘ └─────────┘ └─────────┘ └────────────┘    │
+│                                                                             │
+│                    ┌─────────────────────────────────────┐                  │
+│                    │  Multi-Provider LLM (8 models)      │                  │
+│                    │  Google Gemini │ OpenAI │ Anthropic  │                  │
+│                    │  (classification, planning,          │                  │
+│                    │   tool calls, and synthesis)         │                  │
+│                    └─────────────────────────────────────┘                  │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘`,
 
   reactFlow: `
@@ -206,12 +216,13 @@ export const diagrams = {
 │                         Response to User                                     │
 │                                                                              │
 │  Key Features:                                                               │
-│  • Automatic complexity detection                                           │
+│  • Automatic complexity detection (simple ≤1 tool, complex >1)              │
 │  • Dynamic routing to optimal execution path                                │
-│  • Structured planning for multi-step analysis                              │
-│  • Parallel execution of independent steps (~2-4x faster)                   │
-│  • Dependency-aware layer ordering                                          │
-│  • Intelligent result synthesis                                             │
+│  • Structured planning with dependency-aware step ordering                  │
+│  • Parallel execution of independent steps via ThreadPoolExecutor           │
+│  • Real-time streaming (node progress, tool events, thinking, tokens)       │
+│  • Multi-provider LLM support (Gemini, OpenAI, Anthropic — 8 models)       │
+│  • Dual-LLM architecture: tool LLM + thinking-enabled synthesizer          │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘`,
 };

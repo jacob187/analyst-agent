@@ -280,7 +280,9 @@
     {#if !settingsLoaded}
       <div class="loading">Loading...</div>
     {:else if currentPage === 'about'}
-      <AboutPage on:back={navigateToMain} />
+      <div class="scrollable-page">
+        <AboutPage on:back={navigateToMain} />
+      </div>
     {:else if currentPage === 'settings'}
       <div class="settings-page">
         <div class="settings-inner">
@@ -628,6 +630,14 @@
     gap: 1rem;
     min-height: 0;
     overflow: hidden;
+  }
+
+  /* ── Scrollable page (About, etc.) ──────────────────────────────────── */
+  .scrollable-page {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+    padding: 1rem 0;
   }
 
   /* ── Settings page — centered ────────────────────────────────────────── */
