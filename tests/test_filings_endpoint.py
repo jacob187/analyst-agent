@@ -320,8 +320,9 @@ class TestFilingsEndpointErrors:
 
 class TestFilingsPartialData:
     def test_no_tenk_returns_without_tenk_section(self, client, mock_filings_deps):
-        """Companies without a 10-K (e.g., new IPOs) should still return."""
+        """Companies without a 10-K or 20-F (e.g., new IPOs) should still return."""
         mock_filings_deps["sec"].get_tenk_filing.side_effect = ValueError("No 10-K")
+        mock_filings_deps["sec"].get_twentyf_filing.side_effect = ValueError("No 20-F")
         data = client.get(
             "/api/company/NEWIPO/filings",
             headers={"X-Google-Api-Key": "test-key", "X-Sec-Header": "test@test.com"},

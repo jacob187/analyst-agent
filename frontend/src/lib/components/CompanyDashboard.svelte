@@ -323,11 +323,11 @@
         </div>
       {:else if filings}
         <div class="filings-content">
-          <!-- 10-K -->
+          <!-- 10-K or 20-F annual report -->
           {#if filings.tenk}
             <div class="filing-section">
               <div class="filing-header">
-                <h3>10-K Annual Report</h3>
+                <h3>{filings.tenk.metadata?.form || '10-K'} Annual Report</h3>
                 <div class="filing-meta">
                   <span>Filed: {filings.tenk.metadata?.filing_date}</span>
                   <span>Period: {filings.tenk.metadata?.period_of_report}</span>

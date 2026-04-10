@@ -190,15 +190,22 @@ def _fetch_filing_data(ticker: str, sec_header: str) -> dict[str, Any]:
 
     Returns raw filing data (metadata, section text) without LLM analysis.
     Each filing type fails independently.
+
+    For foreign private issuers (BP, BABA, TSM), falls back to 20-F when
+    no 10-K is available. SECDataRetrieval handles 20-F via the same
+    get_section() / get_risk_factors_raw() / get_mda_raw() interface.
+
+    6-K is NOT a 10-Q replacement — edgartools' SixK class is a press
+    release wrapper without structured section access.
     """
     from agents.sec_workflow.get_SEC_data import SECDataRetrieval
 
     retriever = SECDataRetrieval(ticker, sec_header)
     result: dict[str, Any] = {"ticker": ticker}
 
-    # --- 10-K ---
+    # --- 10-K (or 20-F for foreign filers) ---
     try:
-        retriever.get_tenk_filing()  # triggers lazy fetch + metadata extraction
+        retriever.get_tenk_filing()
         meta = retriever._tenk_metadata
         if meta:
             result["tenk"] = {
@@ -211,9 +218,29 @@ def _fetch_filing_data(ticker: str, sec_header: str) -> dict[str, Any]:
                 "balance_sheet_raw": retriever.extract_balance_sheet_as_str("tenk"),
             }
     except (ValueError, Exception):
-        pass  # No 10-K available
+        # Foreign filers (BP, BABA, TSM) file 20-F instead of 10-K.
+        # SECDataRetrieval.get_section("20-F", item) uses TwentyF's named
+        # property accessors (.risk_factors, .management_discussion).
+        try:
+            retriever.get_twentyf_filing()
+            meta = retriever._twentyf_metadata
+            if meta:
+                result["tenk"] = {
+                    "metadata": {
+                        **meta.to_dict(),
+                        "edgar_url": _build_edgar_url(meta.cik, meta.accession),
+                    },
+                    "risk_raw": retriever.get_risk_factors_raw("20-F"),
+                    "mda_raw": retriever.get_mda_raw("20-F"),
+                    "balance_sheet_raw": {},
+                }
+        except (ValueError, Exception):
+            pass  # No 10-K or 20-F available
 
     # --- 10-Q ---
+    # Foreign filers use 6-K, but edgartools' SixK class only wraps press
+    # releases — no structured section access. Quarterly section will be
+    # empty for foreign filers until edgartools adds 6-K parsing.
     try:
         retriever.get_tenq_filing()
         meta = retriever._tenq_metadata

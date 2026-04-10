@@ -78,12 +78,15 @@ class SECDataRetrieval:
         self._tenk_filing = None
         self._tenq_filing = None
         self._eightk_filing = None
+        self._twentyf_filing = None
         self._tenk_obj = None
         self._tenq_obj = None
         self._eightk_obj = None
+        self._twentyf_obj = None
         self._tenk_metadata = None
         self._tenq_metadata = None
         self._eightk_metadata = None
+        self._twentyf_metadata = None
 
     def check_filing_availability(self) -> Dict[str, Any]:
         """Check what filings are available for this company.
@@ -94,10 +97,16 @@ class SECDataRetrieval:
         result = {
             "ticker": self.ticker,
             "company_name": self.company.name,
+            "is_foreign": False,
             "has_10k": False,
             "has_10q": False,
             "has_8k": False,
+            "has_20f": False,
         }
+        try:
+            result["is_foreign"] = self.company.is_foreign
+        except Exception:
+            pass
         try:
             filing_10k = self.company.latest(form="10-K")
             result["has_10k"] = filing_10k is not None
@@ -111,6 +120,11 @@ class SECDataRetrieval:
         try:
             filing_8k = self.company.get_filings(form="8-K").latest(1)
             result["has_8k"] = filing_8k is not None
+        except Exception:
+            pass
+        try:
+            filing_20f = self.company.latest(form="20-F")
+            result["has_20f"] = filing_20f is not None
         except Exception:
             pass
         return result
@@ -156,6 +170,25 @@ class SECDataRetrieval:
             self._eightk_obj = filing.obj()
         return self._eightk_obj
 
+    def get_twentyf_filing(self):
+        if self._twentyf_filing is None:
+            self._twentyf_filing = self._fetch_company_twentyf_filing()
+            if self._twentyf_filing is None:
+                raise ValueError(f"No 20-F available for {self.ticker}")
+        return self._twentyf_filing
+
+    def get_twentyf(self):
+        """Return parsed TwentyF object.
+
+        edgartools v5 TwentyF provides named accessors: .risk_factors,
+        .management_discussion, .balance_sheet, .income_statement,
+        .business, .key_information, .financial_information.
+        """
+        if self._twentyf_obj is None:
+            filing = self.get_twentyf_filing()
+            self._twentyf_obj = filing.obj()
+        return self._twentyf_obj
+
     # Private fetchers
     def _fetch_company_tenk_filing(self):
         filing = self.company.latest(form="10-K")
@@ -184,6 +217,23 @@ class SECDataRetrieval:
 
         # Extract metadata from the filing (EntityFiling object)
         self._tenq_metadata = FilingMetadata(
+            form=filing.form,
+            cik=str(filing.cik),
+            accession=filing.accession_number,
+            filing_date=str(filing.filing_date),
+            period_of_report=str(filing.period_of_report),
+            company_name=filing.company,
+        )
+        return filing
+
+    def _fetch_company_twentyf_filing(self):
+        filing = self.company.latest(form="20-F")
+        if filing is None:
+            print(f"No 20-F filing found for {self.company.name}")
+            return None
+        print("20-F filing found")
+
+        self._twentyf_metadata = FilingMetadata(
             form=filing.form,
             cik=str(filing.cik),
             accession=filing.accession_number,
@@ -299,8 +349,8 @@ class SECDataRetrieval:
         except Exception as e:
             return {"has_earnings": False, "reason": f"Error parsing earnings: {e}", "metadata": {}}
 
-    def get_section(self, form: Literal["10-K", "10-Q"], item: str) -> Dict[str, Any]:
-        """Extract one section from a 10-K or 10-Q filing.
+    def get_section(self, form: Literal["10-K", "10-Q", "20-F"], item: str) -> Dict[str, Any]:
+        """Extract one section from a 10-K, 10-Q, or 20-F filing.
 
         Returns {"text", "metadata", "found"} where metadata includes the
         accession_number — the stable key for future database caching.
@@ -311,9 +361,13 @@ class SECDataRetrieval:
                 "3" legal proceedings, "7" MD&A, "7A" market risk
           10-Q: "1A" risk factors, "2" MD&A, "3" market risk,
                 "4" controls, "5" other information
+          20-F: "1A" risk factors (via .risk_factors),
+                "7" MD&A (via .management_discussion)
         """
         try:
-            if form == "10-K":
+            if form == "20-F":
+                return self._get_twentyf_section(item)
+            elif form == "10-K":
                 filing_obj = self.get_tenk()
                 metadata = self._tenk_metadata
                 key = _TENK_ITEM_KEYS.get(item)
@@ -343,12 +397,49 @@ class SECDataRetrieval:
         except Exception as e:
             return {"text": f"Error extracting {item} from {form}: {e}", "metadata": {}, "found": False}
 
-    def get_mda_raw(self, form: Literal["10-K", "10-Q"] = "10-K") -> Dict[str, Any]:
-        """MD&A: Item 7 from 10-K, Item 2 from 10-Q."""
-        return self.get_section(form, "7" if form == "10-K" else "2")
+    def _get_twentyf_section(self, item: str) -> Dict[str, Any]:
+        """Extract a section from a 20-F filing using named accessors.
 
-    def get_risk_factors_raw(self, form: Literal["10-K", "10-Q"] = "10-K") -> Dict[str, Any]:
-        """Risk Factors: Item 1A in both forms."""
+        edgartools' TwentyF class uses property accessors rather than
+        bracket-style item keys. We map the same item codes used for
+        10-K (e.g., "1A" for risk factors, "7" for MD&A) to the
+        corresponding TwentyF properties.
+        """
+        # Map 10-K item codes to TwentyF named properties
+        _TWENTYF_ACCESSOR_MAP = {
+            "1A": "risk_factors",
+            "7": "management_discussion",
+            "1": "business",
+        }
+
+        accessor = _TWENTYF_ACCESSOR_MAP.get(item)
+        if accessor is None:
+            return {
+                "text": f"Item '{item}' not supported for 20-F",
+                "metadata": self._twentyf_metadata.to_dict() if self._twentyf_metadata else {},
+                "found": False,
+            }
+
+        try:
+            obj = self.get_twentyf()
+            metadata = self._twentyf_metadata
+            text = getattr(obj, accessor, None)
+            found = text is not None and bool(str(text).strip())
+
+            return {
+                "text": str(text) if found else f"Section {accessor} not found in 20-F filing",
+                "metadata": metadata.to_dict() if metadata else {},
+                "found": found,
+            }
+        except Exception as e:
+            return {"text": f"Error extracting {item} from 20-F: {e}", "metadata": {}, "found": False}
+
+    def get_mda_raw(self, form: Literal["10-K", "10-Q", "20-F"] = "10-K") -> Dict[str, Any]:
+        """MD&A: Item 7 from 10-K/20-F, Item 2 from 10-Q."""
+        return self.get_section(form, "7" if form in ("10-K", "20-F") else "2")
+
+    def get_risk_factors_raw(self, form: Literal["10-K", "10-Q", "20-F"] = "10-K") -> Dict[str, Any]:
+        """Risk Factors: Item 1A in all forms."""
         return self.get_section(form, "1A")
 
     def get_business_raw(self) -> Dict[str, Any]:
