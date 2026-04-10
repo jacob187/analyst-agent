@@ -75,6 +75,8 @@
   function navigateToAbout() { currentPage = 'about'; closeMenu(); }
   function navigateToMain() {
     currentPage = 'main';
+    currentTicker = null;
+    continuingSessionId = null;
     viewingSessionId = null;
     viewingSessionTicker = null;
     closeMenu();
@@ -142,21 +144,31 @@
 
   async function handleTickerSubmit(event: CustomEvent<string>) {
     const ticker = event.detail.toUpperCase();
-    currentTicker = ticker;
 
+    // Resolve the session BEFORE setting currentTicker. Setting
+    // currentTicker while currentPage is still 'main' would briefly
+    // render the terminal-layout else-branch (StockChart + ChatWindow),
+    // which mounts components, fires network requests, and opens a
+    // WebSocket — all of which get immediately destroyed when
+    // currentPage flips to 'company-profile' a few ms later.
+    let resumeSessionId: string | null = null;
     try {
       const res = await fetch(`${API_BASE}/sessions/by-ticker/${ticker}`);
       if (res.ok) {
         const data = await res.json();
         if (data.session) {
-          continuingSessionId = data.session.id;
-          currentPage = 'continue-session';
-          return;
+          resumeSessionId = data.session.id;
         }
       }
     } catch (e) {
       console.error('Failed to check for existing session:', e);
     }
+
+    // Set all three state vars in one synchronous batch so Svelte
+    // only triggers a single re-render with the correct page.
+    continuingSessionId = resumeSessionId;
+    currentTicker = ticker;
+    currentPage = 'company-profile';
   }
 
   function resetSession() {
@@ -316,7 +328,7 @@
         {tavilyApiKey}
         modelId={selectedModelId}
         sessionId={continuingSessionId}
-        on:back={navigateToWatchlist}
+        on:back={navigateToMain}
       />
     {:else if currentPage === 'history'}
       <div class="history-section">
