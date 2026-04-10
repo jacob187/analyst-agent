@@ -60,7 +60,7 @@
   async function loadExistingMessages() {
     try {
       const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      const response = await fetch(`${apiBase}/sessions/${sessionId}/messages`);
+      const response = await fetch(`${apiBase}/sessions/${sessionId}/messages?ticker=${encodeURIComponent(ticker)}`);
       if (response.ok) {
         const data = await response.json();
         messages = data.messages.map((m: { role: string; content: string }) => ({

@@ -1,9 +1,9 @@
 """Session REST endpoints."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from api.db import (
-    get_or_create_session, get_session_by_ticker,
+    get_or_create_session, get_session, get_session_by_ticker,
     get_sessions, get_session_messages, delete_session,
 )
 
@@ -23,14 +23,34 @@ async def get_session_for_ticker(ticker: str):
     return {"session": session}
 
 
+async def _validate_session_ticker(session_id: str, ticker: str) -> dict:
+    """Verify that the session exists and belongs to the given ticker.
+
+    Prevents IDOR — without this check a caller could supply any session_id
+    and read/delete another ticker's conversation history.
+    """
+    session = await get_session(session_id)
+    if session is None or session["ticker"].upper() != ticker.upper():
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session
+
+
 @router.get("/sessions/{session_id}/messages")
-async def get_messages(session_id: str):
+async def get_messages(
+    session_id: str,
+    ticker: str = Query(..., description="Ticker that owns this session (IDOR guard)"),
+):
+    await _validate_session_ticker(session_id, ticker)
     messages = await get_session_messages(session_id)
     return {"messages": messages}
 
 
 @router.delete("/sessions/{session_id}")
-async def remove_session(session_id: str):
+async def remove_session(
+    session_id: str,
+    ticker: str = Query(..., description="Ticker that owns this session (IDOR guard)"),
+):
+    await _validate_session_ticker(session_id, ticker)
     deleted = await delete_session(session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found")

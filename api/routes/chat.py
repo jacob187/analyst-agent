@@ -75,6 +75,15 @@ async def chat(websocket: WebSocket, ticker: str):
             session_id = await get_or_create_session(ticker, model=model_id)
 
         session = await get_session(session_id)
+
+        # Validate that the session belongs to the ticker in the URL.
+        # Without this check, a client could supply any session_id and
+        # read another ticker's full conversation history (IDOR).
+        if session is None or session["ticker"].upper() != ticker.upper():
+            await websocket.send_json({"type": "error", "message": "Invalid session."})
+            await websocket.close()
+            return
+
         all_messages = await get_session_messages(session_id)
         conversation_history = build_context_from_session(session, all_messages)
 

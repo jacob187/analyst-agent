@@ -68,7 +68,7 @@
 
     try {
       const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      const response = await fetch(`${apiBase}/sessions/${session.id}`, {
+      const response = await fetch(`${apiBase}/sessions/${session.id}?ticker=${encodeURIComponent(session.ticker)}`, {
         method: 'DELETE'
       });
       if (!response.ok) throw new Error('Failed to delete session');
