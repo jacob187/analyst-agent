@@ -56,6 +56,10 @@ async def init_db():
         CREATE INDEX IF NOT EXISTS idx_messages_session
         ON messages(session_id)
     """)
+    await db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_sessions_created
+        ON sessions(created_at DESC)
+    """)
     # NOTE: settings table removed — API keys now live in browser localStorage
     # and are sent per-request (WebSocket auth message or request headers).
     await db.execute("""
