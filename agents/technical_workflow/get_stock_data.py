@@ -123,6 +123,84 @@ class YahooFinanceDataRetrieval:
             print(f"Error fetching live price for {self.ticker}: {e}")
             return {}
 
+    def get_company_profile(self) -> Dict[str, Any]:
+        """Return a curated subset of company info for dashboard display.
+
+        Picks only the fields relevant for a company overview card —
+        avoids exposing the full 100+ field yfinance .info dict which
+        contains unstable/undocumented keys.
+
+        Returns:
+            Dict with company metadata and key financial metrics,
+            or empty dict on error.
+        """
+        _PROFILE_FIELDS = {
+            "shortName", "sector", "industry", "country", "website",
+            "longBusinessSummary", "fullTimeEmployees",
+            "marketCap", "trailingPE", "forwardPE", "priceToBook",
+            "fiftyTwoWeekHigh", "fiftyTwoWeekLow", "dividendYield", "beta",
+        }
+        try:
+            info = self.yf_ticker.info
+            return {k: info[k] for k in _PROFILE_FIELDS if k in info}
+        except Exception as e:
+            print(f"Error retrieving company profile for {self.ticker}: {e}")
+            return {}
+
+    def get_earnings_calendar(self) -> Dict[str, Any]:
+        """Return upcoming earnings date and analyst estimates.
+
+        yfinance's .calendar property is inconsistent — it returns a
+        DataFrame for some tickers and a dict for others, and may be
+        entirely absent. This method normalises all cases into a simple
+        dict.
+
+        Returns:
+            Dict with 'earnings_date', 'earnings_average', 'revenue_average'
+            (all optional), or empty dict if unavailable.
+        """
+        try:
+            cal = self.yf_ticker.calendar
+            if cal is None:
+                return {}
+
+            # yfinance sometimes returns a DataFrame, sometimes a dict
+            if isinstance(cal, pd.DataFrame):
+                cal = cal.to_dict()
+                # DataFrame.to_dict() wraps values in {0: value} — unwrap
+                # Guard against empty dicts which yfinance occasionally returns
+                cal = {k: (list(v.values())[0] if isinstance(v, dict) and v else v)
+                       for k, v in cal.items()}
+
+            result: Dict[str, Any] = {}
+
+            # Earnings date — may be a Timestamp, list of Timestamps, or string
+            earnings_date = cal.get("Earnings Date")
+            if isinstance(earnings_date, list) and earnings_date:
+                earnings_date = earnings_date[0]
+            if isinstance(earnings_date, pd.Timestamp):
+                result["earnings_date"] = earnings_date.strftime("%Y-%m-%d")
+            elif earnings_date is not None:
+                result["earnings_date"] = str(earnings_date)
+
+            for src_key, dst_key in [
+                ("Earnings Average", "earnings_average"),
+                ("Revenue Average", "revenue_average"),
+                ("Earnings High", "earnings_high"),
+                ("Earnings Low", "earnings_low"),
+            ]:
+                val = cal.get(src_key)
+                if val is not None:
+                    try:
+                        result[dst_key] = round(float(val), 4)
+                    except (TypeError, ValueError):
+                        pass
+
+            return result
+        except Exception as e:
+            print(f"Error retrieving earnings calendar for {self.ticker}: {e}")
+            return {}
+
     def get_info(self) -> Dict[str, Any]:
         """
         Get company information from Yahoo Finance.
