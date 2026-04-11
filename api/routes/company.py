@@ -16,7 +16,9 @@ import re
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from collections import defaultdict
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from api.dependencies import ApiKeys, get_api_keys
@@ -32,6 +34,14 @@ _TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,10}$")
 _profile_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _profile_locks: dict[str, asyncio.Lock] = {}
 _PROFILE_CACHE_TTL = 300  # 5 minutes
+
+# Per-IP concurrency limiter for SSE streams.
+# Each stream holds up to 6 LLM calls — capping concurrent streams per IP
+# prevents a single client from exhausting the thread pool or burning API credits.
+_MAX_CONCURRENT_STREAMS = 2
+_stream_semaphores: dict[str, asyncio.Semaphore] = defaultdict(
+    lambda: asyncio.Semaphore(_MAX_CONCURRENT_STREAMS)
+)
 
 
 def _build_profile(ticker: str) -> dict[str, Any]:
@@ -125,7 +135,9 @@ def _build_profile(ticker: str) -> dict[str, Any]:
         "beta": company.get("beta"),
     }
 
-    return {
+    # Round-trip through JSON inside the thread (not on the event loop)
+    # to guarantee serializability — numpy floats, Timestamps, etc.
+    raw = {
         "ticker": ticker,
         "company": company_metadata,
         "metrics": metrics,
@@ -135,6 +147,7 @@ def _build_profile(ticker: str) -> dict[str, Any]:
         "patterns": patterns,
         "regime": regime,
     }
+    return json.loads(json.dumps(raw, default=str))
 
 
 @router.get("/{ticker}/profile")
@@ -162,11 +175,9 @@ async def get_company_profile(ticker: str):
                 headers={"Cache-Control": f"public, max-age={_PROFILE_CACHE_TTL}"},
             )
 
-        # Run synchronous data fetching in a thread to avoid blocking the event loop
-        raw_payload = await asyncio.to_thread(_build_profile, ticker)
-
-        # Round-trip through JSON to guarantee serializability (numpy floats, etc.)
-        payload = json.loads(json.dumps(raw_payload, default=str))
+        # Run synchronous data fetching in a thread to avoid blocking the event loop.
+        # _build_profile handles JSON round-trip internally for numpy/Timestamp safety.
+        payload = await asyncio.to_thread(_build_profile, ticker)
         _profile_cache[ticker] = (time.monotonic(), payload)
 
     return JSONResponse(
@@ -448,61 +459,59 @@ async def get_company_filings(
             logger.error("[%s] LLM FAILED %s/%s: %s", ticker, form_type, analysis_type, e)
             return None
 
-    response: dict[str, Any] = {"ticker": ticker}
+    # Build all analysis coroutines upfront so they can run in parallel.
+    # Each entry is (section_key, analysis_key, coroutine).
+    analysis_tasks: list[tuple[str, str, Any]] = []
 
-    # --- 10-K analyses ---
     if "tenk" in filing_data:
         tenk = filing_data["tenk"]
-        accession = tenk["metadata"].get("accession", "")
-        tenk_result: dict[str, Any] = {"metadata": tenk["metadata"]}
+        acc = tenk["metadata"].get("accession", "")
+        for atype, raw_key in [("risk_10k", "risk_raw"), ("mda_10k", "mda_raw")]:
+            analysis_tasks.append(("tenk", atype, _cached_analysis("10-K", acc, atype, tenk[raw_key])))
 
-        for analysis_type, raw_key in [
-            ("risk_10k", "risk_raw"),
-            ("mda_10k", "mda_raw"),
-        ]:
-            result = await _cached_analysis("10-K", accession, analysis_type, tenk[raw_key])
-            if result is not None:
-                tenk_result[analysis_type] = result
-
-        # Balance sheet (uses both 10-K and 10-Q data)
         balance_input: dict[str, Any] = {"tenk": tenk.get("balance_sheet_raw", {})}
         if "tenq" in filing_data:
             tenq_bs = filing_data["tenq"].get("balance_sheet_raw")
             if tenq_bs:
                 balance_input["tenq"] = tenq_bs
-        result = await _cached_analysis("10-K", accession, "balance", balance_input)
-        if result is not None:
-            tenk_result["balance"] = result
+        analysis_tasks.append(("tenk", "balance", _cached_analysis("10-K", acc, "balance", balance_input)))
 
-        response["tenk"] = tenk_result
-
-    # --- 10-Q analyses ---
     if "tenq" in filing_data:
         tenq = filing_data["tenq"]
-        accession = tenq["metadata"].get("accession", "")
-        tenq_result: dict[str, Any] = {"metadata": tenq["metadata"]}
+        acc = tenq["metadata"].get("accession", "")
+        for atype, raw_key in [("risk_10q", "risk_raw"), ("mda_10q", "mda_raw")]:
+            analysis_tasks.append(("tenq", atype, _cached_analysis("10-Q", acc, atype, tenq[raw_key])))
 
-        for analysis_type, raw_key in [
-            ("risk_10q", "risk_raw"),
-            ("mda_10q", "mda_raw"),
-        ]:
-            result = await _cached_analysis("10-Q", accession, analysis_type, tenq[raw_key])
-            if result is not None:
-                tenq_result[analysis_type] = result
-
-        response["tenq"] = tenq_result
-
-    # --- 8-K earnings ---
     earnings_raw = filing_data.get("earnings_raw", {})
     if earnings_raw.get("has_earnings"):
-        accession = earnings_raw.get("metadata", {}).get("accession", "")
-        earnings_analysis = await _cached_analysis("8-K", accession, "earnings", earnings_raw)
-        response["earnings"] = {
-            "has_earnings": True,
-            "metadata": earnings_raw.get("metadata", {}),
-            "analysis": earnings_analysis,
-        }
-    else:
+        acc = earnings_raw.get("metadata", {}).get("accession", "")
+        analysis_tasks.append(("earnings", "analysis", _cached_analysis("8-K", acc, "earnings", earnings_raw)))
+
+    # Run all LLM analyses concurrently — on cache hit they return instantly,
+    # on cache miss the LLM calls run in parallel threads via asyncio.to_thread.
+    results = await asyncio.gather(*(coro for _, _, coro in analysis_tasks))
+
+    # Assemble response from parallel results
+    response: dict[str, Any] = {"ticker": ticker}
+
+    if "tenk" in filing_data:
+        response["tenk"] = {"metadata": filing_data["tenk"]["metadata"]}
+    if "tenq" in filing_data:
+        response["tenq"] = {"metadata": filing_data["tenq"]["metadata"]}
+
+    for (section, key, _), result in zip(analysis_tasks, results):
+        if result is None:
+            continue
+        if section in ("tenk", "tenq"):
+            response[section][key] = result
+        elif section == "earnings":
+            response["earnings"] = {
+                "has_earnings": True,
+                "metadata": earnings_raw.get("metadata", {}),
+                "analysis": result,
+            }
+
+    if "earnings" not in response:
         response["earnings"] = {
             "has_earnings": False,
             "reason": earnings_raw.get("reason", "No earnings data available"),
@@ -514,14 +523,15 @@ async def get_company_filings(
 @router.get("/{ticker}/filings/stream")
 async def stream_company_filings(
     ticker: str,
+    request: Request,
     keys: ApiKeys = Depends(get_api_keys),
 ):
     """Stream SEC filing analysis as Server-Sent Events.
 
     Emits progress events as each LLM call starts/completes, then a
-    ``section`` event with the full analysis payload.  Allows the frontend
-    to render sections incrementally rather than waiting for all 6 LLM
-    calls to finish.
+    ``section`` event with the full analysis payload.  All LLM analyses
+    run concurrently, so wall-clock time equals the slowest single call
+    rather than the sum of all calls.
 
     Event shapes::
 
@@ -559,76 +569,112 @@ async def stream_company_filings(
             detail="SEC header required (set X-Sec-Header or SEC_HEADER env var)",
         )
 
+    # Per-IP concurrency guard — prevents a single client from opening
+    # many concurrent streams and exhausting the thread pool or API credits.
+    client_ip = request.client.host if request.client else "unknown"
+    semaphore = _stream_semaphores[client_ip]
+    if semaphore.locked():
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many concurrent filing streams (max {_MAX_CONCURRENT_STREAMS})",
+        )
+
     async def generate():
-        # Step 1: Fetch raw filings from EDGAR
-        yield _sse({"type": "progress", "step": "edgar_fetch", "status": "fetching"})
+        # Acquire a concurrency slot for the duration of this stream.
+        # Released when the generator finishes (normal exit or client disconnect).
+        await semaphore.acquire()
         try:
-            t0 = time.monotonic()
-            filing_data = await asyncio.to_thread(_fetch_filing_data, ticker, sec_header)
-            logger.info("[%s] EDGAR fetch complete (%.1fs)", ticker, time.monotonic() - t0)
+            # Step 1: Fetch raw filings from EDGAR
+            yield _sse({"type": "progress", "step": "edgar_fetch", "status": "fetching"})
+            try:
+                t0 = time.monotonic()
+                filing_data = await asyncio.to_thread(_fetch_filing_data, ticker, sec_header)
+                logger.info("[%s] EDGAR fetch complete (%.1fs)", ticker, time.monotonic() - t0)
+                yield _sse({
+                    "type": "progress",
+                    "step": "edgar_fetch",
+                    "status": "complete",
+                    "duration": round(time.monotonic() - t0, 1),
+                })
+            except Exception as e:
+                logger.error("[%s] EDGAR fetch failed: %s", ticker, e)
+                yield _sse({"type": "error", "message": "Failed to fetch filings from EDGAR."})
+                return
+
+            # Emit metadata immediately so the frontend can render section headers
+            earnings_raw = filing_data.get("earnings_raw", {})
             yield _sse({
-                "type": "progress",
-                "step": "edgar_fetch",
-                "status": "complete",
-                "duration": round(time.monotonic() - t0, 1),
+                "type": "metadata",
+                "tenk_metadata": filing_data.get("tenk", {}).get("metadata"),
+                "tenq_metadata": filing_data.get("tenq", {}).get("metadata"),
+                "earnings_has_earnings": earnings_raw.get("has_earnings", False),
+                "earnings_metadata": earnings_raw.get("metadata") if earnings_raw.get("has_earnings") else None,
             })
-        except Exception as e:
-            logger.error("[%s] EDGAR fetch failed: %s", ticker, e)
-            yield _sse({"type": "error", "message": "Failed to fetch filings from EDGAR."})
-            return
 
-        # Emit metadata immediately so the frontend can render section headers
-        earnings_raw = filing_data.get("earnings_raw", {})
-        yield _sse({
-            "type": "metadata",
-            "tenk_metadata": filing_data.get("tenk", {}).get("metadata"),
-            "tenq_metadata": filing_data.get("tenq", {}).get("metadata"),
-            "earnings_has_earnings": earnings_raw.get("has_earnings", False),
-            "earnings_metadata": earnings_raw.get("metadata") if earnings_raw.get("has_earnings") else None,
-        })
+            # Run all LLM sections concurrently using a shared queue.
+            # Each task pushes SSE events (progress + section) to the queue
+            # as they happen; the outer generator yields them to the client
+            # in real time.  This cuts wall-clock time from the *sum* of all
+            # LLM calls (~90s worst case) to the *max* of them (~15s).
+            queue: asyncio.Queue[str | None] = asyncio.Queue()
 
-        # Helper: iterate the section generator, forward SSE strings, yield section event
-        async def run(form_type: str, accession: str, analysis_type: str, raw_data: dict):
-            result = None
-            async for item in _stream_section(form_type, accession, analysis_type, raw_data, ticker, model.id, api_key):
-                if isinstance(item, tuple):
-                    result = item[1]
-                else:
-                    yield item  # SSE progress string — forward to client
-            if result is not None:
-                yield _sse({"type": "section", "form": form_type, "key": analysis_type, "data": result})
+            async def section_task(form_type: str, accession: str, analysis_type: str, raw_data: dict):
+                """Run one analysis and push events to the shared queue."""
+                result = None
+                async for item in _stream_section(form_type, accession, analysis_type, raw_data, ticker, model.id, api_key):
+                    if isinstance(item, tuple):
+                        result = item[1]
+                    else:
+                        await queue.put(item)
+                if result is not None:
+                    await queue.put(_sse({"type": "section", "form": form_type, "key": analysis_type, "data": result}))
 
-        # Step 2: 10-K analyses
-        if "tenk" in filing_data:
-            tenk = filing_data["tenk"]
-            accession = tenk["metadata"].get("accession", "")
-            for analysis_type, raw_key in [("risk_10k", "risk_raw"), ("mda_10k", "mda_raw")]:
-                async for event in run("10-K", accession, analysis_type, tenk[raw_key]):
-                    yield event
+            # Collect all independent section tasks
+            tasks: list[Any] = []
 
-            balance_input: dict[str, Any] = {"tenk": tenk.get("balance_sheet_raw", {})}
+            if "tenk" in filing_data:
+                tenk = filing_data["tenk"]
+                accession = tenk["metadata"].get("accession", "")
+                for analysis_type, raw_key in [("risk_10k", "risk_raw"), ("mda_10k", "mda_raw")]:
+                    tasks.append(section_task("10-K", accession, analysis_type, tenk[raw_key]))
+                balance_input: dict[str, Any] = {"tenk": tenk.get("balance_sheet_raw", {})}
+                if "tenq" in filing_data:
+                    tenq_bs = filing_data["tenq"].get("balance_sheet_raw")
+                    if tenq_bs:
+                        balance_input["tenq"] = tenq_bs
+                tasks.append(section_task("10-K", accession, "balance", balance_input))
+
             if "tenq" in filing_data:
-                tenq_bs = filing_data["tenq"].get("balance_sheet_raw")
-                if tenq_bs:
-                    balance_input["tenq"] = tenq_bs
-            async for event in run("10-K", accession, "balance", balance_input):
-                yield event
+                tenq = filing_data["tenq"]
+                accession = tenq["metadata"].get("accession", "")
+                for analysis_type, raw_key in [("risk_10q", "risk_raw"), ("mda_10q", "mda_raw")]:
+                    tasks.append(section_task("10-Q", accession, analysis_type, tenq[raw_key]))
 
-        # Step 3: 10-Q analyses
-        if "tenq" in filing_data:
-            tenq = filing_data["tenq"]
-            accession = tenq["metadata"].get("accession", "")
-            for analysis_type, raw_key in [("risk_10q", "risk_raw"), ("mda_10q", "mda_raw")]:
-                async for event in run("10-Q", accession, analysis_type, tenq[raw_key]):
+            if earnings_raw.get("has_earnings"):
+                accession = earnings_raw.get("metadata", {}).get("accession", "")
+                tasks.append(section_task("8-K", accession, "earnings", earnings_raw))
+
+            if tasks:
+                async def run_all():
+                    """Gather all section tasks, then send sentinel to signal completion."""
+                    await asyncio.gather(*tasks)
+                    await queue.put(None)  # sentinel
+
+                runner = asyncio.create_task(run_all())
+
+                # Yield events as they arrive from the concurrent tasks
+                while True:
+                    event = await queue.get()
+                    if event is None:
+                        break
                     yield event
 
-        # Step 4: 8-K earnings
-        if earnings_raw.get("has_earnings"):
-            accession = earnings_raw.get("metadata", {}).get("accession", "")
-            async for event in run("8-K", accession, "earnings", earnings_raw):
-                yield event
+                # Propagate any unexpected errors from the gather
+                await runner
 
-        yield _sse({"type": "complete"})
+            yield _sse({"type": "complete"})
+        finally:
+            semaphore.release()
 
     return StreamingResponse(
         generate(),
