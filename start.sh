@@ -28,9 +28,9 @@ if [ ! -d ".venv" ]; then
     uv sync
 fi
 
-if [ ! -d "frontend/node_modules" ]; then
+if [ ! -d "frontend-next/node_modules" ]; then
     echo -e "${BLUE}Installing frontend dependencies...${NC}"
-    cd frontend && npm install && cd ..
+    cd frontend-next && npm install && cd ..
 fi
 
 # Start backend in background
@@ -42,8 +42,8 @@ BACKEND_PID=$!
 sleep 2
 
 # Start frontend
-echo -e "${GREEN}Starting frontend on http://localhost:5173${NC}"
-cd frontend && npm run dev &
+echo -e "${GREEN}Starting frontend on http://localhost:3000${NC}"
+cd frontend-next && npm run dev &
 FRONTEND_PID=$!
 
 # Handle cleanup on exit
