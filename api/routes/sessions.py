@@ -4,15 +4,32 @@ from fastapi import APIRouter, HTTPException, Query
 
 from api.db import (
     get_or_create_session, get_session, get_session_by_ticker,
-    get_sessions, get_session_messages, delete_session,
+    get_tickers, get_sessions_for_ticker,
+    get_session_messages, delete_session,
 )
 
 router = APIRouter()
 
 
+@router.get("/tickers")
+async def list_tickers(limit: int = 50):
+    """Return distinct tickers with session count — no session IDs exposed."""
+    tickers = await get_tickers(limit)
+    return {"tickers": tickers}
+
+
 @router.get("/sessions")
-async def list_sessions(limit: int = 50):
-    sessions = await get_sessions(limit)
+async def list_sessions(
+    ticker: str = Query(..., description="Return sessions for this ticker only"),
+    limit: int = 50,
+):
+    """Return sessions for a specific ticker.
+
+    Requiring the caller to supply a known ticker prevents enumeration:
+    session IDs are only revealed after ownership (knowing the ticker) is
+    established, so an attacker cannot discover IDs for unknown tickers.
+    """
+    sessions = await get_sessions_for_ticker(ticker, limit)
     return {"sessions": sessions}
 
 

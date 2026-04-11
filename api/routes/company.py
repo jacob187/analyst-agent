@@ -11,6 +11,7 @@ trigger fresh analysis without TTL.
 
 import asyncio
 import json
+import logging
 import re
 import time
 from typing import Any
@@ -19,6 +20,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
 from api.dependencies import ApiKeys, get_api_keys
+
+logger = logging.getLogger("analyst.filings")
 
 router = APIRouter(prefix="/api/company")
 
@@ -354,7 +357,10 @@ async def get_company_filings(
         )
 
     # Step 1: Fetch raw filing data from EDGAR (no LLM, ~1-3s)
+    logger.info("[%s] Fetching raw filings from EDGAR...", ticker)
+    t0 = time.monotonic()
     filing_data = await asyncio.to_thread(_fetch_filing_data, ticker, sec_header)
+    logger.info("[%s] EDGAR fetch complete (%.1fs)", ticker, time.monotonic() - t0)
 
     # Step 2: For each filing section, check DB cache then run LLM if needed
     from api.db import get_filing_analysis, save_filing_analysis
@@ -366,7 +372,10 @@ async def get_company_filings(
         """Check DB cache, run LLM on miss, save result. Returns None on error."""
         cached = await get_filing_analysis(ticker, form_type, accession, analysis_type)
         if cached:
+            logger.info("[%s] CACHE HIT  %s/%s (accession: %s)", ticker, form_type, analysis_type, accession)
             return json.loads(cached["analysis_json"])
+        logger.info("[%s] LLM CALL   %s/%s (accession: %s) — calling %s", ticker, form_type, analysis_type, accession, model.id)
+        t_llm = time.monotonic()
         try:
             analysis = await asyncio.to_thread(
                 _run_llm_analysis, ticker, analysis_type,
@@ -375,9 +384,10 @@ async def get_company_filings(
             await save_filing_analysis(
                 ticker, form_type, accession, analysis_type, json.dumps(analysis),
             )
+            logger.info("[%s] LLM DONE   %s/%s (%.1fs) — saved to DB", ticker, form_type, analysis_type, time.monotonic() - t_llm)
             return analysis
         except Exception as e:
-            print(f"LLM analysis failed for {ticker}/{analysis_type}: {e}")
+            logger.error("[%s] LLM FAILED %s/%s: %s", ticker, form_type, analysis_type, e)
             return None
 
     response: dict[str, Any] = {"ticker": ticker}
