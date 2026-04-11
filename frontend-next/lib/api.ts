@@ -6,6 +6,7 @@ import type {
   CompanyProfileResponse,
   EnvKeysResponse,
   FilingsResponse,
+  FilingStreamEvent,
   Message,
   ModelsResponse,
   QuotesResponse,
@@ -77,6 +78,78 @@ export const api = {
       `/api/company/${ticker}/filings`,
       keyHeaders(keys)
     ),
+
+  /**
+   * Stream filing analysis via Server-Sent Events.
+   * Returns an AbortController — call `.abort()` to cancel.
+   *
+   * Using fetch instead of EventSource because EventSource doesn't support
+   * custom request headers (needed for API key forwarding).
+   */
+  filingsStream(
+    ticker: string,
+    keys: ApiKeys,
+    callbacks: {
+      onEvent(event: FilingStreamEvent): void;
+      onError(message: string): void;
+    }
+  ): AbortController {
+    const controller = new AbortController();
+
+    (async () => {
+      let res: Response;
+      try {
+        res = await fetch(`${API_BASE}/api/company/${ticker}/filings/stream`, {
+          headers: keyHeaders(keys),
+          signal: controller.signal,
+        });
+      } catch (err) {
+        if ((err as Error).name !== "AbortError") {
+          callbacks.onError(String(err));
+        }
+        return;
+      }
+
+      if (!res.ok) {
+        callbacks.onError(`API error ${res.status}`);
+        return;
+      }
+
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          // SSE events are separated by double newlines
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() ?? "";
+
+          for (const part of parts) {
+            for (const line of part.split("\n")) {
+              if (line.startsWith("data: ")) {
+                try {
+                  callbacks.onEvent(JSON.parse(line.slice(6)) as FilingStreamEvent);
+                } catch {
+                  // ignore malformed lines
+                }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        if ((err as Error).name !== "AbortError") {
+          callbacks.onError(String(err));
+        }
+      }
+    })();
+
+    return controller;
+  },
 
   // Sessions
   tickers: () =>

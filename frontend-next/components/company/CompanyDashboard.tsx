@@ -14,19 +14,23 @@ import { api } from "@/lib/api";
 import { useApiKeys } from "@/hooks/useApiKeys";
 import { formatCurrency, formatPercent } from "@/lib/utils";
 import { PERIOD_MAP, type Period, type Indicator } from "@/lib/constants";
-import type { CompanyProfileResponse, ChartResponse, FilingsResponse } from "@/types";
+import type { CompanyProfileResponse, ChartResponse, FilingsResponse, FilingProgressEvent } from "@/types";
 
 interface CompanyDashboardProps {
   ticker: string;
+  initialProfile: CompanyProfileResponse | null;
   initialSessionId?: string;
 }
 
-export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardProps) {
+export function CompanyDashboard({
+  ticker,
+  initialProfile,
+  initialSessionId,
+}: CompanyDashboardProps) {
   const { keys, loaded: keysLoaded } = useApiKeys();
 
-  // Profile
-  const [profile, setProfile] = useState<CompanyProfileResponse | null>(null);
-  const [profileLoading, setProfileLoading] = useState(true);
+  // Profile is pre-fetched server-side — no loading state needed
+  const profile = initialProfile;
 
   // Chart
   const [chartData, setChartData] = useState<ChartResponse | null>(null);
@@ -34,55 +38,100 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
   const [period, setPeriod] = useState<Period>("1Y");
   const [indicators, setIndicators] = useState<Set<Indicator>>(new Set(["MA", "RSI"]));
 
-  // Filings — track whether a fetch is in-flight or done
+  // Filings — lazy-loaded on tab activation via SSE stream
   const [filingsData, setFilingsData] = useState<FilingsResponse | null>(null);
   const [filingsLoading, setFilingsLoading] = useState(false);
   const [filingsLoaded, setFilingsLoaded] = useState(false);
-  // ref so the effect closure always sees the current value without re-triggering
+  const [filingsProgress, setFilingsProgress] = useState<FilingProgressEvent[]>([]);
   const filingsLoadedRef = useRef(false);
+  filingsLoadedRef.current = filingsLoaded;
+  const filingsControllerRef = useRef<AbortController | null>(null);
 
-  // Active tab
   const [activeTab, setActiveTab] = useState("overview");
 
-  // Session
-  const [sessionId, setSessionId] = useState<string | undefined>(initialSessionId);
-
-  // Keep ref in sync
-  filingsLoadedRef.current = filingsLoaded;
+  // Session ID — pre-fetched server-side, but may be updated by WebSocket auth
+  const [sessionId] = useState<string | undefined>(initialSessionId);
 
   // keys ref so loadFilings always sends current keys without being a dep
   const keysRef = useRef(keys);
   keysRef.current = keys;
 
-  useEffect(() => {
-    setProfileLoading(true);
-    api.profile(ticker).then(setProfile).catch(() => null).finally(() => setProfileLoading(false));
-  }, [ticker]);
-
   const loadFilings = useCallback(() => {
-    if (filingsLoadedRef.current) return; // already fetching or done
+    if (filingsLoadedRef.current) return;
     setFilingsLoaded(true);
     filingsLoadedRef.current = true;
     setFilingsLoading(true);
-    api
-      .filings(ticker, keysRef.current)
-      .then(setFilingsData)
-      .catch(() => null)
-      .finally(() => setFilingsLoading(false));
+    setFilingsProgress([]);
+
+    filingsControllerRef.current = api.filingsStream(ticker, keysRef.current, {
+      onEvent(event) {
+        if (event.type === "progress") {
+          setFilingsProgress((prev) => {
+            const idx = prev.findIndex((p) => p.step === event.step);
+            if (idx >= 0) {
+              const next = [...prev];
+              next[idx] = event;
+              return next;
+            }
+            return [...prev, event];
+          });
+        } else if (event.type === "metadata") {
+          setFilingsData({
+            ticker,
+            tenk: event.tenk_metadata ? { metadata: event.tenk_metadata } : undefined,
+            tenq: event.tenq_metadata ? { metadata: event.tenq_metadata } : undefined,
+            earnings: event.earnings_has_earnings
+              ? { has_earnings: true, metadata: event.earnings_metadata ?? undefined }
+              : { has_earnings: false },
+          });
+        } else if (event.type === "section") {
+          setFilingsData((prev) => {
+            if (!prev) return prev;
+            if (event.form === "10-K") {
+              return { ...prev, tenk: { ...prev.tenk!, [event.key]: event.data } };
+            }
+            if (event.form === "10-Q") {
+              return { ...prev, tenq: { ...prev.tenq!, [event.key]: event.data } };
+            }
+            if (event.form === "8-K") {
+              return { ...prev, earnings: { ...prev.earnings!, analysis: event.data } };
+            }
+            return prev;
+          });
+        } else if (event.type === "complete" || event.type === "error") {
+          setFilingsLoading(false);
+        }
+      },
+      onError() {
+        setFilingsLoading(false);
+      },
+    });
   }, [ticker]);
 
-  // Auto-fetch filings when the Filings tab becomes active and keys are ready.
-  // This handles both the first visit and returning after navigation (remount).
+  // Abort in-flight SSE stream on unmount
+  useEffect(() => {
+    return () => {
+      filingsControllerRef.current?.abort();
+    };
+  }, []);
+
   useEffect(() => {
     if (activeTab === "filings" && keysLoaded && !filingsLoadedRef.current) {
       loadFilings();
     }
   }, [activeTab, keysLoaded, loadFilings]);
 
-  const loadChart = useCallback((p: Period) => {
-    setChartLoading(true);
-    api.chart(ticker, PERIOD_MAP[p]).then(setChartData).catch(() => null).finally(() => setChartLoading(false));
-  }, [ticker]);
+  const loadChart = useCallback(
+    (p: Period) => {
+      setChartLoading(true);
+      api
+        .chart(ticker, PERIOD_MAP[p])
+        .then(setChartData)
+        .catch(() => null)
+        .finally(() => setChartLoading(false));
+    },
+    [ticker]
+  );
 
   function handlePeriodChange(p: Period) {
     setPeriod(p);
@@ -98,13 +147,6 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
     });
   }
 
-  useEffect(() => {
-    if (initialSessionId) return;
-    api.sessionByTicker(ticker).then((res) => {
-      if (res.session?.id) setSessionId(res.session.id);
-    }).catch(() => null);
-  }, [ticker, initialSessionId]);
-
   const quote = profile?.quote;
   const changePositive = (quote?.change ?? 0) >= 0;
 
@@ -119,18 +161,21 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
           <div>
             <div className="flex items-center gap-2">
               <h1 className="font-display text-2xl font-bold">{ticker}</h1>
-              {profileLoading ? (
-                <Skeleton className="h-5 w-32" />
-              ) : (
-                profile?.company?.name && (
-                  <span className="text-sm text-muted-foreground">{profile.company.name}</span>
-                )
+              {profile?.company?.name && (
+                <span className="text-sm text-muted-foreground">
+                  {profile.company.name}
+                </span>
               )}
             </div>
             {quote && (
               <div className="flex items-center gap-2">
-                <span className="font-display text-lg font-semibold">{formatCurrency(quote.price)}</span>
-                <Badge variant={changePositive ? "default" : "destructive"} className="text-xs">
+                <span className="font-display text-lg font-semibold">
+                  {formatCurrency(quote.price)}
+                </span>
+                <Badge
+                  variant={changePositive ? "default" : "destructive"}
+                  className="text-xs"
+                >
                   {changePositive ? (
                     <TrendingUp className="mr-1 h-3 w-3" />
                   ) : (
@@ -165,11 +210,11 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
         </TabsList>
 
         <TabsContent value="overview" className="mt-4">
-          <OverviewTab data={profile} loading={profileLoading} />
+          <OverviewTab data={profile} loading={false} />
         </TabsContent>
 
         <TabsContent value="filings" className="mt-4">
-          <FilingsTab data={filingsData} loading={filingsLoading} />
+          <FilingsTab data={filingsData} loading={filingsLoading} progressSteps={filingsProgress} />
         </TabsContent>
 
         <TabsContent value="chart" className="mt-4">

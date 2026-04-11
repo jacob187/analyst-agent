@@ -1,138 +1,103 @@
 "use client";
 
-import { useState } from "react";
-import { ExternalLink, ChevronDown, TrendingUp, AlertTriangle } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { Check, FileX2, Loader2, XCircle, Zap } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
-import { cn } from "@/lib/utils";
-import type { FilingsResponse, FilingAnalysis, FilingMetadata } from "@/types";
+import { FilingSection } from "./FilingSection";
+import type { FilingsResponse, FilingProgressEvent } from "@/types";
 
-interface FilingsTabProps {
-  data: FilingsResponse | null;
-  loading: boolean;
-}
+// ─── Step label mapping ────────────────────────────────────────────────────────
 
-function SentimentBadge({ score }: { score?: number }) {
-  if (score == null) return null;
-  const label = score > 0.3 ? "Positive" : score < -0.3 ? "Negative" : "Neutral";
-  const variant =
-    label === "Positive" ? "default" : label === "Negative" ? "destructive" : "secondary";
-  return (
-    <Badge variant={variant} className="text-xs">
-      {label} {score > 0 ? "+" : ""}{score.toFixed(2)}
-    </Badge>
-  );
-}
+const STEP_LABELS: Record<string, string> = {
+  edgar_fetch: "Fetching filings from EDGAR",
+  "10-K/risk_10k": "10-K · Risk Factors",
+  "10-K/mda_10k": "10-K · Management Discussion & Analysis",
+  "10-K/balance": "10-K · Balance Sheet",
+  "10-Q/risk_10q": "10-Q · Risk Factors",
+  "10-Q/mda_10q": "10-Q · MD&A",
+  "8-K/earnings": "8-K · Earnings Analysis",
+};
 
-function FilingSection({
-  title,
-  analysis,
-  metadata,
-}: {
-  title: string;
-  analysis: FilingAnalysis | undefined;
-  metadata?: FilingMetadata;
-}) {
-  const [open, setOpen] = useState(false);
-  if (!analysis) return null;
+// ─── Progress activity log ─────────────────────────────────────────────────────
 
-  const sentiment = analysis.sentiment_score as number | undefined;
-  const summary = analysis.summary as string | undefined;
-  const risks = analysis.risks as string[] | undefined;
-  const outlook = analysis.outlook as string | undefined;
-  const redFlags = analysis.red_flags as string[] | undefined;
+function ProgressRow({ step }: { step: FilingProgressEvent }) {
+  const label = STEP_LABELS[step.step] ?? step.step;
+  const active = step.status === "fetching" || step.status === "processing";
+  const cached = step.status === "cached";
+  const failed = step.status === "failed";
 
   return (
-    <div className="rounded-xl border border-border/60 bg-card overflow-hidden">
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center justify-between px-4 py-3 hover:bg-muted/30 transition-colors"
-      >
-        <div className="flex items-center gap-3">
-          <span className="font-display text-sm font-semibold">{title}</span>
-          {sentiment != null && <SentimentBadge score={sentiment} />}
-          {metadata?.filing_date && (
-            <span className="text-xs text-muted-foreground">
-              {metadata.filing_date}
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          {metadata?.edgar_url && (
-            <a
-              href={metadata.edgar_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              className="text-muted-foreground hover:text-primary transition-colors"
-            >
-              <ExternalLink className="h-3.5 w-3.5" />
-            </a>
-          )}
-          <ChevronDown
-            className={cn("h-4 w-4 text-muted-foreground transition-transform", open && "rotate-180")}
-          />
-        </div>
-      </button>
+    <div className="flex items-center gap-2 text-xs">
+      {active ? (
+        <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
+      ) : failed ? (
+        <XCircle className="h-3 w-3 shrink-0 text-destructive" />
+      ) : cached ? (
+        <Zap className="h-3 w-3 shrink-0 text-blue-400" />
+      ) : (
+        <Check className="h-3 w-3 shrink-0 text-emerald-500" />
+      )}
 
-      {open && (
-        <div className="border-t border-border/40 px-4 pb-4 pt-3 space-y-3">
-          {summary && (
-            <p className="text-sm leading-relaxed text-muted-foreground">{summary}</p>
-          )}
+      <span className={active ? "text-foreground" : "text-muted-foreground"}>
+        {label}
+      </span>
 
-          {risks && risks.length > 0 && (
-            <div>
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Risk Factors
-              </p>
-              <ul className="space-y-1.5">
-                {risks.slice(0, 5).map((r, i) => (
-                  <li key={i} className="flex items-start gap-2 text-xs">
-                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-yellow-500" />
-                    <span>{r}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+      {cached && (
+        <span className="rounded bg-blue-500/10 px-1.5 py-0.5 text-[10px] text-blue-400">
+          cached
+        </span>
+      )}
 
-          {redFlags && redFlags.length > 0 && (
-            <div>
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-destructive">
-                Red Flags
-              </p>
-              <ul className="space-y-1">
-                {redFlags.map((f, i) => (
-                  <li key={i} className="flex items-start gap-2 text-xs text-destructive">
-                    <span>·</span>
-                    <span>{f}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {outlook && (
-            <div className="flex items-start gap-2 rounded-lg bg-primary/5 border border-primary/20 px-3 py-2">
-              <TrendingUp className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
-              <p className="text-xs leading-relaxed">{outlook}</p>
-            </div>
-          )}
-        </div>
+      {step.duration !== undefined && (
+        <span className="ml-auto tabular-nums text-muted-foreground">
+          {step.duration}s
+        </span>
       )}
     </div>
   );
 }
 
-export function FilingsTab({ data, loading }: FilingsTabProps) {
-  if (loading) {
+// ─── Skeleton for a section that's known-pending ───────────────────────────────
+
+function PendingSection({ title }: { title: string }) {
+  return (
+    <div className="rounded-xl border border-border/60 bg-card overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3">
+        <div className="flex items-center gap-3">
+          <span className="font-display text-sm font-semibold text-muted-foreground">
+            {title}
+          </span>
+          <Skeleton className="h-4 w-16 rounded-full" />
+        </div>
+        <Skeleton className="h-4 w-4 rounded" />
+      </div>
+    </div>
+  );
+}
+
+// ─── Main component ────────────────────────────────────────────────────────────
+
+interface FilingsTabProps {
+  data: FilingsResponse | null;
+  loading: boolean;
+  progressSteps: FilingProgressEvent[];
+}
+
+export function FilingsTab({ data, loading, progressSteps }: FilingsTabProps) {
+  // Before metadata arrives, show generic skeletons
+  if (loading && !data) {
     return (
       <div className="space-y-3">
-        {[...Array(3)].map((_, i) => (
-          <Skeleton key={i} className="h-16 rounded-xl" />
-        ))}
+        {progressSteps.length > 0 ? (
+          <div className="rounded-xl border bg-muted/30 p-3 space-y-2">
+            {progressSteps.map((s) => (
+              <ProgressRow key={s.step} step={s} />
+            ))}
+          </div>
+        ) : (
+          [...Array(3)].map((_, i) => (
+            <Skeleton key={i} className="h-16 rounded-xl" />
+          ))
+        )}
       </div>
     );
   }
@@ -141,60 +106,96 @@ export function FilingsTab({ data, loading }: FilingsTabProps) {
 
   return (
     <div className="space-y-3">
-      {/* 10-K */}
+      {/* Activity log — visible while loading, dismissed on complete */}
+      {loading && progressSteps.length > 0 && (
+        <div className="rounded-xl border bg-muted/30 p-3 space-y-2">
+          {progressSteps.map((s) => (
+            <ProgressRow key={s.step} step={s} />
+          ))}
+        </div>
+      )}
+
+      {/* 10-K sections */}
       {data.tenk && (
         <>
           <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
             Annual Report (10-K)
           </p>
-          <FilingSection
-            title="Risk Factors"
-            analysis={data.tenk.risk_10k}
-            metadata={data.tenk.metadata}
-          />
-          <FilingSection
-            title="Management Discussion & Analysis"
-            analysis={data.tenk.mda_10k}
-            metadata={data.tenk.metadata}
-          />
-          <FilingSection
-            title="Balance Sheet Analysis"
-            analysis={data.tenk.balance}
-            metadata={data.tenk.metadata}
-          />
+          {data.tenk.risk_10k ? (
+            <FilingSection
+              title="Risk Factors"
+              analysis={data.tenk.risk_10k}
+              metadata={data.tenk.metadata}
+            />
+          ) : loading ? (
+            <PendingSection title="Risk Factors" />
+          ) : null}
+
+          {data.tenk.mda_10k ? (
+            <FilingSection
+              title="Management Discussion & Analysis"
+              analysis={data.tenk.mda_10k}
+              metadata={data.tenk.metadata}
+            />
+          ) : loading ? (
+            <PendingSection title="Management Discussion & Analysis" />
+          ) : null}
+
+          {data.tenk.balance ? (
+            <FilingSection
+              title="Balance Sheet Analysis"
+              analysis={data.tenk.balance}
+              metadata={data.tenk.metadata}
+            />
+          ) : loading ? (
+            <PendingSection title="Balance Sheet Analysis" />
+          ) : null}
         </>
       )}
 
-      {/* 10-Q */}
+      {/* 10-Q sections */}
       {data.tenq && (
         <>
           <p className="mt-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
             Quarterly Report (10-Q)
           </p>
-          <FilingSection
-            title="Risk Factors"
-            analysis={data.tenq.risk_10q}
-            metadata={data.tenq.metadata}
-          />
-          <FilingSection
-            title="MD&A"
-            analysis={data.tenq.mda_10q}
-            metadata={data.tenq.metadata}
-          />
+          {data.tenq.risk_10q ? (
+            <FilingSection
+              title="Risk Factors"
+              analysis={data.tenq.risk_10q}
+              metadata={data.tenq.metadata}
+            />
+          ) : loading ? (
+            <PendingSection title="Risk Factors" />
+          ) : null}
+
+          {data.tenq.mda_10q ? (
+            <FilingSection
+              title="MD&A"
+              analysis={data.tenq.mda_10q}
+              metadata={data.tenq.metadata}
+            />
+          ) : loading ? (
+            <PendingSection title="MD&A" />
+          ) : null}
         </>
       )}
 
-      {/* 8-K */}
+      {/* 8-K earnings */}
       {data.earnings?.has_earnings && (
         <>
           <p className="mt-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
             Earnings (8-K)
           </p>
-          <FilingSection
-            title="Earnings Analysis"
-            analysis={data.earnings.analysis}
-            metadata={data.earnings.metadata}
-          />
+          {data.earnings.analysis ? (
+            <FilingSection
+              title="Earnings Analysis"
+              analysis={data.earnings.analysis}
+              metadata={data.earnings.metadata}
+            />
+          ) : loading ? (
+            <PendingSection title="Earnings Analysis" />
+          ) : null}
         </>
       )}
     </div>

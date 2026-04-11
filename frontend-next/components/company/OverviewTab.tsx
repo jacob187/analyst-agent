@@ -1,5 +1,3 @@
-"use client";
-
 import { Globe, Users, TrendingUp, TrendingDown } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -104,7 +102,7 @@ export function OverviewTab({ data, loading }: OverviewTabProps) {
                 {company.employees.toLocaleString()} employees
               </span>
             )}
-            {company.website && (
+            {company.website && /^https?:\/\//i.test(company.website) && (
               <a
                 href={company.website}
                 target="_blank"

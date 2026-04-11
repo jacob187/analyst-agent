@@ -17,7 +17,7 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from api.dependencies import ApiKeys, get_api_keys
 
@@ -98,13 +98,19 @@ def _build_profile(ticker: str) -> dict[str, Any]:
     except Exception:
         pass  # Regime is supplementary
 
+    # Sanitise external URL — only allow http(s) schemes to prevent
+    # javascript: URI injection when the frontend renders the link.
+    raw_website = company.get("website") or ""
+    from urllib.parse import urlparse
+    safe_website = raw_website if urlparse(raw_website).scheme in ("http", "https") else None
+
     # Split company dict into "company" (metadata) and "metrics" (financials)
     company_metadata = {
         "name": company.get("shortName"),
         "sector": company.get("sector"),
         "industry": company.get("industry"),
         "country": company.get("country"),
-        "website": company.get("website"),
+        "website": safe_website,
         "summary": company.get("longBusinessSummary"),
         "employees": company.get("fullTimeEmployees"),
     }
@@ -172,6 +178,56 @@ async def get_company_profile(ticker: str):
 # =============================================================================
 # Filings endpoint — LLM-powered SEC analysis with DB-first caching
 # =============================================================================
+
+def _sse(data: dict) -> str:
+    """Format a dict as a single SSE data line."""
+    return f"data: {json.dumps(data)}\n\n"
+
+
+async def _stream_section(
+    form_type: str,
+    accession: str,
+    analysis_type: str,
+    raw_data: dict[str, Any],
+    ticker: str,
+    model_id: str,
+    api_key: str,
+):
+    """Async generator for one filing analysis section.
+
+    Yields SSE event strings for progress updates, then yields a
+    ``("result", analysis_or_None)`` sentinel as the final item so the
+    caller can capture the data without breaking the yield chain.
+    """
+    from api.db import get_filing_analysis, save_filing_analysis
+
+    step = f"{form_type}/{analysis_type}"
+    cached = await get_filing_analysis(ticker, form_type, accession, analysis_type)
+    if cached:
+        logger.info("[%s] CACHE HIT  %s/%s", ticker, form_type, analysis_type)
+        yield _sse({"type": "progress", "step": step, "status": "cached"})
+        yield ("result", json.loads(cached["analysis_json"]))
+        return
+
+    logger.info("[%s] LLM CALL   %s/%s — calling %s", ticker, form_type, analysis_type, model_id)
+    yield _sse({"type": "progress", "step": step, "status": "processing"})
+    t0 = time.monotonic()
+    try:
+        analysis = await asyncio.to_thread(
+            _run_llm_analysis, ticker, analysis_type, raw_data, model_id, api_key,
+        )
+        await save_filing_analysis(
+            ticker, form_type, accession, analysis_type, json.dumps(analysis),
+        )
+        duration = round(time.monotonic() - t0, 1)
+        logger.info("[%s] LLM DONE   %s/%s (%.1fs)", ticker, form_type, analysis_type, duration)
+        yield _sse({"type": "progress", "step": step, "status": "done", "duration": duration})
+        yield ("result", analysis)
+    except Exception as e:
+        logger.error("[%s] LLM FAILED %s/%s: %s", ticker, form_type, analysis_type, e)
+        yield _sse({"type": "progress", "step": step, "status": "failed"})
+        yield ("result", None)
+
 
 def _build_edgar_url(cik: str, accession: str) -> str:
     """Construct a URL to the filing on SEC EDGAR.
@@ -451,3 +507,129 @@ async def get_company_filings(
         }
 
     return JSONResponse(content=response)
+
+
+@router.get("/{ticker}/filings/stream")
+async def stream_company_filings(
+    ticker: str,
+    keys: ApiKeys = Depends(get_api_keys),
+):
+    """Stream SEC filing analysis as Server-Sent Events.
+
+    Emits progress events as each LLM call starts/completes, then a
+    ``section`` event with the full analysis payload.  Allows the frontend
+    to render sections incrementally rather than waiting for all 6 LLM
+    calls to finish.
+
+    Event shapes::
+
+        {"type": "progress", "step": "edgar_fetch",       "status": "fetching"}
+        {"type": "progress", "step": "edgar_fetch",       "status": "complete", "duration": 8.3}
+        {"type": "metadata", "tenk_metadata": {...},      "tenq_metadata": {...}, ...}
+        {"type": "progress", "step": "10-K/risk_10k",     "status": "processing"}
+        {"type": "progress", "step": "10-K/risk_10k",     "status": "done",  "duration": 14.1}
+        {"type": "progress", "step": "10-K/risk_10k",     "status": "cached"}
+        {"type": "section",  "form": "10-K", "key": "risk_10k", "data": {...}}
+        {"type": "complete"}
+        {"type": "error",    "message": "..."}
+    """
+    if not _TICKER_RE.match(ticker):
+        raise HTTPException(status_code=422, detail="Invalid ticker symbol")
+
+    ticker = ticker.upper()
+
+    from agents.model_registry import get_model, get_default_model
+
+    model_id = keys.model_id or get_default_model().id
+    model = get_model(model_id) or get_default_model()
+    try:
+        api_key = keys.require_provider_key(model.provider)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{model.provider.replace('_', ' ').title()} API key required for filing analysis",
+        )
+
+    sec_header = keys.sec_header
+    if not sec_header:
+        raise HTTPException(
+            status_code=400,
+            detail="SEC header required (set X-Sec-Header or SEC_HEADER env var)",
+        )
+
+    async def generate():
+        # Step 1: Fetch raw filings from EDGAR
+        yield _sse({"type": "progress", "step": "edgar_fetch", "status": "fetching"})
+        try:
+            t0 = time.monotonic()
+            filing_data = await asyncio.to_thread(_fetch_filing_data, ticker, sec_header)
+            logger.info("[%s] EDGAR fetch complete (%.1fs)", ticker, time.monotonic() - t0)
+            yield _sse({
+                "type": "progress",
+                "step": "edgar_fetch",
+                "status": "complete",
+                "duration": round(time.monotonic() - t0, 1),
+            })
+        except Exception as e:
+            logger.error("[%s] EDGAR fetch failed: %s", ticker, e)
+            yield _sse({"type": "error", "message": "Failed to fetch filings from EDGAR."})
+            return
+
+        # Emit metadata immediately so the frontend can render section headers
+        earnings_raw = filing_data.get("earnings_raw", {})
+        yield _sse({
+            "type": "metadata",
+            "tenk_metadata": filing_data.get("tenk", {}).get("metadata"),
+            "tenq_metadata": filing_data.get("tenq", {}).get("metadata"),
+            "earnings_has_earnings": earnings_raw.get("has_earnings", False),
+            "earnings_metadata": earnings_raw.get("metadata") if earnings_raw.get("has_earnings") else None,
+        })
+
+        # Helper: iterate the section generator, forward SSE strings, yield section event
+        async def run(form_type: str, accession: str, analysis_type: str, raw_data: dict):
+            result = None
+            async for item in _stream_section(form_type, accession, analysis_type, raw_data, ticker, model.id, api_key):
+                if isinstance(item, tuple):
+                    result = item[1]
+                else:
+                    yield item  # SSE progress string — forward to client
+            if result is not None:
+                yield _sse({"type": "section", "form": form_type, "key": analysis_type, "data": result})
+
+        # Step 2: 10-K analyses
+        if "tenk" in filing_data:
+            tenk = filing_data["tenk"]
+            accession = tenk["metadata"].get("accession", "")
+            for analysis_type, raw_key in [("risk_10k", "risk_raw"), ("mda_10k", "mda_raw")]:
+                async for event in run("10-K", accession, analysis_type, tenk[raw_key]):
+                    yield event
+
+            balance_input: dict[str, Any] = {"tenk": tenk.get("balance_sheet_raw", {})}
+            if "tenq" in filing_data:
+                tenq_bs = filing_data["tenq"].get("balance_sheet_raw")
+                if tenq_bs:
+                    balance_input["tenq"] = tenq_bs
+            async for event in run("10-K", accession, "balance", balance_input):
+                yield event
+
+        # Step 3: 10-Q analyses
+        if "tenq" in filing_data:
+            tenq = filing_data["tenq"]
+            accession = tenq["metadata"].get("accession", "")
+            for analysis_type, raw_key in [("risk_10q", "risk_raw"), ("mda_10q", "mda_raw")]:
+                async for event in run("10-Q", accession, analysis_type, tenq[raw_key]):
+                    yield event
+
+        # Step 4: 8-K earnings
+        if earnings_raw.get("has_earnings"):
+            accession = earnings_raw.get("metadata", {}).get("accession", "")
+            async for event in run("8-K", accession, "earnings", earnings_raw):
+                yield event
+
+        yield _sse({"type": "complete"})
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { marked } from "marked";
+import DOMPurify from "isomorphic-dompurify";
 import { Plus, Trash2, TrendingUp, TrendingDown, Sparkles, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,30 +15,23 @@ import { useApiKeys } from "@/hooks/useApiKeys";
 import { formatCurrency, formatPercent, tickerValid, cn } from "@/lib/utils";
 import type { WatchlistItem, Quote } from "@/types";
 
-export function WatchlistPanel() {
+marked.setOptions({ breaks: true });
+
+interface WatchlistPanelProps {
+  initialItems: WatchlistItem[];
+  initialQuotes: Record<string, Quote>;
+}
+
+export function WatchlistPanel({ initialItems, initialQuotes }: WatchlistPanelProps) {
   const router = useRouter();
   const { keys } = useApiKeys();
-  const [items, setItems] = useState<WatchlistItem[]>([]);
-  const [quotes, setQuotes] = useState<Record<string, Quote>>({});
-  const [loading, setLoading] = useState(true);
+  const [items, setItems] = useState<WatchlistItem[]>(initialItems);
+  const [quotes, setQuotes] = useState<Record<string, Quote>>(initialQuotes);
   const [input, setInput] = useState("");
   const [addError, setAddError] = useState("");
   const [briefing, setBriefing] = useState<string | null>(null);
   const [briefingLoading, setBriefingLoading] = useState(false);
   const [briefingOpen, setBriefingOpen] = useState(false);
-
-  async function loadWatchlist() {
-    const res = await api.watchlist().catch(() => ({ tickers: [] }));
-    setItems(res.tickers);
-    if (res.tickers.length > 0) {
-      const tickers = res.tickers.map((t) => t.ticker);
-      const q = await api.quotes(tickers).catch(() => ({ quotes: {} }));
-      setQuotes(q.quotes);
-    }
-    setLoading(false);
-  }
-
-  useEffect(() => { loadWatchlist(); }, []);
 
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault();
@@ -48,7 +43,13 @@ export function WatchlistPanel() {
     await api.addToWatchlist(t).catch(() => null);
     setInput("");
     setAddError("");
-    loadWatchlist();
+    const res = await api.watchlist().catch(() => ({ tickers: items }));
+    setItems(res.tickers);
+    if (res.tickers.length > 0) {
+      const tickers = res.tickers.map((i) => i.ticker);
+      const q = await api.quotes(tickers).catch(() => ({ quotes }));
+      setQuotes(q.quotes);
+    }
   }
 
   async function handleRemove(ticker: string) {
@@ -63,10 +64,6 @@ export function WatchlistPanel() {
     const res = await api.briefing(keys).catch(() => null);
     setBriefing(res?.briefing ?? "Failed to generate briefing.");
     setBriefingLoading(false);
-  }
-
-  if (loading) {
-    return <div className="space-y-3">{[...Array(3)].map((_, i) => <Skeleton key={i} className="h-14 rounded-xl" />)}</div>;
   }
 
   return (
@@ -120,7 +117,12 @@ export function WatchlistPanel() {
           </CardHeader>
           {briefingOpen && (
             <CardContent>
-              <p className="whitespace-pre-wrap text-sm leading-relaxed text-muted-foreground">{briefing}</p>
+              <div
+                className="prose-chat text-sm"
+                // Content is sanitized with DOMPurify before injection
+                // eslint-disable-next-line react/no-danger
+                dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(marked.parse(briefing) as string) }}
+              />
             </CardContent>
           )}
         </Card>

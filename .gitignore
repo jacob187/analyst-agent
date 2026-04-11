@@ -23,6 +23,7 @@ htmlcov/
 /data/
 /docs/
 CLAUDE.md
+AGENTS.md
 
 # Claude Code (private config, shared skills)
 .claude/*

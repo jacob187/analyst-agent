@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronDown, Eye, ArrowRight, Trash2, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -10,21 +10,16 @@ import { api } from "@/lib/api";
 import { formatDate, cn } from "@/lib/utils";
 import type { Session, TickerSummary } from "@/types";
 
-export function ChatHistory() {
+interface ChatHistoryProps {
+  initialTickers: TickerSummary[];
+}
+
+export function ChatHistory({ initialTickers }: ChatHistoryProps) {
   const router = useRouter();
-  const [tickers, setTickers] = useState<TickerSummary[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [tickers, setTickers] = useState<TickerSummary[]>(initialTickers);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [sessions, setSessions] = useState<Record<string, Session[]>>({});
   const [loadingSessions, setLoadingSessions] = useState<string | null>(null);
-
-  useEffect(() => {
-    api
-      .tickers()
-      .then((r) => setTickers(r.tickers))
-      .catch(() => null)
-      .finally(() => setLoading(false));
-  }, []);
 
   async function toggle(ticker: string) {
     if (expanded === ticker) {
@@ -55,16 +50,6 @@ export function ChatHistory() {
     );
   }
 
-  if (loading) {
-    return (
-      <div className="space-y-3">
-        {[...Array(4)].map((_, i) => (
-          <Skeleton key={i} className="h-14 rounded-xl" />
-        ))}
-      </div>
-    );
-  }
-
   if (!tickers.length) {
     return (
       <div className="py-16 text-center">
@@ -89,7 +74,6 @@ export function ChatHistory() {
           key={t.ticker}
           className="rounded-xl border border-border/60 bg-card overflow-hidden"
         >
-          {/* Ticker row */}
           <button
             onClick={() => toggle(t.ticker)}
             className="flex w-full items-center justify-between px-4 py-3.5 hover:bg-muted/30 transition-colors"
@@ -111,7 +95,6 @@ export function ChatHistory() {
             />
           </button>
 
-          {/* Sessions list */}
           {expanded === t.ticker && (
             <div className="border-t border-border/40">
               {loadingSessions === t.ticker ? (

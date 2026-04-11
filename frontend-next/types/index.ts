@@ -179,6 +179,46 @@ export interface BriefingResponse {
   tickers: string[];
 }
 
+// ─── Filing SSE Stream ─────────────────────────────────────────────────────────
+
+export interface FilingProgressEvent {
+  type: "progress";
+  step: string; // "edgar_fetch" | "10-K/risk_10k" | ...
+  status: "fetching" | "complete" | "processing" | "cached" | "done" | "failed";
+  duration?: number;
+}
+
+export interface FilingMetadataEvent {
+  type: "metadata";
+  tenk_metadata: FilingMetadata | null;
+  tenq_metadata: FilingMetadata | null;
+  earnings_has_earnings: boolean;
+  earnings_metadata: FilingMetadata | null;
+}
+
+export interface FilingSectionEvent {
+  type: "section";
+  form: string; // "10-K" | "10-Q" | "8-K"
+  key: string;  // "risk_10k" | "mda_10k" | "balance" | "risk_10q" | "mda_10q" | "earnings"
+  data: FilingAnalysis;
+}
+
+export interface FilingCompleteEvent {
+  type: "complete";
+}
+
+export interface FilingErrorEvent {
+  type: "error";
+  message: string;
+}
+
+export type FilingStreamEvent =
+  | FilingProgressEvent
+  | FilingMetadataEvent
+  | FilingSectionEvent
+  | FilingCompleteEvent
+  | FilingErrorEvent;
+
 // ─── WebSocket Messages ────────────────────────────────────────────────────────
 
 export type WsMessageType =
