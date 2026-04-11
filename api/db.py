@@ -270,6 +270,46 @@ async def get_sessions(limit: int = 50) -> list[dict]:
         rows = await cursor.fetchall()
         return [{"id": row["id"], "ticker": row["ticker"], "model": row["model"], "created_at": row["created_at"]} for row in rows]
 
+async def get_tickers(limit: int = 50) -> list[dict]:
+    """Return distinct tickers with session count and last-active date.
+
+    Intentionally omits session IDs — callers learn only which tickers have
+    been analysed, not the UUIDs needed to read conversation history.
+    """
+    db = await get_db()
+    async with db.execute(
+        """
+        SELECT ticker,
+               COUNT(*)        AS session_count,
+               MAX(created_at) AS last_active
+        FROM sessions
+        GROUP BY ticker
+        ORDER BY last_active DESC
+        LIMIT ?
+        """,
+        (limit,)
+    ) as cursor:
+        rows = await cursor.fetchall()
+        return [
+            {"ticker": row["ticker"], "session_count": row["session_count"], "last_active": row["last_active"]}
+            for row in rows
+        ]
+
+async def get_sessions_for_ticker(ticker: str, limit: int = 50) -> list[dict]:
+    """Return all sessions (with IDs) for a specific ticker.
+
+    Requires the caller to already know the ticker — session IDs are only
+    exposed once the ticker is established, which breaks the enumeration
+    attack that combines GET /sessions with the IDOR guard bypass.
+    """
+    db = await get_db()
+    async with db.execute(
+        "SELECT id, ticker, model, created_at FROM sessions WHERE ticker = ? ORDER BY created_at DESC LIMIT ?",
+        (ticker.upper(), limit)
+    ) as cursor:
+        rows = await cursor.fetchall()
+        return [{"id": row["id"], "ticker": row["ticker"], "model": row["model"], "created_at": row["created_at"]} for row in rows]
+
 async def get_session(session_id: str) -> dict | None:
     """Get a specific session by ID, including any stored summary and model."""
     db = await get_db()

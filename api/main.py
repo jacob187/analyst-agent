@@ -10,10 +10,17 @@ Business logic lives in:
 - api/db.py               — SQLite database layer
 """
 
+import logging
 import sys
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s  %(name)s  %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
