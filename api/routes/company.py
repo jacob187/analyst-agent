@@ -271,6 +271,7 @@ def _fetch_filing_data(ticker: str, sec_header: str) -> dict[str, Any]:
                 "metadata": {
                     **meta.to_dict(),
                     "edgar_url": _build_edgar_url(meta.cik, meta.accession),
+                    "form_type": "10-K",
                 },
                 "risk_raw": retriever.get_risk_factors_raw("10-K"),
                 "mda_raw": retriever.get_mda_raw("10-K"),
@@ -288,6 +289,7 @@ def _fetch_filing_data(ticker: str, sec_header: str) -> dict[str, Any]:
                     "metadata": {
                         **meta.to_dict(),
                         "edgar_url": _build_edgar_url(meta.cik, meta.accession),
+                        "form_type": "20-F",
                     },
                     "risk_raw": retriever.get_risk_factors_raw("20-F"),
                     "mda_raw": retriever.get_mda_raw("20-F"),

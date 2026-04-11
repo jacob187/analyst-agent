@@ -23,6 +23,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+async def _safe_send(websocket: WebSocket, data: dict) -> bool:
+    """Send JSON, returning False if the connection is already closed."""
+    try:
+        await websocket.send_json(data)
+        return True
+    except (WebSocketDisconnect, RuntimeError):
+        return False
+
+
 @router.websocket("/ws/chat/{ticker}")
 async def chat(websocket: WebSocket, ticker: str):
     await websocket.accept()
@@ -149,12 +158,15 @@ async def chat(websocket: WebSocket, ticker: str):
                         async for event in agent.stream(
                             {"messages": conversation_history}
                         ):
-                            await websocket.send_json(event)
+                            if not await _safe_send(websocket, event):
+                                return  # client disconnected mid-stream
                             if event["type"] == "response":
                                 full_response = event["message"]
+                    except WebSocketDisconnect:
+                        return
                     except Exception as e:
                         logger.error("Error processing query for %s: %s", ticker, e, exc_info=True)
-                        await websocket.send_json({
+                        await _safe_send(websocket, {
                             "type": "error",
                             "message": "Error processing your query. Please try again."
                         })
@@ -174,7 +186,7 @@ async def chat(websocket: WebSocket, ticker: str):
                 break
             except Exception as e:
                 logger.error("Unexpected error in chat loop for %s: %s", ticker, e, exc_info=True)
-                await websocket.send_json({
+                await _safe_send(websocket, {
                     "type": "error",
                     "message": "An unexpected error occurred."
                 })
