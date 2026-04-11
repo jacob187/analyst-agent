@@ -182,6 +182,11 @@
         finalizeStreamingMessage(data.message);
 
       } else if (data.type === 'error') {
+        // If auth hasn't completed yet and the session is invalid, clear it so
+        // the auto-reconnect creates a fresh session instead of looping forever.
+        if (!authenticated && data.message === 'Invalid session.') {
+          sessionId = null;
+        }
         messages = [...messages, {
           role: 'assistant',
           content: `[ERROR] ${data.message}`

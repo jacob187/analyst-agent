@@ -9,10 +9,11 @@
   import StockChart from './lib/components/StockChart.svelte';
   import Watchlist from './lib/components/Watchlist.svelte';
   import CompanyDashboard from './lib/components/CompanyDashboard.svelte';
+  import SavedCompanies from './lib/components/SavedCompanies.svelte';
 
   const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-  type Page = 'main' | 'about' | 'history' | 'view-session' | 'continue-session' | 'settings' | 'watchlist' | 'company-profile';
+  type Page = 'main' | 'about' | 'history' | 'view-session' | 'settings' | 'watchlist' | 'company-profile' | 'companies';
   let currentPage: Page = 'main';
   let settingsLoaded = false;
   let menuOpen = false;
@@ -30,6 +31,7 @@
   let viewingSessionId: string | null = null;
   let viewingSessionTicker: string | null = null;
   let continuingSessionId: string | null = null;
+  let dashboardDefaultTab: 'overview' | 'filings' | 'chart' = 'overview';
 
   // Which keys are available in the server's environment (.env / local dev)
   let envKeys = { google: false, openai: false, anthropic: false, sec_header: false };
@@ -77,6 +79,7 @@
     currentPage = 'main';
     currentTicker = null;
     continuingSessionId = null;
+    dashboardDefaultTab = 'overview';
     viewingSessionId = null;
     viewingSessionTicker = null;
     closeMenu();
@@ -84,6 +87,7 @@
   function navigateToHistory() { currentPage = 'history'; closeMenu(); }
   function navigateToSettings() { currentPage = 'settings'; closeMenu(); }
   function navigateToWatchlist() { currentPage = 'watchlist'; closeMenu(); }
+  function navigateToCompanies() { currentPage = 'companies'; closeMenu(); }
 
   function handleWatchlistSelect(event: CustomEvent<string>) {
     currentTicker = event.detail.toUpperCase();
@@ -99,7 +103,15 @@
   function handleSessionContinue(event: CustomEvent<{ sessionId: string; ticker: string }>) {
     continuingSessionId = event.detail.sessionId;
     currentTicker = event.detail.ticker;
-    currentPage = 'continue-session';
+    dashboardDefaultTab = 'chart';
+    currentPage = 'company-profile';
+  }
+
+  function handleCompanyOpen(event: CustomEvent<{ ticker: string; sessionId: string }>) {
+    currentTicker = event.detail.ticker;
+    continuingSessionId = event.detail.sessionId;
+    dashboardDefaultTab = 'chart';
+    currentPage = 'company-profile';
   }
 
   function handleApiKeySubmit(event: CustomEvent<{
@@ -164,10 +176,11 @@
       console.error('Failed to check for existing session:', e);
     }
 
-    // Set all three state vars in one synchronous batch so Svelte
+    // Set all state vars in one synchronous batch so Svelte
     // only triggers a single re-render with the correct page.
     continuingSessionId = resumeSessionId;
     currentTicker = ticker;
+    dashboardDefaultTab = 'overview';
     currentPage = 'company-profile';
   }
 
@@ -192,10 +205,17 @@
   <div class="drawer-nav">
     <button
       class="drawer-link"
-      class:active={currentPage === 'main' || currentPage === 'continue-session' || currentPage === 'company-profile'}
+      class:active={currentPage === 'main' || currentPage === 'company-profile'}
       on:click={navigateToMain}
     >
       <span class="drawer-icon">⌨</span> Terminal
+    </button>
+    <button
+      class="drawer-link"
+      class:active={currentPage === 'companies'}
+      on:click={navigateToCompanies}
+    >
+      <span class="drawer-icon">◉</span> Companies
     </button>
     <button
       class="drawer-link"
@@ -244,10 +264,17 @@
       <nav class="nav-links">
         <button
           class="nav-link"
-          class:active={currentPage === 'main' || currentPage === 'continue-session' || currentPage === 'company-profile'}
+          class:active={currentPage === 'main' || currentPage === 'company-profile'}
           on:click={navigateToMain}
         >
           Terminal
+        </button>
+        <button
+          class="nav-link"
+          class:active={currentPage === 'companies'}
+          on:click={navigateToCompanies}
+        >
+          Companies
         </button>
         <button
           class="nav-link"
@@ -328,6 +355,7 @@
         {tavilyApiKey}
         modelId={selectedModelId}
         sessionId={continuingSessionId}
+        defaultTab={dashboardDefaultTab}
         on:back={navigateToMain}
       />
     {:else if currentPage === 'history'}
@@ -342,37 +370,8 @@
         <button class="btn" on:click={navigateToHistory}>← back to history</button>
         <button class="btn" on:click={navigateToMain}>← new chat</button>
       </div>
-    {:else if currentPage === 'continue-session' && continuingSessionId && currentTicker}
-      {#if !hasLlmKey || !hasSecHeader}
-        <div class="setup-prompt">
-          <div class="setup-icon">⚙️</div>
-          <h2>API Keys Required</h2>
-          <p>Configure your API keys in Settings to continue the chat with <strong>{currentTicker}</strong></p>
-          <button class="btn primary" on:click={navigateToSettings}>Go to Settings →</button>
-        </div>
-      {:else}
-        <div class="terminal-layout">
-          <div class="chart-column">
-            <StockChart ticker={currentTicker} />
-          </div>
-          <div class="chat-column">
-            <ChatWindow
-              ticker={currentTicker}
-              googleApiKey={googleApiKey}
-              openaiApiKey={openaiApiKey}
-              anthropicApiKey={anthropicApiKey}
-              secHeader={secHeader}
-              tavilyApiKey={tavilyApiKey}
-              modelId={selectedModelId}
-              sessionId={continuingSessionId}
-            />
-          </div>
-        </div>
-        <div class="actions-bar">
-          <button class="btn" on:click={navigateToHistory}>← back to history</button>
-          <button class="btn" on:click={navigateToMain}>← new chat</button>
-        </div>
-      {/if}
+    {:else if currentPage === 'companies'}
+      <SavedCompanies on:open={handleCompanyOpen} />
     {:else if !hasLlmKey || !hasSecHeader}
       <div class="setup-prompt">
         <div class="setup-icon">⚙️</div>

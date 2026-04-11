@@ -7,6 +7,12 @@
     close: void;
   }>();
 
+  interface TickerEntry {
+    ticker: string;
+    session_count: number;
+    last_active: string;
+  }
+
   interface Session {
     id: string;
     ticker: string;
@@ -14,27 +20,56 @@
     model: string | null;
   }
 
-  let sessions: Session[] = [];
+  const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+  // First level: tickers (no session IDs — safe to list publicly)
+  let tickers: TickerEntry[] = [];
+  // Second level: sessions for the expanded ticker
+  let expandedTicker: string | null = null;
+  let tickerSessions: Session[] = [];
+  let tickerSessionsLoading = false;
+
   let loading = true;
   let error = '';
 
   onMount(async () => {
-    await loadSessions();
+    await loadTickers();
   });
 
-  async function loadSessions() {
+  async function loadTickers() {
     loading = true;
     error = '';
     try {
-      const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      const response = await fetch(`${apiBase}/sessions`);
-      if (!response.ok) throw new Error('Failed to load sessions');
+      // GET /tickers returns ticker summaries without session IDs, so the
+      // listing is safe — IDs are only fetched when the user drills into a ticker.
+      const response = await fetch(`${apiBase}/tickers`);
+      if (!response.ok) throw new Error('Failed to load chat history');
       const data = await response.json();
-      sessions = data.sessions;
+      tickers = data.tickers;
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load chat history';
     } finally {
       loading = false;
+    }
+  }
+
+  async function toggleTicker(ticker: string) {
+    if (expandedTicker === ticker) {
+      expandedTicker = null;
+      tickerSessions = [];
+      return;
+    }
+    expandedTicker = ticker;
+    tickerSessionsLoading = true;
+    try {
+      const response = await fetch(`${apiBase}/sessions?ticker=${encodeURIComponent(ticker)}`);
+      if (!response.ok) throw new Error('Failed to load sessions');
+      const data = await response.json();
+      tickerSessions = data.sessions;
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to load sessions';
+    } finally {
+      tickerSessionsLoading = false;
     }
   }
 
@@ -65,14 +100,18 @@
 
   async function deleteSession(session: Session) {
     if (!confirm(`Delete chat with ${session.ticker}?`)) return;
-
     try {
-      const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      const response = await fetch(`${apiBase}/sessions/${session.id}?ticker=${encodeURIComponent(session.ticker)}`, {
-        method: 'DELETE'
-      });
+      const response = await fetch(
+        `${apiBase}/sessions/${session.id}?ticker=${encodeURIComponent(session.ticker)}`,
+        { method: 'DELETE' }
+      );
       if (!response.ok) throw new Error('Failed to delete session');
-      sessions = sessions.filter(s => s.id !== session.id);
+      tickerSessions = tickerSessions.filter(s => s.id !== session.id);
+      // If that was the last session for this ticker, collapse and reload tickers
+      if (tickerSessions.length === 0) {
+        expandedTicker = null;
+        await loadTickers();
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to delete session';
     }
@@ -90,24 +129,45 @@
       <div class="loading">Loading...</div>
     {:else if error}
       <div class="error">{error}</div>
-    {:else if sessions.length === 0}
+    {:else if tickers.length === 0}
       <div class="empty">No chat history yet</div>
     {:else}
-      {#each sessions as session}
-        <div class="session-item">
-          <div class="session-info">
-            <span class="ticker">{session.ticker}</span>
-            {#if session.model}
-              <span class="model-badge">{session.model}</span>
+      {#each tickers as entry}
+        <!-- Ticker row — click to expand/collapse its sessions -->
+        <button class="ticker-row" on:click={() => toggleTicker(entry.ticker)}>
+          <div class="ticker-row-info">
+            <span class="ticker">{entry.ticker}</span>
+            <span class="model-badge">{entry.session_count} {entry.session_count === 1 ? 'session' : 'sessions'}</span>
+          </div>
+          <div class="ticker-row-right">
+            <span class="date">{formatDate(entry.last_active)}</span>
+            <span class="chevron">{expandedTicker === entry.ticker ? '▲' : '▼'}</span>
+          </div>
+        </button>
+
+        {#if expandedTicker === entry.ticker}
+          <div class="sessions-nested">
+            {#if tickerSessionsLoading}
+              <div class="loading-inner">Loading...</div>
+            {:else}
+              {#each tickerSessions as session}
+                <div class="session-item">
+                  <div class="session-info">
+                    {#if session.model}
+                      <span class="model-badge">{session.model}</span>
+                    {/if}
+                    <span class="date">{formatDate(session.created_at)}</span>
+                  </div>
+                  <div class="session-actions">
+                    <button class="btn btn-sm btn-ghost" on:click={() => viewSession(session)}>View</button>
+                    <button class="btn btn-sm btn-primary" on:click={() => continueSession(session)}>Continue</button>
+                    <button class="btn btn-sm btn-danger" on:click={() => deleteSession(session)}>Delete</button>
+                  </div>
+                </div>
+              {/each}
             {/if}
-            <span class="date">{formatDate(session.created_at)}</span>
           </div>
-          <div class="session-actions">
-            <button class="btn btn-sm btn-ghost" on:click={() => viewSession(session)}>View</button>
-            <button class="btn btn-sm btn-primary" on:click={() => continueSession(session)}>Continue</button>
-            <button class="btn btn-sm btn-danger" on:click={() => deleteSession(session)}>Delete</button>
-          </div>
-        </div>
+        {/if}
       {/each}
     {/if}
   </div>
@@ -219,6 +279,57 @@
     border-radius: 3px;
     padding: 0.1rem 0.4rem;
     letter-spacing: 0.01em;
+  }
+
+  /* Ticker accordion row */
+  .ticker-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 100%;
+    padding: 0.7rem 1rem;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s;
+    text-align: left;
+  }
+
+  .ticker-row:hover {
+    background: var(--bg-darker);
+  }
+
+  .ticker-row-info {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .ticker-row-right {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+  }
+
+  .chevron {
+    font-size: 0.6rem;
+    color: var(--accent);
+  }
+
+  /* Nested sessions under an expanded ticker */
+  .sessions-nested {
+    margin: 0 0 0.3rem 1rem;
+    border-left: 2px solid var(--border);
+    padding-left: 0.5rem;
+  }
+
+  .loading-inner {
+    padding: 0.5rem 1rem;
+    font-size: 0.8rem;
+    color: var(--text-muted);
   }
 
   @media (max-width: 480px) {

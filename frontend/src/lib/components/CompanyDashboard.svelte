@@ -21,11 +21,12 @@
   export let tavilyApiKey: string = '';
   export let modelId: string = '';
   export let sessionId: string | null = null;
+  export let defaultTab: 'overview' | 'filings' | 'chart' = 'overview';
 
   const dispatch = createEventDispatcher<{ back: void }>();
 
   type Tab = 'overview' | 'filings' | 'chart';
-  let activeTab: Tab = 'overview';
+  let activeTab: Tab = defaultTab;
 
   // --- Overview state ---
   let profile: any = null;
