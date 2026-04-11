@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { BarChart2, Menu } from "lucide-react";
@@ -24,6 +25,7 @@ const NAV_LINKS = [
 
 export function Navbar() {
   const pathname = usePathname();
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-border/40 bg-background/80 backdrop-blur-md">
@@ -65,7 +67,7 @@ export function Navbar() {
           </Link>
 
           {/* Mobile hamburger */}
-          <Sheet>
+          <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
             <SheetTrigger asChild>
               <Button variant="ghost" size="icon" className="md:hidden h-9 w-9">
                 <Menu className="h-4 w-4" />
@@ -85,6 +87,7 @@ export function Navbar() {
                   <Link
                     key={link.href}
                     href={link.href}
+                    onClick={() => setMobileOpen(false)}
                     className={cn(
                       "rounded-md px-3 py-2 text-sm font-medium transition-colors",
                       pathname === link.href
@@ -97,6 +100,7 @@ export function Navbar() {
                 ))}
                 <Link
                   href="/settings"
+                  onClick={() => setMobileOpen(false)}
                   className="mt-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
                 >
                   Settings
