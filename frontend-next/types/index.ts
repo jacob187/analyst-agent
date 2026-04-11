@@ -133,6 +133,7 @@ export interface FilingMetadata {
   filing_date: string;
   period_of_report: string;
   edgar_url: string;
+  form_type?: string;
 }
 
 export interface FilingAnalysis {

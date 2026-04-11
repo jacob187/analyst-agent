@@ -104,6 +104,22 @@ export function FilingsTab({ data, loading, progressSteps }: FilingsTabProps) {
 
   if (!data) return null;
 
+  const hasFilings = data.tenk || data.tenq || data.earnings?.has_earnings;
+
+  if (!loading && !hasFilings) {
+    return (
+      <div className="flex flex-col items-center justify-center py-16 text-center">
+        <FileX2 className="h-10 w-10 text-muted-foreground/50" />
+        <p className="mt-3 text-sm font-medium text-muted-foreground">
+          No SEC filings found
+        </p>
+        <p className="mt-1 text-xs text-muted-foreground/70">
+          This ticker may be an ETF, mutual fund, or foreign issuer without standard SEC filings.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-3">
       {/* Activity log — visible while loading, dismissed on complete */}
@@ -115,11 +131,11 @@ export function FilingsTab({ data, loading, progressSteps }: FilingsTabProps) {
         </div>
       )}
 
-      {/* 10-K sections */}
+      {/* Annual report — 10-K for domestic filers, 20-F for foreign filers */}
       {data.tenk && (
         <>
           <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            Annual Report (10-K)
+            Annual Report ({data.tenk.metadata?.form_type ?? "10-K"})
           </p>
           {data.tenk.risk_10k ? (
             <FilingSection
