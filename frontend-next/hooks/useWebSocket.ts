@@ -139,6 +139,11 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
           });
           if (data.type === "response") {
             streamingIdxRef.current = null;
+            // Clean up any leftover status-only messages (e.g. "Processing query…")
+            // that were created by earlier node/tool events for this response cycle.
+            setMessages((prev) =>
+              prev.filter((m) => !(m.isStreaming && !m.content))
+            );
           }
           break;
 
