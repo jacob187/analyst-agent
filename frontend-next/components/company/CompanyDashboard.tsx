@@ -18,19 +18,14 @@ import type { CompanyProfileResponse, ChartResponse, FilingsResponse, FilingProg
 
 interface CompanyDashboardProps {
   ticker: string;
-  initialProfile: CompanyProfileResponse | null;
   initialSessionId?: string;
 }
 
-export function CompanyDashboard({
-  ticker,
-  initialProfile,
-  initialSessionId,
-}: CompanyDashboardProps) {
+export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardProps) {
   const { keys, loaded: keysLoaded } = useApiKeys();
 
-  // Profile is pre-fetched server-side — no loading state needed
-  const profile = initialProfile;
+  // Profile — fetched client-side so it doesn't block the initial page render
+  const [profile, setProfile] = useState<CompanyProfileResponse | null>(null);
 
   // Chart
   const [chartData, setChartData] = useState<ChartResponse | null>(null);
@@ -55,6 +50,10 @@ export function CompanyDashboard({
   // keys ref so loadFilings always sends current keys without being a dep
   const keysRef = useRef(keys);
   keysRef.current = keys;
+
+  useEffect(() => {
+    api.profile(ticker).then(setProfile).catch(() => null);
+  }, [ticker]);
 
   const loadFilings = useCallback(() => {
     if (filingsLoadedRef.current) return;
@@ -210,7 +209,7 @@ export function CompanyDashboard({
         </TabsList>
 
         <TabsContent value="overview" className="mt-4">
-          <OverviewTab data={profile} loading={false} />
+          <OverviewTab data={profile} loading={profile === null} />
         </TabsContent>
 
         <TabsContent value="filings" className="mt-4">
