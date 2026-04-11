@@ -21,6 +21,10 @@ export const storyContent = {
     selection for simple questions and structured multi-step execution for complex
     financial analysis. Independent analysis steps run in parallel to minimize
     response time. This hybrid approach optimizes both performance and result quality.`,
+
+    `Most recently, the platform expanded beyond chat-only interaction with a
+    Company Dashboard that proactively surfaces SEC filing analysis, technicals,
+    and company metadata the moment a user selects a ticker — no prompt required.`,
   ],
 };
 
@@ -51,7 +55,7 @@ export const capabilitiesContent = {
     {
       category: "SEC Filing Analysis",
       description:
-        "11 tools powered by edgartools. Raw and AI-analyzed 10-K/10-Q sections — risk factors, MD&A, balance sheets, business overview, cybersecurity disclosure, legal proceedings, and a concurrent all-summaries tool. Prefers 10-Q for recency with 10-K fallback.",
+        "15 tools powered by edgartools. Raw and AI-analyzed 10-K/10-Q sections — risk factors, MD&A, balance sheets, full 10-K text, business overview, cybersecurity disclosure, legal proceedings, and a concurrent all-summaries tool. 8-K filing support with overview, per-item retrieval, earnings release analysis (beats/misses, guidance), and material event analysis (agreements, leadership changes). Supports 20-F for foreign filers. Prefers 10-Q for recency with 10-K fallback.",
     },
     {
       category: "Market Data & Technicals",
@@ -76,17 +80,25 @@ export const capabilitiesContent = {
   ],
 };
 
-export const techStackContent = {
-  title: "Technology Stack",
+export const dashboardContent = {
+  title: "Company Dashboard",
 
-  items: [
-    { label: "Frontend", value: "Svelte 5 + TypeScript + Vite" },
-    { label: "Backend", value: "FastAPI + WebSocket" },
-    { label: "AI Framework", value: "LangGraph + LangChain" },
-    { label: "LLM", value: "Multi-provider (Google Gemini, OpenAI, Anthropic)" },
-    { label: "SEC Data", value: "edgartools (EDGAR API)" },
-    { label: "Market Data", value: "yfinance (Yahoo Finance)" },
-    { label: "Web Research", value: "Tavily API (optional)" },
+  features: [
+    {
+      label: "Instant Overview",
+      description:
+        "Selecting a ticker loads a metrics grid, technical snapshot, chart patterns, and market regime badge instantly — no LLM call, no prompt. Backed by a 5-minute server-side cache.",
+    },
+    {
+      label: "LLM-Analyzed Filings",
+      description:
+        "The Filings tab lazy-loads AI analysis of the latest 10-K (or 20-F), 10-Q, and 8-K earnings release. Each analysis is cached in SQLite by accession number and auto-invalidates when a new filing appears on EDGAR.",
+    },
+    {
+      label: "Integrated Chart + Chat",
+      description:
+        "The third tab embeds the full interactive chart (TradingView Lightweight Charts with RSI, MACD, Bollinger Bands) alongside the conversational agent — 31 tools available when Tavily is configured.",
+    },
   ],
 };
 
@@ -138,11 +150,11 @@ export const diagrams = {
 │          ▼              ▼             ▼       ▼           ▼          ▼      │
 │  ┌──────────────┐ ┌───────────┐ ┌─────────┐ ┌─────────┐ ┌────────────┐    │
 │  │  SEC Tools   │ │  Stock    │ │ Market  │ │ Tavily  │ │  Briefing  │    │
-│  │  (11 tools)  │ │  Tools    │ │ Tools   │ │ Tools   │ │  Tools     │    │
+│  │  (15 tools)  │ │  Tools    │ │ Tools   │ │ Tools   │ │  Tools     │    │
 │  │              │ │ (7 tools) │ │(2 tools)│ │(5 tools)│ │ (2 tools)  │    │
 │  │ • Filings   │ │ • Price   │ │ • Index │ │ • News  │ │ • History  │    │
 │  │ • Analysis  │ │ • Technls │ │ • Macro │ │ • Deep  │ │ • Latest   │    │
-│  │ • Balance   │ │ • Patterns│ │ • Yields│ │ • Comps │ │   briefing │    │
+│  │ • 8-K Data  │ │ • Patterns│ │ • Yields│ │ • Comps │ │   briefing │    │
 │  └──────────────┘ └───────────┘ └─────────┘ └─────────┘ └────────────┘    │
 │                                                                             │
 │                    ┌─────────────────────────────────────┐                  │

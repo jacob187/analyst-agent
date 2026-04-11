@@ -3,7 +3,7 @@
   import StorySection from './StorySection.svelte';
   import ArchitectureSection from './ArchitectureSection.svelte';
   import ToolsSection from './ToolsSection.svelte';
-  import TechStackSection from './TechStackSection.svelte';
+  import DashboardSection from './DashboardSection.svelte';
   import './about.css';
 
   const dispatch = createEventDispatcher<{ back: void }>();
@@ -17,5 +17,5 @@
   <StorySection />
   <ArchitectureSection />
   <ToolsSection />
-  <TechStackSection />
+  <DashboardSection />
 </div>
