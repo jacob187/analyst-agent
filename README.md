@@ -1,40 +1,79 @@
 # Stock Analyst Agent
 
-A full-stack AI-powered financial analysis application that combines SEC filings analysis, technical indicators, and real-time web research through an interactive chat interface.
+A full-stack AI-powered financial analysis application that combines SEC filings analysis, technical indicators, and real-time web research through an interactive company dashboard and chat interface.
 
 ## Tech Stack
 
 ### Frontend
-- **Svelte 5** - Reactive UI framework
+- **Next.js 16** - React framework (App Router)
+- **React 19** - UI library
 - **TypeScript** - Type-safe JavaScript
-- **Vite** - Build tool and dev server
+- **Tailwind CSS v4** - Utility-first styling
+- **shadcn/ui + Radix** - Accessible component primitives
+- **TradingView Lightweight Charts** - Interactive candlestick charts
 
 ### Backend
 - **FastAPI** - Python async web framework
-- **WebSocket** - Real-time bidirectional communication
+- **WebSocket** - Real-time bidirectional chat
+- **SSE (Server-Sent Events)** - Streaming filing analysis progress
 - **LangGraph** - Graph-based AI agent orchestration
 - **LangChain** - LLM framework (Google Gemini, OpenAI, Anthropic)
+- **SQLite (aiosqlite)** - Sessions, messages, watchlist, filing cache
 
 ### Data Sources
-- **SEC EDGAR** - 10-K and 10-Q filings via edgartools
-- **Yahoo Finance** - Market data and technical indicators
+- **SEC EDGAR** - 10-K, 10-Q, and 8-K filings via edgartools (including 20-F for foreign filers)
+- **Yahoo Finance** - Market data, financials, and technical indicators
 - **Tavily** - Web research and news (optional)
 
 ## Features
 
-- **Interactive Chat Interface**: Real-time WebSocket communication with AI agent
-- **Stock Charts**: Candlestick charts with technical indicators (RSI, MACD, Bollinger Bands, moving averages) via TradingView Lightweight Charts
-- **Watchlist & Briefings**: Track tickers and generate AI-powered morning briefings with market regime analysis
-- **Intelligent Query Routing**: Automatically classifies queries and routes to optimal execution path
+- **Company Dashboard**: Full-page view per ticker with Overview and Filings tabs
+  - **Overview**: Live quote, key metrics (P/E, market cap, 52-wk range, beta, dividend yield), technical snapshot (RSI, MACD, ADX, Bollinger Bands), detected chart patterns, market regime, earnings calendar, and company profile
+  - **Filings**: LLM-analyzed SEC sections streamed via SSE — 10-K risk factors, 10-K MD&A, balance sheet, 10-Q risk factors, 10-Q MD&A, and 8-K earnings analysis. Results cached in SQLite by accession number and auto-invalidated on new filings
+- **Interactive Chat**: Real-time WebSocket communication with AI agent, integrated into the company dashboard
+- **Stock Charts**: Candlestick charts with RSI, MACD, Bollinger Bands, and moving averages via TradingView Lightweight Charts
+- **Watchlist & Briefings**: Track up to 10 tickers and generate AI-powered morning briefings with market regime analysis, positioning signals, and per-ticker outlook
+- **Companies Page**: Grid of all previously analyzed tickers for quick navigation
+- **Session History**: Browse and review past chat sessions grouped by ticker
+- **Intelligent Query Routing**: Classifies query complexity and routes to the optimal execution path
 - **Multi-Step Planning**: Complex queries are decomposed into structured execution plans
-- **SEC Filings Analysis**: Extracts and analyzes MD&A, Risk Factors, and Balance Sheets
-- **Technical Analysis**: RSI, MACD, Bollinger Bands, moving averages, pattern detection, and more
+- **SEC Filings Analysis**: Extracts and analyzes MD&A, Risk Factors, Balance Sheets from 10-K, 10-Q, and 8-K filings
+- **Advanced Technical Analysis**: RSI, MACD, Bollinger Bands, ADX, ATR (with stop-loss suggestion), Stochastic, Volume Profile (POC/value area), Fibonacci retracement, and pattern detection (Head & Shoulders, Double Top/Bottom, Golden/Death Cross, RSI divergences)
+- **Multi-Timeframe Analysis**: Daily, weekly, and hourly analysis with conflict detection and bias recommendation
 - **Web Research**: Company news, competitor analysis, and industry trends (with Tavily)
 - **Hybrid Agent Architecture**:
   - Simple queries → ReAct agent (dynamic tool selection)
   - Complex queries → Planner → Step-by-step execution → Synthesis
-- **Smart Caching**: 3-tier caching system minimizes redundant API calls
-- **Privacy-First**: API keys stay in your browser — the server never stores credentials
+- **Smart Caching**: In-memory caching (SEC retrievers, LLM analysis, research results) plus SQLite-backed filing analysis cache
+- **Privacy-First**: API keys stay in your browser's localStorage — the server never stores credentials
+
+## Pages
+
+| Route | Description |
+|-------|-------------|
+| `/` | Landing page — enter a ticker to start analysis |
+| `/company/[ticker]` | Company dashboard with Overview and Filings tabs + integrated chat |
+| `/companies` | Grid of all previously analyzed tickers |
+| `/watchlist` | Manage tracked tickers and generate AI morning briefings |
+| `/history` | Browse past chat sessions grouped by ticker |
+| `/session/[id]` | Read-only archived session viewer |
+| `/settings` | API key configuration (stored in browser localStorage) |
+| `/about` | Architecture explainer with agent graph diagram |
+
+## Supported Models
+
+You only need one provider — pick whichever you prefer.
+
+| Model | Provider | Context | Thinking |
+|-------|----------|---------|----------|
+| **Gemini 3 Flash** (default) | Google | 1M | Yes |
+| Gemini 3.1 Pro | Google | 1M | Yes |
+| GPT-5.4 | OpenAI | 1.05M | No |
+| GPT-4.1 Mini | OpenAI | 1M | No |
+| o4 Mini | OpenAI | 200K | Yes |
+| o3 | OpenAI | 200K | Yes |
+| Claude Sonnet 4.6 | Anthropic | 200K | Yes |
+| Claude Opus 4.6 | Anthropic | 200K | Yes |
 
 ## Quick Start
 
@@ -90,7 +129,7 @@ This installs Python and frontend dependencies, creates a `.env` file from `.env
 ./start.sh
 ```
 
-Starts both the backend (port 8000) and frontend (port 5173). If you skip `install.sh`, `start.sh` will auto-install dependencies on first run.
+Starts both the backend (port 8000) and frontend (port 3000). If you skip `install.sh`, `start.sh` will auto-install dependencies on first run.
 
 ### Configure API Keys
 
@@ -98,13 +137,13 @@ Starts both the backend (port 8000) and frontend (port 5173). If you skip `insta
 
 **Option 1: Settings UI (recommended for hosted demo)**
 
-Open http://localhost:5173 and select your provider and model in **Settings**:
+Open http://localhost:3000/settings and select your provider and model:
 
 | Provider | Get a key | Notes |
 |----------|-----------|-------|
-| Google Gemini | [Google AI Studio](https://aistudio.google.com/app/apikey) | Free tier available |
-| OpenAI | [OpenAI Platform](https://platform.openai.com/api-keys) | GPT-4o Mini is cost-effective |
-| Anthropic | [Anthropic Console](https://console.anthropic.com/settings/keys) | Claude Sonnet is recommended |
+| Google Gemini | [Google AI Studio](https://aistudio.google.com/app/apikey) | Free tier available; Gemini 3 Flash is the default model |
+| OpenAI | [OpenAI Platform](https://platform.openai.com/api-keys) | GPT-4.1 Mini is cost-effective |
+| Anthropic | [Anthropic Console](https://console.anthropic.com/settings/keys) | Claude Sonnet 4.6 recommended |
 
 Also required:
 - **SEC Header** — Your name and email (SEC requires identification per their [fair access policy](https://www.sec.gov/os/webmaster-faq#code-support))
@@ -136,77 +175,72 @@ Interactive API docs are available at `http://localhost:8000/docs` when running 
 
 ## Architecture
 
-### Query Planning Workflow
-
-The system uses a hybrid architecture that intelligently routes queries based on complexity:
-
-```
-User Query
-    │
-    ▼
-┌───────────────────────────────────────────────────────┐
-│                  Query Router                         │
-│  (Classifies complexity: simple vs. complex)          │
-└───────────┬───────────────────────────────────────────┘
-            │
-      ┌─────┴─────┐
-      ▼           ▼
-  Simple      Complex
-      │           │
-      │           ▼
-      │     ┌──────────────┐
-      │     │   Planner    │ Creates multi-step execution plan
-      │     └──────┬───────┘
-      │            │
-      │            ▼
-      │     ┌──────────────┐
-      │     │     Step     │ Executes each step with dependencies
-      │     │   Executor   │ (loops until all steps complete)
-      │     └──────┬───────┘
-      │            │
-      │            ▼
-      │     ┌──────────────┐
-      │     │ Synthesizer  │ Combines results into final response
-      │     └──────┬───────┘
-      │            │
-      ▼            ▼
-  ┌─────────────────┐
-  │  ReAct Agent    │ Dynamic tool selection for simple queries
-  └────────┬────────┘
-           │
-    ┌──────┴──────┐
-    ▼             ▼
- Response    Final Answer
-```
-
 ### System Architecture
 
 ```
-┌─────────────────┐     WebSocket      ┌─────────────────┐
+┌─────────────────┐  WebSocket / SSE   ┌─────────────────┐
 │    Frontend     │◄──────────────────►│    FastAPI      │
-│    (Svelte)     │                    │    Backend      │
+│   (Next.js)    │     REST            │    Backend      │
 └─────────────────┘                    └────────┬────────┘
                                                 │
-                                       ┌────────▼────────┐
-                                       │  LangGraph      │
-                                       │  Planning Agent │
-                                       └────────┬────────┘
-                                                │
-                    ┌───────────────────────────┼───────────────────────────┐
-                    │                           │                           │
-           ┌────────▼────────┐        ┌────────▼────────┐        ┌────────▼────────┐
-           │   SEC Tools     │        │  Stock Tools    │        │ Research Tools  │
-           │  (edgartools)   │        │  (yfinance)     │        │   (Tavily)      │
-           └─────────────────┘        └─────────────────┘        └─────────────────┘
+                              ┌─────────────────┼─────────────────┐
+                              │                 │                 │
+                     ┌────────▼────────┐ ┌──────▼──────┐ ┌───────▼───────┐
+                     │  LangGraph      │ │  Company    │ │  Watchlist    │
+                     │  Planning Agent │ │  Profiles   │ │  & Briefings  │
+                     └────────┬────────┘ └─────────────┘ └───────────────┘
+                              │
+          ┌───────────────────┼───────────────────┬───────────────────┐
+          │                   │                   │                   │
+ ┌────────▼────────┐ ┌───────▼───────┐ ┌────────▼────────┐ ┌────────▼────────┐
+ │   SEC Tools     │ │  Stock Tools  │ │  Market Tools   │ │ Research Tools  │
+ │  (edgartools)   │ │  (yfinance)   │ │  (macro data)   │ │   (Tavily)      │
+ └─────────────────┘ └───────────────┘ └─────────────────┘ └─────────────────┘
 ```
 
-**Key Components:**
+### Query Planning Workflow
 
-- **Query Router**: Uses LLM to classify query complexity and estimate required tools
-- **ReAct Agent**: For simple queries (1 tool, straightforward), uses dynamic reasoning
+The agent uses a hybrid architecture that routes queries based on complexity:
+
+```
+User Query → Router → Simple  → ReAct Agent → Response
+                    → Complex → Planner → Step Executor (loop) → Synthesizer → Response
+```
+
+- **Query Router**: LLM classifies query complexity and estimates required tools
+- **ReAct Agent**: For simple queries — dynamic tool selection in a single reasoning loop
 - **Query Planner**: Decomposes complex queries into structured `AnalysisStep` objects
 - **Step Executor**: Executes plan steps sequentially, respecting dependencies
-- **Synthesizer**: Combines multi-step results into comprehensive final response
+- **Synthesizer**: Combines multi-step results into a comprehensive final response
+
+### Backend Routes
+
+| Route | Transport | Description |
+|-------|-----------|-------------|
+| `/ws/chat/{ticker}` | WebSocket | Real-time chat with AI agent |
+| `/api/company/{ticker}/profile` | REST | Aggregated company data (quote, technicals, patterns, regime) |
+| `/api/company/{ticker}/filings` | REST | Batch LLM filing analysis |
+| `/api/company/{ticker}/filings/stream` | SSE | Streaming filing analysis with per-section progress |
+| `/stock/{ticker}/chart` | REST | OHLCV chart data |
+| `/models` | REST | Available model list |
+| `/watchlist` | REST | CRUD for tracked tickers (max 10) |
+| `/watchlist/briefing` | REST | Generate AI morning briefing |
+| `/watchlist/briefing/history` | REST | Past briefings |
+| `/sessions` | REST | Session CRUD |
+| `/health` | REST | Health check |
+
+### Database (SQLite)
+
+| Table | Purpose |
+|-------|---------|
+| `sessions` | Chat sessions with ticker, model, and compressed summary |
+| `messages` | Chat messages per session |
+| `companies` | Central company entity (ticker, name, sector) |
+| `watchlist` | Tracked tickers (max 10) |
+| `briefings` | Daily briefing results (regime, positioning, alerts) |
+| `briefing_tickers` | Per-ticker data within a briefing |
+| `filings_cache` | SEC filing metadata (form type, accession number, download status) |
+| `filing_analyses` | LLM-generated filing analyses cached by accession number |
 
 ## License
 
@@ -219,4 +253,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - [LangChain](https://python.langchain.com/) - LLM orchestration
 - [LangGraph](https://langchain-ai.github.io/langgraph/) - Agent framework
 - [Tavily](https://tavily.com/) - Web research API
-- [Svelte](https://svelte.dev/) - Frontend framework
+- [Next.js](https://nextjs.org/) - Frontend framework
+- [shadcn/ui](https://ui.shadcn.com/) - UI components
+- [TradingView Lightweight Charts](https://tradingview.github.io/lightweight-charts/) - Charting library
