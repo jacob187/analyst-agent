@@ -464,6 +464,36 @@ class SECDataRetrieval:
         """Get balance sheet data with metadata."""
         return self.extract_balance_sheet_as_json(form)
 
+    def get_income_statement(self, form: Literal["10-K", "10-Q"] = "10-K") -> Optional[dict]:
+        """Income statement from 10-K or 10-Q as a JSON-serializable dict.
+
+        Returns the XBRL-parsed income statement DataFrame in ``orient="split"``
+        format, or ``None`` if the filing is unavailable or lacks XBRL data.
+        """
+        try:
+            obj = self.get_tenk() if form == "10-K" else self.get_tenq()
+            stmt = obj.financials.income_statement()
+            if stmt is None:
+                return None
+            return json.loads(stmt.to_dataframe().to_json(orient="split"))
+        except Exception:
+            return None
+
+    def get_cashflow_statement(self, form: Literal["10-K", "10-Q"] = "10-K") -> Optional[dict]:
+        """Cash flow statement from 10-K or 10-Q as a JSON-serializable dict.
+
+        Returns the XBRL-parsed cash flow statement DataFrame in ``orient="split"``
+        format, or ``None`` if the filing is unavailable or lacks XBRL data.
+        """
+        try:
+            obj = self.get_tenk() if form == "10-K" else self.get_tenq()
+            stmt = obj.financials.cashflow_statement()
+            if stmt is None:
+                return None
+            return json.loads(stmt.to_dataframe().to_json(orient="split"))
+        except Exception:
+            return None
+
     # Legacy methods for backward compatibility (updated to be form-aware)
     def extract_risk_factors(self, form: Literal["10-K", "10-Q"] = "10-K") -> str:
         """Extract risk factors from specified filing form."""

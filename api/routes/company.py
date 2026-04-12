@@ -285,6 +285,12 @@ def _fetch_filing_data(ticker: str, sec_header: str) -> dict[str, Any]:
                 "risk_raw": retriever.get_risk_factors_raw("10-K"),
                 "mda_raw": retriever.get_mda_raw("10-K"),
                 "balance_sheet_raw": retriever.extract_balance_sheet_as_str("tenk"),
+                "business_raw": retriever.get_business_raw(),
+                "cyber_raw": retriever.get_cybersecurity_raw(),
+                "legal_raw": retriever.get_legal_proceedings_raw(),
+                "market_risk_raw": retriever.get_market_risk_raw("10-K"),
+                "income_stmt_raw": retriever.get_income_statement("10-K"),
+                "cashflow_raw": retriever.get_cashflow_statement("10-K"),
             }
     except (ValueError, Exception):
         # Foreign filers (BP, BABA, TSM) file 20-F instead of 10-K.
@@ -322,6 +328,8 @@ def _fetch_filing_data(ticker: str, sec_header: str) -> dict[str, Any]:
                 },
                 "risk_raw": retriever.get_risk_factors_raw("10-Q"),
                 "mda_raw": retriever.get_mda_raw("10-Q"),
+                "income_stmt_raw": retriever.get_income_statement("10-Q"),
+                "cashflow_raw": retriever.get_cashflow_statement("10-Q"),
             }
     except (ValueError, Exception):
         pass  # No 10-Q available
@@ -378,6 +386,20 @@ def _run_llm_analysis(
         result = processor.analyze_mda(ticker, raw_data)
     elif analysis_type == "earnings":
         result = processor.analyze_earnings(ticker, raw_data)
+    elif analysis_type == "business":
+        result = processor.analyze_business_overview(ticker, raw_data)
+    elif analysis_type == "cybersecurity":
+        result = processor.analyze_cybersecurity(ticker, raw_data)
+    elif analysis_type == "legal":
+        result = processor.analyze_legal_proceedings(ticker, raw_data)
+    elif analysis_type == "market_risk":
+        result = processor.analyze_market_risk(ticker, raw_data)
+    elif analysis_type == "income_stmt":
+        # Income statement combines tenk + tenq XBRL data
+        result = processor.analyze_income_statement(ticker, raw_data)
+    elif analysis_type == "cashflow":
+        # Cash flow combines tenk + tenq XBRL data
+        result = processor.analyze_cashflow(ticker, raw_data)
     else:
         raise ValueError(f"Unknown analysis type: {analysis_type}")
 
@@ -633,14 +655,50 @@ async def stream_company_filings(
             if "tenk" in filing_data:
                 tenk = filing_data["tenk"]
                 accession = tenk["metadata"].get("accession", "")
+
+                # Existing financial statement sections
                 for analysis_type, raw_key in [("risk_10k", "risk_raw"), ("mda_10k", "mda_raw")]:
                     tasks.append(section_task("10-K", accession, analysis_type, tenk[raw_key]))
+
                 balance_input: dict[str, Any] = {"tenk": tenk.get("balance_sheet_raw", {})}
                 if "tenq" in filing_data:
                     tenq_bs = filing_data["tenq"].get("balance_sheet_raw")
                     if tenq_bs:
                         balance_input["tenq"] = tenq_bs
                 tasks.append(section_task("10-K", accession, "balance", balance_input))
+
+                # Newly surfaced 10-K text sections (Item 1, 1C, 3, 7A)
+                for analysis_type, raw_key in [
+                    ("business", "business_raw"),
+                    ("cybersecurity", "cyber_raw"),
+                    ("legal", "legal_raw"),
+                    ("market_risk", "market_risk_raw"),
+                ]:
+                    raw = tenk.get(raw_key)
+                    if raw and raw.get("found"):
+                        tasks.append(section_task("10-K", accession, analysis_type, raw))
+
+                # Income statement — combines 10-K + 10-Q XBRL data
+                if tenk.get("income_stmt_raw"):
+                    income_input: dict[str, Any] = {
+                        "tenk": tenk["income_stmt_raw"],
+                        "tenk_metadata": tenk["metadata"],
+                    }
+                    if "tenq" in filing_data and filing_data["tenq"].get("income_stmt_raw"):
+                        income_input["tenq"] = filing_data["tenq"]["income_stmt_raw"]
+                        income_input["tenq_metadata"] = filing_data["tenq"]["metadata"]
+                    tasks.append(section_task("10-K", accession, "income_stmt", income_input))
+
+                # Cash flow — combines 10-K + 10-Q XBRL data
+                if tenk.get("cashflow_raw"):
+                    cashflow_input: dict[str, Any] = {
+                        "tenk": tenk["cashflow_raw"],
+                        "tenk_metadata": tenk["metadata"],
+                    }
+                    if "tenq" in filing_data and filing_data["tenq"].get("cashflow_raw"):
+                        cashflow_input["tenq"] = filing_data["tenq"]["cashflow_raw"]
+                        cashflow_input["tenq_metadata"] = filing_data["tenq"]["metadata"]
+                    tasks.append(section_task("10-K", accession, "cashflow", cashflow_input))
 
             if "tenq" in filing_data:
                 tenq = filing_data["tenq"]

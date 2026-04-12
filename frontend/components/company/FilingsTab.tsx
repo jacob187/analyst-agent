@@ -12,6 +12,12 @@ const STEP_LABELS: Record<string, string> = {
   "10-K/risk_10k": "10-K · Risk Factors",
   "10-K/mda_10k": "10-K · Management Discussion & Analysis",
   "10-K/balance": "10-K · Balance Sheet",
+  "10-K/income_stmt": "10-K · Income Statement",
+  "10-K/cashflow": "10-K · Cash Flow",
+  "10-K/business": "10-K · Business Overview",
+  "10-K/cybersecurity": "10-K · Cybersecurity",
+  "10-K/legal": "10-K · Legal Proceedings",
+  "10-K/market_risk": "10-K · Market Risk",
   "10-Q/risk_10q": "10-Q · Risk Factors",
   "10-Q/mda_10q": "10-Q · MD&A",
   "8-K/earnings": "8-K · Earnings Analysis",
@@ -165,6 +171,66 @@ export function FilingsTab({ data, loading, progressSteps }: FilingsTabProps) {
             />
           ) : loading ? (
             <PendingSection title="Balance Sheet Analysis" />
+          ) : null}
+
+          {data.tenk.income_stmt ? (
+            <FilingSection
+              title="Income Statement"
+              analysis={data.tenk.income_stmt}
+              metadata={data.tenk.metadata}
+            />
+          ) : loading ? (
+            <PendingSection title="Income Statement" />
+          ) : null}
+
+          {data.tenk.cashflow ? (
+            <FilingSection
+              title="Cash Flow Statement"
+              analysis={data.tenk.cashflow}
+              metadata={data.tenk.metadata}
+            />
+          ) : loading ? (
+            <PendingSection title="Cash Flow Statement" />
+          ) : null}
+
+          {data.tenk.business ? (
+            <FilingSection
+              title="Business Overview"
+              analysis={data.tenk.business}
+              metadata={data.tenk.metadata}
+            />
+          ) : loading ? (
+            <PendingSection title="Business Overview" />
+          ) : null}
+
+          {data.tenk.market_risk ? (
+            <FilingSection
+              title="Market Risk"
+              analysis={data.tenk.market_risk}
+              metadata={data.tenk.metadata}
+            />
+          ) : loading ? (
+            <PendingSection title="Market Risk" />
+          ) : null}
+
+          {data.tenk.legal ? (
+            <FilingSection
+              title="Legal Proceedings"
+              analysis={data.tenk.legal}
+              metadata={data.tenk.metadata}
+            />
+          ) : loading ? (
+            <PendingSection title="Legal Proceedings" />
+          ) : null}
+
+          {data.tenk.cybersecurity ? (
+            <FilingSection
+              title="Cybersecurity"
+              analysis={data.tenk.cybersecurity}
+              metadata={data.tenk.metadata}
+            />
+          ) : loading ? (
+            <PendingSection title="Cybersecurity" />
           ) : null}
         </>
       )}

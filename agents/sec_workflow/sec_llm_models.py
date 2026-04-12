@@ -16,6 +16,18 @@ from agents.prompts import (
     EARNINGS_ANALYSIS_USER_TEMPLATE,
     MATERIAL_EVENT_SYSTEM_PROMPT,
     MATERIAL_EVENT_USER_TEMPLATE,
+    BUSINESS_OVERVIEW_SYSTEM_PROMPT,
+    BUSINESS_OVERVIEW_USER_TEMPLATE,
+    CYBERSECURITY_SYSTEM_PROMPT,
+    CYBERSECURITY_USER_TEMPLATE,
+    LEGAL_PROCEEDINGS_SYSTEM_PROMPT,
+    LEGAL_PROCEEDINGS_USER_TEMPLATE,
+    MARKET_RISK_SYSTEM_PROMPT,
+    MARKET_RISK_USER_TEMPLATE,
+    INCOME_STATEMENT_SYSTEM_PROMPT,
+    INCOME_STATEMENT_USER_TEMPLATE,
+    CASH_FLOW_SYSTEM_PROMPT,
+    CASH_FLOW_USER_TEMPLATE,
 )
 
 
@@ -138,6 +150,82 @@ class MaterialEventAnalysis(BaseModel):
     )
 
 
+class BusinessOverviewAnalysis(BaseModel):
+    """LLM analysis of the Business Overview section (10-K Item 1)."""
+
+    summary: str = Field(description="Concise summary of the company's business model")
+    business_segments: List[str] = Field(description="Named business segments or divisions")
+    key_products_services: List[str] = Field(description="Primary products or services offered")
+    competitive_position: str = Field(description="Assessment of competitive positioning and moats")
+    sentiment_score: float = Field(description="Sentiment score from -10 (very negative) to 10 (very positive)")
+    sentiment_analysis: str = Field(description="Detailed sentiment explanation")
+    filing_metadata: Optional[Dict[str, str]] = Field(None, description="Filing metadata")
+
+
+class CybersecurityAnalysis(BaseModel):
+    """LLM analysis of the Cybersecurity Risk Management section (10-K Item 1C)."""
+
+    summary: str = Field(description="Concise summary of cybersecurity posture and governance")
+    governance_overview: str = Field(description="Board and management oversight structure")
+    key_disclosures: List[str] = Field(description="Specific cybersecurity frameworks, certifications, or processes disclosed")
+    red_flags: List[str] = Field(description="Disclosed incidents, material weaknesses, or vague governance concerns")
+    sentiment_score: float = Field(description="Sentiment score from -10 (very negative) to 10 (very positive)")
+    sentiment_analysis: str = Field(description="Detailed sentiment explanation")
+    filing_metadata: Optional[Dict[str, str]] = Field(None, description="Filing metadata")
+
+
+class LegalProceedingsAnalysis(BaseModel):
+    """LLM analysis of the Legal Proceedings section (10-K Item 3)."""
+
+    summary: str = Field(description="Concise summary of the legal landscape")
+    key_cases: List[str] = Field(description="Material legal cases or regulatory proceedings")
+    red_flags: List[str] = Field(description="Proceedings with significant financial exposure or reputational risk")
+    overall_risk: str = Field(description="Overall assessment of legal risk severity")
+    sentiment_score: float = Field(description="Sentiment score from -10 (very negative) to 10 (very positive)")
+    sentiment_analysis: str = Field(description="Detailed sentiment explanation")
+    filing_metadata: Optional[Dict[str, str]] = Field(None, description="Filing metadata")
+
+
+class MarketRiskAnalysis(BaseModel):
+    """LLM analysis of the Market Risk section (10-K Item 7A)."""
+
+    summary: str = Field(description="Concise summary of market risk exposures")
+    key_exposures: List[str] = Field(description="Identified market risk categories with quantitative details where available")
+    risk_assessment: str = Field(description="Overall assessment of market risk severity and hedging adequacy")
+    red_flags: List[str] = Field(description="Unhedged concentrations or material sensitivities")
+    sentiment_score: float = Field(description="Sentiment score from -10 (very negative) to 10 (very positive)")
+    sentiment_analysis: str = Field(description="Detailed sentiment explanation")
+    filing_metadata: Optional[Dict[str, str]] = Field(None, description="Filing metadata")
+
+
+class IncomeStatementAnalysis(BaseModel):
+    """LLM analysis of income statement data from 10-K and/or 10-Q XBRL filings."""
+
+    summary: str = Field(description="Concise summary of income statement performance")
+    key_metrics: List[str] = Field(description="Key figures: revenue, gross profit, operating income, net income, margins, growth rates")
+    revenue_analysis: str = Field(description="Revenue trend and growth analysis")
+    profitability_analysis: str = Field(description="Margin trends and profitability assessment")
+    red_flags: List[str] = Field(description="Deteriorating trends, unusual items, or concerns")
+    outlook: str = Field(description="Forward-looking assessment based on the trajectory")
+    sentiment_score: float = Field(description="Sentiment score from -10 (very negative) to 10 (very positive)")
+    sentiment_analysis: str = Field(description="Detailed sentiment explanation")
+    comparison: Optional[str] = Field(None, description="Annual vs quarterly comparison if both available")
+
+
+class CashFlowAnalysis(BaseModel):
+    """LLM analysis of cash flow statement data from 10-K and/or 10-Q XBRL filings."""
+
+    summary: str = Field(description="Concise summary of cash flow generation and allocation")
+    key_metrics: List[str] = Field(description="Key figures: operating cash flow, capex, free cash flow, dividends, buybacks")
+    operating_cash_flow_analysis: str = Field(description="Quality and sustainability of operating cash flows")
+    free_cash_flow_analysis: str = Field(description="Free cash flow generation and trend")
+    red_flags: List[str] = Field(description="Negative operating cash flow, cash burn, or concerning capital allocation")
+    outlook: str = Field(description="Assessment of financial flexibility and cash generation sustainability")
+    sentiment_score: float = Field(description="Sentiment score from -10 (very negative) to 10 (very positive)")
+    sentiment_analysis: str = Field(description="Detailed sentiment explanation")
+    comparison: Optional[str] = Field(None, description="Annual vs quarterly comparison if both available")
+
+
 class SECDocumentProcessor:
     """Processes SEC documents using LLM."""
 
@@ -153,9 +241,13 @@ class SECDocumentProcessor:
             pydantic_object=BalanceSheetAnalysis
         )
         self.earnings_parser = PydanticOutputParser(pydantic_object=EarningsAnalysis)
-        self.material_event_parser = PydanticOutputParser(
-            pydantic_object=MaterialEventAnalysis
-        )
+        self.material_event_parser = PydanticOutputParser(pydantic_object=MaterialEventAnalysis)
+        self.business_overview_parser = PydanticOutputParser(pydantic_object=BusinessOverviewAnalysis)
+        self.cybersecurity_parser = PydanticOutputParser(pydantic_object=CybersecurityAnalysis)
+        self.legal_proceedings_parser = PydanticOutputParser(pydantic_object=LegalProceedingsAnalysis)
+        self.market_risk_parser = PydanticOutputParser(pydantic_object=MarketRiskAnalysis)
+        self.income_statement_parser = PydanticOutputParser(pydantic_object=IncomeStatementAnalysis)
+        self.cash_flow_parser = PydanticOutputParser(pydantic_object=CashFlowAnalysis)
 
     def generate_mda_prompt(
         self, ticker: str, mda_data: Dict[str, Any]
@@ -404,4 +496,192 @@ class SECDocumentProcessor:
                 sentiment_score=0.0,
                 sentiment_analysis="Analysis unavailable due to processing error.",
                 filing_metadata=event_data.get("metadata", {}),
+            )
+
+    # ── New section analysis methods ──────────────────────────────────────────
+
+    def _text_section_prompt(
+        self,
+        system_prompt: str,
+        user_template: str,
+        parser: PydanticOutputParser,
+        ticker: str,
+        data: Dict[str, Any],
+    ) -> ChatPromptTemplate:
+        """Shared prompt builder for text-based 10-K sections (Item 1, 1C, 3, 7A).
+
+        All four sections have the same input shape: {"text": "...", "metadata": {...}}.
+        """
+        filing_info = data.get("metadata", {})
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_prompt),
+            ("user", user_template),
+        ])
+        return prompt.partial(
+            ticker=ticker,
+            filing_date=filing_info.get("filing_date", "Unknown"),
+            period=filing_info.get("period_of_report", "Unknown"),
+            content_text=data.get("text", ""),
+            format_instructions=parser.get_format_instructions(),
+        )
+
+    def analyze_business_overview(
+        self, ticker: str, data: Dict[str, Any]
+    ) -> BusinessOverviewAnalysis:
+        """Analyze 10-K Item 1 — Business Overview."""
+        prompt = self._text_section_prompt(
+            BUSINESS_OVERVIEW_SYSTEM_PROMPT, BUSINESS_OVERVIEW_USER_TEMPLATE,
+            self.business_overview_parser, ticker, data,
+        )
+        try:
+            return (prompt | self.llm | self.business_overview_parser).invoke({})
+        except Exception as e:
+            print(f"Error processing Business Overview: {e}")
+            return BusinessOverviewAnalysis(
+                summary="Error analyzing Business Overview section.",
+                business_segments=["Unable to extract segments."],
+                key_products_services=["Unable to extract products/services."],
+                competitive_position="Analysis unavailable due to processing error.",
+                sentiment_score=0.0,
+                sentiment_analysis="Analysis unavailable due to processing error.",
+                filing_metadata=data.get("metadata", {}),
+            )
+
+    def analyze_cybersecurity(
+        self, ticker: str, data: Dict[str, Any]
+    ) -> CybersecurityAnalysis:
+        """Analyze 10-K Item 1C — Cybersecurity Risk Management."""
+        prompt = self._text_section_prompt(
+            CYBERSECURITY_SYSTEM_PROMPT, CYBERSECURITY_USER_TEMPLATE,
+            self.cybersecurity_parser, ticker, data,
+        )
+        try:
+            return (prompt | self.llm | self.cybersecurity_parser).invoke({})
+        except Exception as e:
+            print(f"Error processing Cybersecurity: {e}")
+            return CybersecurityAnalysis(
+                summary="Error analyzing Cybersecurity section.",
+                governance_overview="Analysis unavailable due to processing error.",
+                key_disclosures=["Unable to extract disclosures."],
+                red_flags=[],
+                sentiment_score=0.0,
+                sentiment_analysis="Analysis unavailable due to processing error.",
+                filing_metadata=data.get("metadata", {}),
+            )
+
+    def analyze_legal_proceedings(
+        self, ticker: str, data: Dict[str, Any]
+    ) -> LegalProceedingsAnalysis:
+        """Analyze 10-K Item 3 — Legal Proceedings."""
+        prompt = self._text_section_prompt(
+            LEGAL_PROCEEDINGS_SYSTEM_PROMPT, LEGAL_PROCEEDINGS_USER_TEMPLATE,
+            self.legal_proceedings_parser, ticker, data,
+        )
+        try:
+            return (prompt | self.llm | self.legal_proceedings_parser).invoke({})
+        except Exception as e:
+            print(f"Error processing Legal Proceedings: {e}")
+            return LegalProceedingsAnalysis(
+                summary="Error analyzing Legal Proceedings section.",
+                key_cases=["Unable to extract cases."],
+                red_flags=[],
+                overall_risk="Analysis unavailable due to processing error.",
+                sentiment_score=0.0,
+                sentiment_analysis="Analysis unavailable due to processing error.",
+                filing_metadata=data.get("metadata", {}),
+            )
+
+    def analyze_market_risk(
+        self, ticker: str, data: Dict[str, Any]
+    ) -> MarketRiskAnalysis:
+        """Analyze 10-K Item 7A — Market Risk."""
+        prompt = self._text_section_prompt(
+            MARKET_RISK_SYSTEM_PROMPT, MARKET_RISK_USER_TEMPLATE,
+            self.market_risk_parser, ticker, data,
+        )
+        try:
+            return (prompt | self.llm | self.market_risk_parser).invoke({})
+        except Exception as e:
+            print(f"Error processing Market Risk: {e}")
+            return MarketRiskAnalysis(
+                summary="Error analyzing Market Risk section.",
+                key_exposures=["Unable to extract exposures."],
+                risk_assessment="Analysis unavailable due to processing error.",
+                red_flags=[],
+                sentiment_score=0.0,
+                sentiment_analysis="Analysis unavailable due to processing error.",
+                filing_metadata=data.get("metadata", {}),
+            )
+
+    def _financial_statement_prompt(
+        self,
+        system_prompt: str,
+        user_template: str,
+        parser: PydanticOutputParser,
+        ticker: str,
+        raw_data: Dict[str, Any],
+    ) -> ChatPromptTemplate:
+        """Shared prompt builder for XBRL financial statement analyses.
+
+        raw_data shape: {"tenk": <json dict or None>, "tenk_metadata": {...},
+                         "tenq": <json dict or None>, "tenq_metadata": {...}}
+        """
+        tenk_meta = raw_data.get("tenk_metadata") or {}
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_prompt),
+            ("user", user_template),
+        ])
+        return prompt.partial(
+            ticker=ticker,
+            filing_date=tenk_meta.get("filing_date", "Unknown"),
+            period=tenk_meta.get("period_of_report", "Unknown"),
+            tenk_data=str(raw_data.get("tenk") or "Not available"),
+            tenq_data=str(raw_data.get("tenq") or "Not available"),
+            format_instructions=parser.get_format_instructions(),
+        )
+
+    def analyze_income_statement(
+        self, ticker: str, raw_data: Dict[str, Any]
+    ) -> IncomeStatementAnalysis:
+        """Analyze income statement XBRL data from 10-K (and optionally 10-Q)."""
+        prompt = self._financial_statement_prompt(
+            INCOME_STATEMENT_SYSTEM_PROMPT, INCOME_STATEMENT_USER_TEMPLATE,
+            self.income_statement_parser, ticker, raw_data,
+        )
+        try:
+            return (prompt | self.llm | self.income_statement_parser).invoke({})
+        except Exception as e:
+            print(f"Error processing Income Statement: {e}")
+            return IncomeStatementAnalysis(
+                summary="Error analyzing income statement.",
+                key_metrics=["Unable to extract key metrics."],
+                revenue_analysis="Analysis unavailable due to processing error.",
+                profitability_analysis="Analysis unavailable due to processing error.",
+                red_flags=[],
+                outlook="Analysis unavailable due to processing error.",
+                sentiment_score=0.0,
+                sentiment_analysis="Analysis unavailable due to processing error.",
+            )
+
+    def analyze_cashflow(
+        self, ticker: str, raw_data: Dict[str, Any]
+    ) -> CashFlowAnalysis:
+        """Analyze cash flow statement XBRL data from 10-K (and optionally 10-Q)."""
+        prompt = self._financial_statement_prompt(
+            CASH_FLOW_SYSTEM_PROMPT, CASH_FLOW_USER_TEMPLATE,
+            self.cash_flow_parser, ticker, raw_data,
+        )
+        try:
+            return (prompt | self.llm | self.cash_flow_parser).invoke({})
+        except Exception as e:
+            print(f"Error processing Cash Flow: {e}")
+            return CashFlowAnalysis(
+                summary="Error analyzing cash flow statement.",
+                key_metrics=["Unable to extract key metrics."],
+                operating_cash_flow_analysis="Analysis unavailable due to processing error.",
+                free_cash_flow_analysis="Analysis unavailable due to processing error.",
+                red_flags=[],
+                outlook="Analysis unavailable due to processing error.",
+                sentiment_score=0.0,
+                sentiment_analysis="Analysis unavailable due to processing error.",
             )

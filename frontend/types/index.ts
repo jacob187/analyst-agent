@@ -150,9 +150,18 @@ export interface FilingsResponse {
   ticker: string;
   tenk?: {
     metadata: FilingMetadata;
+    // Original sections
     risk_10k?: FilingAnalysis;
     mda_10k?: FilingAnalysis;
     balance?: FilingAnalysis;
+    // Newly surfaced 10-K sections
+    business?: FilingAnalysis;
+    cybersecurity?: FilingAnalysis;
+    legal?: FilingAnalysis;
+    market_risk?: FilingAnalysis;
+    // XBRL financial statements
+    income_stmt?: FilingAnalysis;
+    cashflow?: FilingAnalysis;
   };
   tenq?: {
     metadata: FilingMetadata;

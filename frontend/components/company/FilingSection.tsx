@@ -32,6 +32,7 @@ export function FilingSection({ title, analysis, metadata }: FilingSectionProps)
   const sentiment = analysis.sentiment_score as number | undefined;
   const summary = analysis.summary as string | undefined;
   const risks = analysis.risks as string[] | undefined;
+  const keyMetrics = analysis.key_metrics as string[] | undefined;
   const outlook = analysis.outlook as string | undefined;
   const redFlags = analysis.red_flags as string[] | undefined;
 
@@ -85,6 +86,22 @@ export function FilingSection({ title, analysis, metadata }: FilingSectionProps)
                   <li key={i} className="flex items-start gap-2 text-xs">
                     <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-yellow-500" />
                     <span>{r}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {keyMetrics && keyMetrics.length > 0 && (
+            <div>
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Key Metrics
+              </p>
+              <ul className="space-y-1">
+                {keyMetrics.map((m, i) => (
+                  <li key={i} className="flex items-start gap-2 text-xs text-foreground/80">
+                    <span className="mt-0.5 shrink-0 text-muted-foreground">·</span>
+                    <span>{m}</span>
                   </li>
                 ))}
               </ul>
