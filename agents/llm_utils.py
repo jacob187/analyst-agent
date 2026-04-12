@@ -58,9 +58,6 @@ def parse_llm_response(response) -> LLMResponse:
         thinking_parts: list[str] = []
 
         for block in content:
-            if isinstance(block, str):
-                text_parts.append(block)
-                continue
             if not isinstance(block, dict):
                 continue
 
