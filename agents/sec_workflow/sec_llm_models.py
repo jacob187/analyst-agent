@@ -69,7 +69,7 @@ class RiskFactorAnalysis(BaseModel):
     risk_categories: Dict[str, List[str]] = Field(
         description="Risk factors categorized by type"
     )
-    sentiment_score: float = Field(description="Overall risk severity score")
+    sentiment_score: float = Field(description="Sentiment score from -10 (very negative / high risk severity) to 10 (very positive / low risk). A filing with major risks, investigations, or material weaknesses should score strongly negative.")
     sentiment_analysis: str = Field(description="Detailed risk assessment explanation")
     form_type: str = Field(description="Form type (10-K or 10-Q)")
     filing_metadata: Optional[Dict[str, str]] = Field(

@@ -47,6 +47,13 @@ prompts:
       Provide a comprehensive analysis including a summary, key risks, risk categorization,
       and an overall assessment of risk severity.
 
+      SENTIMENT SCORING:
+      - The sentiment_score must be on a scale from -10 (very negative) to 10 (very positive).
+      - A filing with significant risks, SEC investigations, material weaknesses, restatements,
+        or profitability challenges should receive a strongly NEGATIVE score (e.g., -6 to -10).
+      - Only use positive scores when the risk section indicates genuinely improving or minimal risk exposure.
+      - A routine 10-Q with no material changes from the prior 10-K is neutral (around 0).
+
       IMPORTANT CONTEXT:
       - If this is a 10-Q filing, Risk Factors may only include material changes since the last 10-K,
         or may not be present at all if there are no material changes.
