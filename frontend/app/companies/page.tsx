@@ -2,6 +2,8 @@ import { Building2 } from "lucide-react";
 import { CompanyCard } from "@/components/companies/CompanyCard";
 import { api } from "@/lib/api";
 
+export const dynamic = "force-dynamic";
+
 export default async function CompaniesPage() {
   const { tickers } = await api.tickers().catch(() => ({ tickers: [] }));
 
