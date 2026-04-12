@@ -22,7 +22,7 @@ interface CompanyDashboardProps {
 }
 
 export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardProps) {
-  const { keys, loaded: keysLoaded } = useApiKeys();
+  const { keys, loaded: keysLoaded, hasRequiredKeys } = useApiKeys();
 
   // Profile — fetched client-side so it doesn't block the initial page render
   const [profile, setProfile] = useState<CompanyProfileResponse | null>(null);
@@ -232,7 +232,22 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
               )}
             </div>
             <div className="h-[560px]">
-              <ChatWindow ticker={ticker} keys={keys} initialSessionId={sessionId} />
+              {keysLoaded && !hasRequiredKeys() ? (
+                <div className="flex h-full flex-col items-center justify-center gap-4 rounded-xl border border-border/60 bg-card p-8 text-center">
+                  <p className="text-sm font-medium">API keys required</p>
+                  <p className="text-xs text-muted-foreground">
+                    Configure a provider key and SEC EDGAR User-Agent to use the AI analyst.
+                  </p>
+                  <a
+                    href="/settings"
+                    className="rounded-lg bg-primary px-4 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+                  >
+                    Go to Settings
+                  </a>
+                </div>
+              ) : (
+                <ChatWindow ticker={ticker} keys={keys} initialSessionId={sessionId} />
+              )}
             </div>
           </div>
         </TabsContent>
