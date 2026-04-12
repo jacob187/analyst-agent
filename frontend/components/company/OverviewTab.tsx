@@ -65,7 +65,7 @@ export function OverviewTab({ data, loading }: OverviewTabProps) {
 
   if (!data) return null;
 
-  const { company, metrics, technicals, patterns, regime } = data;
+  const { company, metrics, technicals, patterns, regime, earnings } = data;
   const rsi = (technicals?.rsi as { value?: number } | undefined)?.value;
   const macd = technicals?.macd as
     | { value?: number; signal?: number; histogram?: number }
@@ -135,6 +135,7 @@ export function OverviewTab({ data, loading }: OverviewTabProps) {
             <MetricRow label="Price/Book" value={metrics?.price_to_book?.toFixed(2)} />
             <MetricRow label="Beta" value={metrics?.beta?.toFixed(2)} />
             <MetricRow label="Dividend Yield" value={formatPercent(metrics?.dividend_yield)} />
+            <MetricRow label="Next Earnings" value={earnings?.earnings_date ?? undefined} />
           </CardContent>
         </Card>
 

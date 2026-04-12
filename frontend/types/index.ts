@@ -119,7 +119,13 @@ export interface CompanyProfileResponse {
   company: CompanyInfo;
   metrics: Metrics;
   quote: Quote;
-  earnings: unknown[];
+  earnings: {
+    earnings_date?: string;
+    earnings_average?: number;
+    earnings_high?: number;
+    earnings_low?: number;
+    revenue_average?: number;
+  } | null;
   technicals: Record<string, unknown>;
   patterns: Pattern[];
   regime: Record<string, unknown>;
