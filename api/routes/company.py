@@ -178,6 +178,12 @@ async def get_company_profile(ticker: str):
         payload = await asyncio.to_thread(_build_profile, ticker)
         _profile_cache[ticker] = (time.monotonic(), payload)
 
+        # Track the company as soon as its profile is first loaded.
+        # This is the earliest signal that a user is interested in a ticker —
+        # before any chat session or filings analysis is triggered.
+        from api.db import ensure_company
+        await ensure_company(ticker)
+
     return JSONResponse(
         content=payload,
         headers={"Cache-Control": f"public, max-age={_PROFILE_CACHE_TTL}"},

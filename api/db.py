@@ -276,19 +276,22 @@ async def get_sessions(limit: int = 50) -> list[dict]:
         return [{"id": row["id"], "ticker": row["ticker"], "model": row["model"], "created_at": row["created_at"]} for row in rows]
 
 async def get_tickers(limit: int = 50) -> list[dict]:
-    """Return distinct tickers with session count and last-active date.
+    """Return tracked companies with session count and last-active date.
 
-    Intentionally omits session IDs — callers learn only which tickers have
-    been analysed, not the UUIDs needed to read conversation history.
+    Drives from the ``companies`` table so tickers appear as soon as any
+    analysis is run (filings, profile, or chat) — not only when a chat
+    session is explicitly started.  Session count is derived via LEFT JOIN,
+    so companies with zero sessions are still included.
     """
     db = await get_db()
     async with db.execute(
         """
-        SELECT ticker,
-               COUNT(*)        AS session_count,
-               MAX(created_at) AS last_active
-        FROM sessions
-        GROUP BY ticker
+        SELECT c.ticker,
+               COUNT(s.id)                            AS session_count,
+               COALESCE(MAX(s.created_at), c.added_at) AS last_active
+        FROM companies c
+        LEFT JOIN sessions s ON s.ticker = c.ticker
+        GROUP BY c.ticker
         ORDER BY last_active DESC
         LIMIT ?
         """,
