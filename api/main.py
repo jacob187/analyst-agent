@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 # Load .env from project root so GOOGLE_API_KEY, TAVILY_API_KEY, etc.
@@ -55,9 +55,27 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[os.getenv("FRONTEND_URL", "http://localhost:3000")],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=[
+        "Content-Type",
+        "X-Google-Api-Key",
+        "X-Openai-Api-Key",
+        "X-Anthropic-Api-Key",
+        "X-Sec-Header",
+        "X-Tavily-Api-Key",
+        "X-Model-Id",
+    ],
 )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
+
 
 app.include_router(health_router)
 app.include_router(sessions_router)

@@ -34,7 +34,7 @@ def _make_state(query, plan, step_results):
 class TestSynthesizer:
     """Test create_synthesizer_node with mock step results."""
 
-    def test_produces_nonempty_response(self, llm):
+    async def test_produces_nonempty_response(self, llm):
         """Synthesizer should produce a meaningful response, not empty string."""
         plan = QueryPlan(
             query_type="complex",
@@ -55,12 +55,12 @@ class TestSynthesizer:
         state = _make_state("What is Apple's current stock info?", plan, step_results)
 
         synthesizer = create_synthesizer_node(llm, "AAPL")
-        result_state = synthesizer(state)
+        result_state = await synthesizer(state)
 
         assert result_state["final_response"]
         assert len(result_state["final_response"]) > 20
 
-    def test_references_all_step_results(self, llm):
+    async def test_references_all_step_results(self, llm):
         """Synthesizer must reference content from ALL steps, not just the last.
 
         We give it two distinct mock results (risk analysis + stock price) and
@@ -95,7 +95,7 @@ class TestSynthesizer:
         )
 
         synthesizer = create_synthesizer_node(llm, "AAPL")
-        result_state = synthesizer(state)
+        result_state = await synthesizer(state)
 
         response = result_state["final_response"].lower()
 

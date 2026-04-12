@@ -15,6 +15,7 @@ from api.memory import (
 )
 from api.dependencies import resolve_ws_keys
 from api.rate_limit import check_rate_limit
+from api.validators import TICKER_RE
 from agents.model_registry import get_model, get_default_model, get_token_threshold
 from agents.llm_factory import create_llm_pair
 
@@ -32,9 +33,17 @@ async def _safe_send(websocket: WebSocket, data: dict) -> bool:
         return False
 
 
+MAX_QUERY_LENGTH = 4000
+
+
 @router.websocket("/ws/chat/{ticker}")
 async def chat(websocket: WebSocket, ticker: str):
     await websocket.accept()
+
+    if not TICKER_RE.match(ticker.upper()):
+        await websocket.send_json({"type": "error", "message": "Invalid ticker symbol."})
+        await websocket.close()
+        return
 
     try:
         auth_message = await websocket.receive_json()
@@ -149,6 +158,13 @@ async def chat(websocket: WebSocket, ticker: str):
                         continue
 
                     user_query = message.get("message", "")
+
+                    if len(user_query) > MAX_QUERY_LENGTH:
+                        await _safe_send(websocket, {
+                            "type": "error",
+                            "message": f"Message too long (max {MAX_QUERY_LENGTH} characters).",
+                        })
+                        continue
 
                     asyncio.create_task(save_message(session_id, "user", user_query))
                     conversation_history.append(HumanMessage(content=user_query))

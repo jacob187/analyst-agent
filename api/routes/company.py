@@ -12,7 +12,6 @@ trigger fresh analysis without TTL.
 import asyncio
 import json
 import logging
-import re
 import time
 from typing import Any
 
@@ -22,12 +21,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from api.dependencies import ApiKeys, get_api_keys
+from api.validators import TICKER_RE
 
 logger = logging.getLogger("analyst.filings")
 
 router = APIRouter(prefix="/api/company")
-
-_TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,10}$")
 
 # Server-side cache: {ticker: (monotonic_timestamp, payload)}
 # Values are JSON-round-tripped dicts to guarantee serializability.
@@ -158,7 +156,7 @@ async def get_company_profile(ticker: str):
     patterns, and market regime into a single response. No LLM calls —
     pure data aggregation, typically responds in < 1 second.
     """
-    if not _TICKER_RE.match(ticker):
+    if not TICKER_RE.match(ticker.upper()):
         raise HTTPException(status_code=422, detail="Invalid ticker symbol")
 
     ticker = ticker.upper()
@@ -399,7 +397,7 @@ async def get_company_filings(
 
     Requires an LLM API key and SEC header (via headers or env vars).
     """
-    if not _TICKER_RE.match(ticker):
+    if not TICKER_RE.match(ticker.upper()):
         raise HTTPException(status_code=422, detail="Invalid ticker symbol")
 
     ticker = ticker.upper()
@@ -545,7 +543,7 @@ async def stream_company_filings(
         {"type": "complete"}
         {"type": "error",    "message": "..."}
     """
-    if not _TICKER_RE.match(ticker):
+    if not TICKER_RE.match(ticker.upper()):
         raise HTTPException(status_code=422, detail="Invalid ticker symbol")
 
     ticker = ticker.upper()

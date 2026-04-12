@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, HTTPException, Query
 
+from api.validators import TICKER_RE
 from api.db import (
     get_or_create_session, get_session, get_session_by_ticker,
     get_tickers, get_sessions_for_ticker,
@@ -36,6 +37,8 @@ async def list_sessions(
 @router.get("/sessions/by-ticker/{ticker}")
 async def get_session_for_ticker(ticker: str):
     """Return the existing session for a ticker, or null if none exists."""
+    if not TICKER_RE.match(ticker.upper()):
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol.")
     session = await get_session_by_ticker(ticker.upper())
     return {"session": session}
 

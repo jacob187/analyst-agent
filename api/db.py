@@ -17,6 +17,11 @@ async def get_db() -> aiosqlite.Connection:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         _db = await aiosqlite.connect(DB_PATH)
         _db.row_factory = aiosqlite.Row
+        # WAL mode allows concurrent reads during writes and prevents readers
+        # from blocking writers. busy_timeout retries instead of failing
+        # immediately when a write lock is held.
+        await _db.execute("PRAGMA journal_mode=WAL")
+        await _db.execute("PRAGMA busy_timeout=5000")
     return _db
 
 async def init_db():
@@ -492,63 +497,79 @@ async def save_briefing(raw_json: str, market_regime: str, market_positioning: s
         VALUES (?, ?, ?, ?, ?, ?)
     """, (briefing_id, market_regime, market_positioning, alerts_json, thinking, raw_json))
 
-    for t in tickers:
-        ticker_id = str(uuid.uuid4())
-        # Defensive: ensure company exists before FK insert
-        await db.execute("INSERT OR IGNORE INTO companies (ticker) VALUES (?)", (t["ticker"],))
-        await db.execute("""
-            INSERT INTO briefing_tickers
-                (id, briefing_id, ticker, price, change_pct, technical_signal,
-                 news_summary, news_url, outlook)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            ticker_id, briefing_id, t["ticker"], t["price"], t["change_pct"],
-            t["technical_signal"], t["news_summary"], t.get("news_url"),
-            t["outlook"],
-        ))
+    # Batch-insert companies and briefing_tickers in two round-trips instead of
+    # 2×N individual execute() calls — executemany sends all rows in one pass.
+    await db.executemany(
+        "INSERT OR IGNORE INTO companies (ticker) VALUES (?)",
+        [(t["ticker"],) for t in tickers],
+    )
+    await db.executemany(
+        "INSERT INTO briefing_tickers "
+        "(id, briefing_id, ticker, price, change_pct, technical_signal, "
+        "news_summary, news_url, outlook) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                str(uuid.uuid4()), briefing_id, t["ticker"], t["price"],
+                t["change_pct"], t["technical_signal"], t["news_summary"],
+                t.get("news_url"), t["outlook"],
+            )
+            for t in tickers
+        ],
+    )
 
     await db.commit()
     return briefing_id
 
 
 async def get_recent_briefings(limit: int = 10) -> list[dict]:
-    """Return most recent briefings with their tickers."""
+    """Return most recent briefings with their tickers.
+
+    A single JOIN replaces the previous N+1 pattern (1 briefings query +
+    1 ticker sub-query per row). Python groups the flat rows by briefing id.
+    """
     db = await get_db()
     async with db.execute(
-        "SELECT id, market_regime, market_positioning, alerts, thinking, created_at "
-        "FROM briefings ORDER BY created_at DESC LIMIT ?",
-        (limit,)
+        """
+        SELECT b.id, b.market_regime, b.market_positioning, b.alerts,
+               b.thinking, b.created_at,
+               bt.ticker, bt.price, bt.change_pct, bt.technical_signal,
+               bt.news_summary, bt.news_url, bt.outlook
+        FROM briefings b
+        LEFT JOIN briefing_tickers bt ON bt.briefing_id = b.id
+        WHERE b.id IN (
+            SELECT id FROM briefings ORDER BY created_at DESC LIMIT ?
+        )
+        ORDER BY b.created_at DESC
+        """,
+        (limit,),
     ) as cursor:
         rows = await cursor.fetchall()
 
-    results = []
+    # Group flat rows into nested briefing dicts, preserving order.
+    briefings: dict[str, dict] = {}
     for row in rows:
-        briefing = {
-            "id": row["id"],
-            "market_regime": row["market_regime"],
-            "market_positioning": row["market_positioning"],
-            "alerts": row["alerts"],
-            "thinking": row["thinking"],
-            "created_at": row["created_at"],
-            "tickers": [],
-        }
-        async with db.execute(
-            "SELECT ticker, price, change_pct, technical_signal, news_summary, "
-            "news_url, outlook FROM briefing_tickers WHERE briefing_id = ?",
-            (row["id"],)
-        ) as tc:
-            ticker_rows = await tc.fetchall()
-            briefing["tickers"] = [
-                {
-                    "ticker": tr["ticker"], "price": tr["price"],
-                    "change_pct": tr["change_pct"], "technical_signal": tr["technical_signal"],
-                    "news_summary": tr["news_summary"], "news_url": tr["news_url"],
-                    "outlook": tr["outlook"],
-                }
-                for tr in ticker_rows
-            ]
-        results.append(briefing)
-    return results
+        bid = row["id"]
+        if bid not in briefings:
+            briefings[bid] = {
+                "id": bid,
+                "market_regime": row["market_regime"],
+                "market_positioning": row["market_positioning"],
+                "alerts": row["alerts"],
+                "thinking": row["thinking"],
+                "created_at": row["created_at"],
+                "tickers": [],
+            }
+        if row["ticker"]:  # LEFT JOIN produces NULL ticker on briefings with no tickers
+            briefings[bid]["tickers"].append({
+                "ticker": row["ticker"],
+                "price": row["price"],
+                "change_pct": row["change_pct"],
+                "technical_signal": row["technical_signal"],
+                "news_summary": row["news_summary"],
+                "news_url": row["news_url"],
+                "outlook": row["outlook"],
+            })
+    return list(briefings.values())
 
 
 async def get_briefing_history(ticker: str, days: int = 30) -> list[dict]:

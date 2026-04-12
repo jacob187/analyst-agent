@@ -289,7 +289,7 @@ def create_synthesizer_node(llm: BaseChatModel, ticker: str):
       the complete response at once. This keeps backward compatibility.
     """
 
-    def synthesizer(state: AnalysisState) -> AnalysisState:
+    async def synthesizer(state: AnalysisState) -> AnalysisState:
         prompt = _build_synthesis_prompt(state, ticker)
 
         # Try to get a stream writer — only available inside workflow.stream()
@@ -302,16 +302,18 @@ def create_synthesizer_node(llm: BaseChatModel, ticker: str):
             pass
 
         if writer:
-            # Streaming path: emit tokens/thinking as they arrive
+            # Streaming path: emit tokens/thinking as they arrive.
+            # astream() is the async equivalent — avoids blocking the event loop
+            # for the duration of synthesis (which can be 10-30s with thinking enabled).
             full_response = ""
-            for chunk in llm.stream(prompt):
+            async for chunk in llm.astream(prompt):
                 full_response += _process_streaming_chunk(chunk, writer)
             state["final_response"] = full_response
         else:
-            # Non-streaming fallback: invoke and return complete response.
+            # Non-streaming fallback: ainvoke and return complete response.
             # extract_text handles the case where include_thoughts=True
             # causes response.content to be a list of blocks instead of a string.
-            response = llm.invoke(prompt)
+            response = await llm.ainvoke(prompt)
             state["final_response"] = extract_text(response.content)
 
         return state
