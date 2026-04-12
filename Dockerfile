@@ -3,7 +3,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Install uv for fast, reproducible dependency resolution
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+RUN pip install uv --quiet
 
 # Copy dependency files first (Docker layer caching — only re-installs when deps change)
 COPY pyproject.toml uv.lock README.md ./
