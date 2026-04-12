@@ -18,7 +18,11 @@ class PatternRecognitionEngine:
     """
 
     def detect_all_patterns(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
-        """Run every detector and merge results into a single list."""
+        """Run every detector and merge results into a single list.
+
+        Contradictory patterns (e.g. H&S + inverse H&S, or double top +
+        double bottom) are resolved by keeping only the higher-confidence one.
+        """
         if df is None or df.empty:
             return []
 
@@ -34,7 +38,33 @@ class PatternRecognitionEngine:
                 patterns.extend(detector(df))
             except Exception as e:
                 print(f"Pattern detector {detector.__name__} failed: {e}")
+
+        patterns = self._resolve_contradictions(patterns)
         return patterns
+
+    def _resolve_contradictions(self, patterns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Remove contradictory patterns, keeping only the higher-confidence one.
+
+        Two patterns contradict when they imply opposite directions on the same
+        price structure — e.g. Head & Shoulders (bearish) vs Inverse H&S (bullish),
+        or Double Top (bearish) vs Double Bottom (bullish).
+        """
+        contradiction_groups = [
+            {"head_and_shoulders", "inverse_head_and_shoulders"},
+            {"double_top", "double_bottom"},
+        ]
+
+        to_remove: set[str] = set()
+        for group in contradiction_groups:
+            group_patterns = [p for p in patterns if p["type"] in group]
+            if len(group_patterns) >= 2:
+                # Keep only the highest-confidence pattern in this group
+                best = max(group_patterns, key=lambda p: p["confidence"])
+                for p in group_patterns:
+                    if p is not best:
+                        to_remove.add(id(p))
+
+        return [p for p in patterns if id(p) not in to_remove]
 
     # ── Individual detectors ──────────────────────────────────────────────
 
@@ -70,8 +100,13 @@ class PatternRecognitionEngine:
                     shoulder_diff = abs(left_val - right_val) / max(left_val, right_val)
                     if shoulder_diff < 0.03:
                         neckline = min(lows[left:right + 1])
+                        geometry = self._hs_geometry_score(
+                            left_val, mid_val, right_val, shoulder_diff
+                        )
                         confidence = self._calculate_pattern_confidence(
-                            df, "head_and_shoulders", len(df) - 50 + left, len(df) - 50 + right
+                            df, "head_and_shoulders",
+                            len(df) - 50 + left, len(df) - 50 + right,
+                            geometry_score=geometry,
                         )
                         patterns.append({
                             "type": "head_and_shoulders",
@@ -94,8 +129,13 @@ class PatternRecognitionEngine:
                     shoulder_diff = abs(left_val - right_val) / max(left_val, right_val)
                     if shoulder_diff < 0.03:
                         neckline = max(highs[left:right + 1])
+                        geometry = self._hs_geometry_score(
+                            left_val, mid_val, right_val, shoulder_diff
+                        )
                         confidence = self._calculate_pattern_confidence(
-                            df, "inverse_head_and_shoulders", len(df) - 50 + left, len(df) - 50 + right
+                            df, "inverse_head_and_shoulders",
+                            len(df) - 50 + left, len(df) - 50 + right,
+                            geometry_score=geometry,
                         )
                         patterns.append({
                             "type": "inverse_head_and_shoulders",
@@ -287,6 +327,42 @@ class PatternRecognitionEngine:
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
+    def _hs_geometry_score(
+        self,
+        left_val: float,
+        mid_val: float,
+        right_val: float,
+        shoulder_diff: float,
+    ) -> float:
+        """Score how well three peaks/troughs match ideal H&S geometry.
+
+        Two factors:
+        1. Head prominence — how far the head extends beyond the shoulders.
+           A head that's barely above the shoulders (e.g. 0.5%) is weak;
+           one that's 3%+ beyond is textbook.
+        2. Shoulder symmetry — already measured as shoulder_diff (0 = perfect).
+
+        Returns 0.0–1.0 where 1.0 is a textbook pattern.
+        """
+        shoulder_avg = (left_val + right_val) / 2
+        # Head prominence: % the head extends beyond shoulder average
+        prominence = abs(mid_val - shoulder_avg) / shoulder_avg if shoulder_avg else 0
+
+        # Map prominence to 0–1: <0.5% → 0.1, 1.5% → 0.5, 3%+ → 1.0
+        if prominence < 0.005:
+            prominence_score = 0.1
+        elif prominence < 0.015:
+            prominence_score = 0.1 + (prominence - 0.005) * 40  # 0.1 → 0.5
+        elif prominence < 0.03:
+            prominence_score = 0.5 + (prominence - 0.015) * 33.3  # 0.5 → 1.0
+        else:
+            prominence_score = 1.0
+
+        # Symmetry: shoulder_diff of 0 → 1.0, 0.03 → 0.0
+        symmetry_score = max(0, 1.0 - shoulder_diff / 0.03)
+
+        return 0.6 * prominence_score + 0.4 * symmetry_score
+
     def _find_local_extrema(
         self, values: np.ndarray, order: int = 3, mode: str = "max"
     ) -> List[int]:
@@ -305,30 +381,38 @@ class PatternRecognitionEngine:
         return indices
 
     def _calculate_pattern_confidence(
-        self, df: pd.DataFrame, pattern_type: str, start_idx: int, end_idx: int
+        self, df: pd.DataFrame, pattern_type: str, start_idx: int, end_idx: int,
+        geometry_score: float = 0.5,
     ) -> float:
-        """Score confidence from 0-1 using volume confirmation.
+        """Score confidence from 0-1 using volume confirmation and pattern geometry.
 
-        Higher average volume during the pattern window (relative to the 50-bar
-        average before it) increases confidence — institutions tend to participate
-        in genuine pattern formations.
+        Two components (equally weighted):
+        1. Volume: higher avg volume during the pattern window (vs 50-bar baseline)
+           signals institutional participation.
+        2. Geometry: caller passes a 0-1 score reflecting how well the price
+           structure matches the ideal pattern shape (shoulder symmetry, head
+           prominence, etc.).
+
+        Args:
+            geometry_score: How well the price structure matches the ideal
+                pattern. 1.0 = textbook shape, 0.0 = barely qualifies.
+                Defaults to 0.5 when not provided (backwards compat).
         """
-        if "Volume" not in df.columns:
-            return 0.5
-
         start_idx = max(0, start_idx)
         end_idx = min(len(df) - 1, end_idx)
 
-        pattern_vol = df["Volume"].iloc[start_idx:end_idx + 1].mean()
+        # Volume component
+        vol_score = 0.5
+        if "Volume" in df.columns:
+            pattern_vol = df["Volume"].iloc[start_idx:end_idx + 1].mean()
+            baseline_start = max(0, start_idx - 50)
+            baseline_vol = df["Volume"].iloc[baseline_start:start_idx].mean()
+            if baseline_vol > 0:
+                vol_ratio = pattern_vol / baseline_vol
+                # Map ratio to 0.2–0.9: ratio 0.5 → 0.35, 1.0 → 0.5, 2.0 → 0.8
+                vol_score = min(0.2 + vol_ratio * 0.3, 0.9)
 
-        # Baseline: 50 bars before the pattern
-        baseline_start = max(0, start_idx - 50)
-        baseline_vol = df["Volume"].iloc[baseline_start:start_idx].mean()
-
-        if baseline_vol == 0:
-            return 0.5
-
-        vol_ratio = pattern_vol / baseline_vol
-        # Map ratio to 0.3–0.9 range: ratio of 1.0 → 0.6, 2.0 → 0.9
-        confidence = min(0.3 + vol_ratio * 0.3, 0.9)
-        return round(confidence, 2)
+        # Blend: 50% geometry, 50% volume
+        confidence = 0.5 * geometry_score + 0.5 * vol_score
+        # Clamp to [0.2, 0.9] — never fully certain or fully dismissive
+        return round(max(0.2, min(confidence, 0.9)), 2)
