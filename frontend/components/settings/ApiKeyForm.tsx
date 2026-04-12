@@ -19,7 +19,7 @@ import { PROVIDER_LABELS, type Provider } from "@/lib/constants";
 import type { ApiKeys } from "@/types";
 
 export function ApiKeyForm() {
-  const { keys, setKeys, loaded } = useApiKeys();
+  const { keys, setKeys } = useApiKeys();
   const { models, envKeys } = useModels();
   const [local, setLocal] = useState<ApiKeys | null>(null);
   const [show, setShow] = useState(false);
@@ -49,8 +49,6 @@ export function ApiKeyForm() {
     openai: "openai_api_key",
     anthropic: "anthropic_api_key",
   };
-
-  if (!loaded) return null;
 
   return (
     <form onSubmit={handleSave} className="space-y-6">
@@ -122,7 +120,7 @@ export function ApiKeyForm() {
         </CardHeader>
         <CardContent>
           <div className="flex items-center gap-2">
-            {envKeys?.sec_header ? (
+            {draft.sec_header ? (
               <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" />
             ) : (
               <AlertCircle className="h-4 w-4 shrink-0 text-destructive" />
