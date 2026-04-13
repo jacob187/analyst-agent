@@ -1,4 +1,5 @@
 import { API_BASE } from "./constants";
+import { getUserId } from "@/hooks/useUserId";
 import type {
   ApiKeys,
   BriefingResponse,
@@ -29,8 +30,14 @@ function keyHeaders(keys: Partial<ApiKeys>): Record<string, string> {
   return h;
 }
 
+function userIdHeader(): Record<string, string> {
+  return { "X-User-Id": getUserId() };
+}
+
 async function get<T>(path: string, headers?: Record<string, string>): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { headers });
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: { ...userIdHeader(), ...headers },
+  });
   if (!res.ok) throw new Error(`API error ${res.status}: ${path}`);
   return res.json() as Promise<T>;
 }
@@ -42,15 +49,18 @@ async function post<T>(
 ): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...headers },
+    headers: { "Content-Type": "application/json", ...userIdHeader(), ...headers },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`API error ${res.status}: ${path}`);
   return res.json() as Promise<T>;
 }
 
-async function del<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { method: "DELETE" });
+async function del<T>(path: string, headers?: Record<string, string>): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "DELETE",
+    headers: { ...userIdHeader(), ...headers },
+  });
   if (!res.ok) throw new Error(`API error ${res.status}: ${path}`);
   return res.json() as Promise<T>;
 }
@@ -100,7 +110,7 @@ export const api = {
       let res: Response;
       try {
         res = await fetch(`${API_BASE}/api/company/${ticker}/filings/stream`, {
-          headers: keyHeaders(keys),
+          headers: { ...userIdHeader(), ...keyHeaders(keys) },
           signal: controller.signal,
         });
       } catch (err) {

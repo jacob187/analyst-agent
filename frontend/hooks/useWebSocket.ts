@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { WS_BASE, API_BASE } from "@/lib/constants";
+import { getUserId } from "@/hooks/useUserId";
 import type { ApiKeys, StreamingMessage, WsMessage } from "@/types";
 
 export type WsStatus = "connecting" | "connected" | "disconnected" | "error";
@@ -44,6 +45,7 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
       ws.send(
         JSON.stringify({
           type: "auth",
+          user_id: getUserId(),
           google_api_key: k.google_api_key || undefined,
           openai_api_key: k.openai_api_key || undefined,
           anthropic_api_key: k.anthropic_api_key || undefined,
@@ -66,7 +68,8 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
             // If resuming, fetch and display prior messages
             if (data.resumed) {
               fetch(
-                `${API_BASE}/sessions/${data.session_id}/messages?ticker=${ticker}`
+                `${API_BASE}/sessions/${data.session_id}/messages?ticker=${ticker}`,
+                { headers: { "X-User-Id": getUserId() } }
               )
                 .then((r) => r.json())
                 .then((body: { messages: Array<{ role: "user" | "assistant"; content: string }> }) => {
