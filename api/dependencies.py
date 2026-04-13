@@ -21,6 +21,8 @@ from dataclasses import dataclass
 
 from fastapi import Header
 
+from api.validators import USER_ID_RE
+
 
 # Maps provider name → ApiKeys field name for key lookup.
 _PROVIDER_KEY_FIELDS: dict[str, str] = {
@@ -28,6 +30,13 @@ _PROVIDER_KEY_FIELDS: dict[str, str] = {
     "openai": "openai_api_key",
     "anthropic": "anthropic_api_key",
 }
+
+
+def _validate_user_id(raw: str | None) -> str | None:
+    """Return the user ID if it's a valid UUID, otherwise None."""
+    if raw and isinstance(raw, str) and USER_ID_RE.match(raw):
+        return raw
+    return None
 
 
 @dataclass
@@ -39,6 +48,13 @@ class ApiKeys:
     sec_header: str | None
     tavily_api_key: str | None
     model_id: str | None
+    user_id: str | None = None
+
+    def require_user_id(self) -> str:
+        """Return user_id or raise ValueError if missing/invalid."""
+        if not self.user_id:
+            raise ValueError("User ID required (X-User-Id header)")
+        return self.user_id
 
     def require_google(self) -> str:
         """Return google_api_key or raise ValueError if missing."""
@@ -75,6 +91,7 @@ async def get_api_keys(
     x_sec_header: str | None = Header(None),
     x_tavily_api_key: str | None = Header(None),
     x_model_id: str | None = Header(None),
+    x_user_id: str | None = Header(None),
 ) -> ApiKeys:
     """FastAPI dependency that resolves API keys from headers → env vars."""
     return ApiKeys(
@@ -84,6 +101,7 @@ async def get_api_keys(
         sec_header=x_sec_header or os.getenv("SEC_HEADER"),
         tavily_api_key=x_tavily_api_key or os.getenv("TAVILY_API_KEY"),
         model_id=x_model_id,
+        user_id=_validate_user_id(x_user_id),
     )
 
 
@@ -100,4 +118,5 @@ def resolve_ws_keys(auth_message: dict) -> ApiKeys:
         sec_header=auth_message.get("sec_header") or os.getenv("SEC_HEADER"),
         tavily_api_key=auth_message.get("tavily_api_key") or os.getenv("TAVILY_API_KEY"),
         model_id=auth_message.get("model_id"),
+        user_id=_validate_user_id(auth_message.get("user_id")),
     )

@@ -25,6 +25,7 @@ logging.basicConfig(
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 # Load .env from project root so GOOGLE_API_KEY, TAVILY_API_KEY, etc.
 # are available via os.getenv() as fallbacks for local development.
@@ -64,6 +65,7 @@ app.add_middleware(
         "X-Sec-Header",
         "X-Tavily-Api-Key",
         "X-Model-Id",
+        "X-User-Id",
     ],
 )
 
@@ -75,6 +77,12 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     return response
+
+
+@app.exception_handler(ValueError)
+async def value_error_handler(request: Request, exc: ValueError):
+    """Convert ValueError (from require_user_id, require_provider_key) to 422."""
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
 
 
 app.include_router(health_router)

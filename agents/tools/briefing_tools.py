@@ -26,12 +26,15 @@ def _run_async(coro: Any) -> Any:
         return asyncio.run(coro)
 
 
-def _tool_briefing_history(ticker: str, days: str = "7") -> str:
+def _tool_briefing_history(ticker: str, user_id: str | None = None, days: str = "7") -> str:
     """Get recent daily briefing analyses for a ticker.
 
     Returns a formatted summary of recent outlooks, signals, and alerts.
     """
     from api.db import get_briefing_history
+
+    if not user_id:
+        return f"No briefing history available for {ticker} (no user context)."
 
     try:
         days_int = int(days)
@@ -39,7 +42,7 @@ def _tool_briefing_history(ticker: str, days: str = "7") -> str:
         days_int = 7
 
     try:
-        history = asyncio.run(get_briefing_history(ticker.upper(), days=days_int))
+        history = asyncio.run(get_briefing_history(ticker.upper(), user_id, days=days_int))
     except RuntimeError:
         return f"Unable to query briefing history for {ticker} (event loop conflict)."
 
@@ -65,12 +68,12 @@ def _tool_briefing_history(ticker: str, days: str = "7") -> str:
     return "\n".join(lines)
 
 
-def _tool_latest_briefing(_input: str = "") -> str:
+def _tool_latest_briefing(user_id: str | None = None, _input: str = "") -> str:
     """Get the most recent full morning briefing summary."""
     from api.db import get_recent_briefings
 
     try:
-        briefings = asyncio.run(get_recent_briefings(limit=1))
+        briefings = asyncio.run(get_recent_briefings(user_id=user_id, limit=1))
     except RuntimeError:
         return "Unable to query latest briefing (event loop conflict)."
 
@@ -109,11 +112,12 @@ def _tool_latest_briefing(_input: str = "") -> str:
     return "\n".join(lines)
 
 
-def create_briefing_tools(ticker: str) -> list[Tool]:
-    """Create briefing history tools bound to a specific ticker.
+def create_briefing_tools(ticker: str, user_id: str | None = None) -> list[Tool]:
+    """Create briefing history tools bound to a specific ticker and user.
 
     Args:
         ticker: Company ticker symbol (used as default for history queries)
+        user_id: Anonymous user ID for scoping briefing queries
 
     Returns:
         List of LangChain Tool objects for briefing history
@@ -126,7 +130,7 @@ def create_briefing_tools(ticker: str) -> list[Tool]:
                 "Returns outlook trends, technical signals, and news summaries "
                 "from past morning briefings. Input: number of days to look back (default 7)."
             ),
-            func=lambda days="7": _tool_briefing_history(ticker, days),
+            func=lambda days="7": _tool_briefing_history(ticker, user_id, days),
         ),
         Tool.from_function(
             name="get_latest_briefing",
@@ -134,6 +138,6 @@ def create_briefing_tools(ticker: str) -> list[Tool]:
                 "Get the most recent full morning briefing summary. "
                 "Returns market regime, positioning, all ticker analyses, and alerts."
             ),
-            func=_tool_latest_briefing,
+            func=lambda _input="": _tool_latest_briefing(user_id, _input),
         ),
     ]

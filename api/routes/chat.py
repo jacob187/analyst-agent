@@ -58,6 +58,16 @@ async def chat(websocket: WebSocket, ticker: str):
 
         keys = resolve_ws_keys(auth_message)
 
+        if not keys.user_id:
+            await websocket.send_json({
+                "type": "error",
+                "message": "User ID required. Please refresh the page."
+            })
+            await websocket.close()
+            return
+
+        user_id = keys.user_id
+
         if not keys.sec_header:
             await websocket.send_json({
                 "type": "error",
@@ -85,19 +95,21 @@ async def chat(websocket: WebSocket, ticker: str):
             await websocket.close()
             return
 
-        # Resolve session
+        # Resolve session (scoped to user)
         explicit_session_id = auth_message.get("session_id")
         if explicit_session_id:
             session_id = explicit_session_id
         else:
-            session_id = await get_or_create_session(ticker, model=model_id)
+            session_id = await get_or_create_session(ticker, user_id, model=model_id)
 
         session = await get_session(session_id)
 
-        # Validate that the session belongs to the ticker in the URL.
-        # Without this check, a client could supply any session_id and
-        # read another ticker's full conversation history (IDOR).
-        if session is None or session["ticker"].upper() != ticker.upper():
+        # Validate session belongs to this ticker AND this user (IDOR guard).
+        if (
+            session is None
+            or session["ticker"].upper() != ticker.upper()
+            or session.get("user_id") != user_id
+        ):
             await websocket.send_json({"type": "error", "message": "Invalid session."})
             await websocket.close()
             return
@@ -125,6 +137,7 @@ async def chat(websocket: WebSocket, ticker: str):
                 tavily_api_key=keys.tavily_api_key,
                 synthesizer_llm=synthesizer_llm,
                 sec_header=keys.sec_header,
+                user_id=user_id,
             )
 
             tools_count = "16 tools" if keys.tavily_api_key else "11 tools"

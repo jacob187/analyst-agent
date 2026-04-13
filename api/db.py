@@ -32,6 +32,7 @@ async def init_db():
             id TEXT PRIMARY KEY,
             ticker TEXT NOT NULL,
             summary TEXT,
+            user_id TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -44,6 +45,12 @@ async def init_db():
     # Migration: add model column for multi-model support
     try:
         await db.execute("ALTER TABLE sessions ADD COLUMN model TEXT")
+        await db.commit()
+    except Exception:
+        pass  # Column already exists
+    # Migration: add user_id column for per-user isolation
+    try:
+        await db.execute("ALTER TABLE sessions ADD COLUMN user_id TEXT")
         await db.commit()
     except Exception:
         pass  # Column already exists
@@ -69,8 +76,10 @@ async def init_db():
     # and are sent per-request (WebSocket auth message or request headers).
     await db.execute("""
         CREATE TABLE IF NOT EXISTS watchlist (
-            ticker TEXT PRIMARY KEY,
-            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            user_id TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, ticker)
         )
     """)
 
@@ -117,6 +126,7 @@ async def init_db():
             alerts TEXT NOT NULL,
             thinking TEXT,
             raw_json TEXT NOT NULL,
+            user_id TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -167,6 +177,46 @@ async def init_db():
         ON filing_analyses(ticker, form_type, accession_number)
     """)
 
+    # Migration: add user_id to briefings for per-user isolation
+    try:
+        await db.execute("ALTER TABLE briefings ADD COLUMN user_id TEXT")
+        await db.commit()
+    except Exception:
+        pass  # Column already exists
+
+    # Migration: watchlist PK change from (ticker) to (user_id, ticker).
+    # SQLite doesn't support ALTER TABLE to change a PK, so we recreate.
+    # Only runs if the old schema (ticker-only PK) is detected.
+    try:
+        async with db.execute("PRAGMA table_info(watchlist)") as cur:
+            columns = {row[1] for row in await cur.fetchall()}
+        if "user_id" not in columns:
+            await db.execute("""
+                CREATE TABLE watchlist_v2 (
+                    user_id TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, ticker)
+                )
+            """)
+            # Old rows have no user_id — they'll be orphaned (intentional).
+            await db.execute("DROP TABLE watchlist")
+            await db.execute("ALTER TABLE watchlist_v2 RENAME TO watchlist")
+            await db.commit()
+    except Exception:
+        pass  # Migration already applied or table doesn't exist yet
+
+    # Indexes for user-scoped queries
+    await db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)
+    """)
+    await db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)
+    """)
+    await db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_briefings_user ON briefings(user_id)
+    """)
+
     # Migration: backfill companies from existing watchlist rows
     await db.execute("""
         INSERT OR IGNORE INTO companies (ticker, added_at)
@@ -182,7 +232,7 @@ async def close_db():
         await _db.close()
         _db = None
 
-async def create_session(ticker: str, model: str | None = None) -> str:
+async def create_session(ticker: str, user_id: str, model: str | None = None) -> str:
     """Create a new chat session. Returns session ID.
 
     Also ensures a companies row exists for the ticker.
@@ -192,24 +242,24 @@ async def create_session(ticker: str, model: str | None = None) -> str:
     ticker = ticker.upper()
     await db.execute("INSERT OR IGNORE INTO companies (ticker) VALUES (?)", (ticker,))
     await db.execute(
-        "INSERT INTO sessions (id, ticker, model) VALUES (?, ?, ?)",
-        (session_id, ticker, model)
+        "INSERT INTO sessions (id, ticker, user_id, model) VALUES (?, ?, ?, ?)",
+        (session_id, ticker, user_id, model)
     )
     await db.commit()
     return session_id
 
-async def get_or_create_session(ticker: str, model: str | None = None) -> str:
+async def get_or_create_session(ticker: str, user_id: str, model: str | None = None) -> str:
     """
-    Return the existing session ID for this ticker, or create one.
+    Return the existing session ID for this ticker+user, or create one.
 
-    One session per ticker is enforced at the application level. This means
-    entering AAPL always resumes the AAPL conversation — delete the session
-    from History to start fresh.
+    One session per ticker per user is enforced at the application level.
+    Entering AAPL always resumes that user's AAPL conversation — delete
+    the session from History to start fresh.
     """
     db = await get_db()
     ticker = ticker.upper()
     async with db.execute(
-        "SELECT id FROM sessions WHERE ticker = ?", (ticker,)
+        "SELECT id FROM sessions WHERE ticker = ? AND user_id = ?", (ticker, user_id)
     ) as cursor:
         row = await cursor.fetchone()
         if row:
@@ -218,22 +268,22 @@ async def get_or_create_session(ticker: str, model: str | None = None) -> str:
     session_id = str(uuid.uuid4())
     await db.execute("INSERT OR IGNORE INTO companies (ticker) VALUES (?)", (ticker,))
     await db.execute(
-        "INSERT INTO sessions (id, ticker, model) VALUES (?, ?, ?)",
-        (session_id, ticker, model),
+        "INSERT INTO sessions (id, ticker, user_id, model) VALUES (?, ?, ?, ?)",
+        (session_id, ticker, user_id, model),
     )
     await db.commit()
     return session_id
 
-async def get_session_by_ticker(ticker: str) -> dict | None:
-    """Return session metadata for a ticker, or None if no session exists."""
+async def get_session_by_ticker(ticker: str, user_id: str) -> dict | None:
+    """Return session metadata for a ticker+user, or None if no session exists."""
     db = await get_db()
     async with db.execute(
-        "SELECT id, ticker, model, created_at FROM sessions WHERE ticker = ?",
-        (ticker.upper(),)
+        "SELECT id, ticker, user_id, model, created_at FROM sessions WHERE ticker = ? AND user_id = ?",
+        (ticker.upper(), user_id)
     ) as cursor:
         row = await cursor.fetchone()
         if row:
-            return {"id": row["id"], "ticker": row["ticker"], "model": row["model"], "created_at": row["created_at"]}
+            return {"id": row["id"], "ticker": row["ticker"], "user_id": row["user_id"], "model": row["model"], "created_at": row["created_at"]}
         return None
 
 async def update_session_summary(session_id: str, summary: str) -> None:
@@ -265,23 +315,21 @@ async def get_session_messages(session_id: str) -> list[dict]:
         rows = await cursor.fetchall()
         return [{"role": row["role"], "content": row["content"], "created_at": row["created_at"]} for row in rows]
 
-async def get_sessions(limit: int = 50) -> list[dict]:
-    """Get recent sessions."""
+async def get_sessions(user_id: str, limit: int = 50) -> list[dict]:
+    """Get recent sessions for a user."""
     db = await get_db()
     async with db.execute(
-        "SELECT id, ticker, model, created_at FROM sessions ORDER BY created_at DESC LIMIT ?",
-        (limit,)
+        "SELECT id, ticker, model, created_at FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+        (user_id, limit)
     ) as cursor:
         rows = await cursor.fetchall()
         return [{"id": row["id"], "ticker": row["ticker"], "model": row["model"], "created_at": row["created_at"]} for row in rows]
 
-async def get_tickers(limit: int = 50) -> list[dict]:
-    """Return tracked companies with session count and last-active date.
+async def get_tickers(user_id: str, limit: int = 50) -> list[dict]:
+    """Return companies this user has interacted with (sessions or watchlist).
 
-    Drives from the ``companies`` table so tickers appear as soon as any
-    analysis is run (filings, profile, or chat) — not only when a chat
-    session is explicitly started.  Session count is derived via LEFT JOIN,
-    so companies with zero sessions are still included.
+    Only shows companies where the user has at least one session or a
+    watchlist entry — not every company in the global table.
     """
     db = await get_db()
     async with db.execute(
@@ -290,12 +338,17 @@ async def get_tickers(limit: int = 50) -> list[dict]:
                COUNT(s.id)                            AS session_count,
                COALESCE(MAX(s.created_at), c.added_at) AS last_active
         FROM companies c
-        LEFT JOIN sessions s ON s.ticker = c.ticker
+        LEFT JOIN sessions s ON s.ticker = c.ticker AND s.user_id = ?
+        WHERE c.ticker IN (
+            SELECT ticker FROM sessions WHERE user_id = ?
+            UNION
+            SELECT ticker FROM watchlist WHERE user_id = ?
+        )
         GROUP BY c.ticker
         ORDER BY last_active DESC
         LIMIT ?
         """,
-        (limit,)
+        (user_id, user_id, user_id, limit)
     ) as cursor:
         rows = await cursor.fetchall()
         return [
@@ -303,17 +356,12 @@ async def get_tickers(limit: int = 50) -> list[dict]:
             for row in rows
         ]
 
-async def get_sessions_for_ticker(ticker: str, limit: int = 50) -> list[dict]:
-    """Return all sessions (with IDs) for a specific ticker.
-
-    Requires the caller to already know the ticker — session IDs are only
-    exposed once the ticker is established, which breaks the enumeration
-    attack that combines GET /sessions with the IDOR guard bypass.
-    """
+async def get_sessions_for_ticker(ticker: str, user_id: str, limit: int = 50) -> list[dict]:
+    """Return all sessions (with IDs) for a specific ticker and user."""
     db = await get_db()
     async with db.execute(
-        "SELECT id, ticker, model, created_at FROM sessions WHERE ticker = ? ORDER BY created_at DESC LIMIT ?",
-        (ticker.upper(), limit)
+        "SELECT id, ticker, model, created_at FROM sessions WHERE ticker = ? AND user_id = ? ORDER BY created_at DESC LIMIT ?",
+        (ticker.upper(), user_id, limit)
     ) as cursor:
         rows = await cursor.fetchall()
         return [{"id": row["id"], "ticker": row["ticker"], "model": row["model"], "created_at": row["created_at"]} for row in rows]
@@ -322,7 +370,7 @@ async def get_session(session_id: str) -> dict | None:
     """Get a specific session by ID, including any stored summary and model."""
     db = await get_db()
     async with db.execute(
-        "SELECT id, ticker, summary, model, created_at FROM sessions WHERE id = ?",
+        "SELECT id, ticker, summary, user_id, model, created_at FROM sessions WHERE id = ?",
         (session_id,)
     ) as cursor:
         row = await cursor.fetchone()
@@ -331,44 +379,74 @@ async def get_session(session_id: str) -> dict | None:
                 "id": row["id"],
                 "ticker": row["ticker"],
                 "summary": row["summary"],
+                "user_id": row["user_id"],
                 "model": row["model"],
                 "created_at": row["created_at"],
             }
         return None
 
 
-async def get_watchlist() -> list[dict]:
-    """Return all watchlist tickers ordered by added_at."""
+async def get_watchlist(user_id: str) -> list[dict]:
+    """Return watchlist tickers for a user, ordered by added_at."""
     db = await get_db()
-    async with db.execute("SELECT ticker, added_at FROM watchlist ORDER BY added_at") as cursor:
+    async with db.execute(
+        "SELECT ticker, added_at FROM watchlist WHERE user_id = ? ORDER BY added_at",
+        (user_id,)
+    ) as cursor:
         rows = await cursor.fetchall()
         return [{"ticker": row["ticker"], "added_at": row["added_at"]} for row in rows]
 
 
-async def add_to_watchlist(ticker: str) -> bool:
-    """Add ticker. Returns False if already present or limit (10) reached.
+async def get_watchlist_enriched(user_id: str) -> list[dict]:
+    """Return watchlist tickers for a user, enriched with company name/sector."""
+    db = await get_db()
+    async with db.execute("""
+        SELECT w.ticker, w.added_at, c.name, c.sector
+        FROM watchlist w
+        LEFT JOIN companies c ON w.ticker = c.ticker
+        WHERE w.user_id = ?
+        ORDER BY w.added_at
+    """, (user_id,)) as cursor:
+        rows = await cursor.fetchall()
+        return [
+            {"ticker": row["ticker"], "added_at": row["added_at"],
+             "name": row["name"], "sector": row["sector"]}
+            for row in rows
+        ]
+
+
+async def add_to_watchlist(ticker: str, user_id: str) -> bool:
+    """Add ticker for a user. Returns False if already present or limit (10) reached.
 
     Also ensures a companies row exists for the ticker (upsert).
     """
     db = await get_db()
     ticker = ticker.upper()
-    # Check limit
-    async with db.execute("SELECT COUNT(*) as cnt FROM watchlist") as cursor:
+    # Check per-user limit
+    async with db.execute(
+        "SELECT COUNT(*) as cnt FROM watchlist WHERE user_id = ?", (user_id,)
+    ) as cursor:
         row = await cursor.fetchone()
         if row["cnt"] >= 10:
             return False
-    # Insert (ignore duplicate)
-    cursor = await db.execute("INSERT OR IGNORE INTO watchlist (ticker) VALUES (?)", (ticker,))
+    # Insert (ignore duplicate — PK is (user_id, ticker))
+    cursor = await db.execute(
+        "INSERT OR IGNORE INTO watchlist (user_id, ticker) VALUES (?, ?)",
+        (user_id, ticker)
+    )
     # Ensure company record exists
     await db.execute("INSERT OR IGNORE INTO companies (ticker) VALUES (?)", (ticker,))
     await db.commit()
     return cursor.rowcount > 0
 
 
-async def remove_from_watchlist(ticker: str) -> bool:
-    """Remove ticker. Returns True if deleted."""
+async def remove_from_watchlist(ticker: str, user_id: str) -> bool:
+    """Remove ticker from a user's watchlist. Returns True if deleted."""
     db = await get_db()
-    cursor = await db.execute("DELETE FROM watchlist WHERE ticker = ?", (ticker.upper(),))
+    cursor = await db.execute(
+        "DELETE FROM watchlist WHERE ticker = ? AND user_id = ?",
+        (ticker.upper(), user_id)
+    )
     await db.commit()
     return cursor.rowcount > 0
 
@@ -426,14 +504,14 @@ async def get_companies() -> list[dict]:
         ]
 
 
-async def get_company_activity(ticker: str) -> dict:
-    """Return combined activity timeline for a company: sessions + briefings."""
+async def get_company_activity(ticker: str, user_id: str) -> dict:
+    """Return combined activity timeline for a company, scoped to a user."""
     db = await get_db()
     ticker = ticker.upper()
 
     async with db.execute(
-        "SELECT id, created_at FROM sessions WHERE ticker = ? ORDER BY created_at DESC",
-        (ticker,)
+        "SELECT id, created_at FROM sessions WHERE ticker = ? AND user_id = ? ORDER BY created_at DESC",
+        (ticker, user_id)
     ) as cursor:
         sessions = [{"id": r["id"], "created_at": r["created_at"]} for r in await cursor.fetchall()]
 
@@ -441,9 +519,9 @@ async def get_company_activity(ticker: str) -> dict:
         SELECT b.id, b.market_regime, b.created_at, bt.outlook
         FROM briefing_tickers bt
         JOIN briefings b ON bt.briefing_id = b.id
-        WHERE bt.ticker = ?
+        WHERE bt.ticker = ? AND b.user_id = ?
         ORDER BY b.created_at DESC
-    """, (ticker,)) as cursor:
+    """, (ticker, user_id)) as cursor:
         briefings = [
             {"id": r["id"], "market_regime": r["market_regime"],
              "created_at": r["created_at"], "outlook": r["outlook"]}
@@ -481,7 +559,7 @@ async def update_company(ticker: str, name: str | None = None, sector: str | Non
 
 async def save_briefing(raw_json: str, market_regime: str, market_positioning: str,
                         alerts_json: str, thinking: str | None,
-                        tickers: list[dict]) -> str:
+                        tickers: list[dict], user_id: str | None = None) -> str:
     """Persist a briefing and its per-ticker data. Returns briefing ID.
 
     Args:
@@ -492,13 +570,14 @@ async def save_briefing(raw_json: str, market_regime: str, market_positioning: s
         thinking: LLM chain-of-thought (may be empty)
         tickers: List of dicts with keys: ticker, price, change_pct,
                  technical_signal, news_summary, news_url, outlook
+        user_id: Anonymous user ID (scopes briefing to a user)
     """
     briefing_id = str(uuid.uuid4())
     db = await get_db()
     await db.execute("""
-        INSERT INTO briefings (id, market_regime, market_positioning, alerts, thinking, raw_json)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (briefing_id, market_regime, market_positioning, alerts_json, thinking, raw_json))
+        INSERT INTO briefings (id, market_regime, market_positioning, alerts, thinking, raw_json, user_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (briefing_id, market_regime, market_positioning, alerts_json, thinking, raw_json, user_id))
 
     # Batch-insert companies and briefing_tickers in two round-trips instead of
     # 2×N individual execute() calls — executemany sends all rows in one pass.
@@ -524,12 +603,17 @@ async def save_briefing(raw_json: str, market_regime: str, market_positioning: s
     return briefing_id
 
 
-async def get_recent_briefings(limit: int = 10) -> list[dict]:
-    """Return most recent briefings with their tickers.
+async def get_recent_briefings(user_id: str | None = None, limit: int = 10) -> list[dict]:
+    """Return most recent briefings with their tickers, scoped to a user.
 
     A single JOIN replaces the previous N+1 pattern (1 briefings query +
     1 ticker sub-query per row). Python groups the flat rows by briefing id.
+
+    If user_id is None (e.g. called from agent tools without user context),
+    returns an empty list to prevent cross-user data leakage.
     """
+    if user_id is None:
+        return []
     db = await get_db()
     async with db.execute(
         """
@@ -540,11 +624,11 @@ async def get_recent_briefings(limit: int = 10) -> list[dict]:
         FROM briefings b
         LEFT JOIN briefing_tickers bt ON bt.briefing_id = b.id
         WHERE b.id IN (
-            SELECT id FROM briefings ORDER BY created_at DESC LIMIT ?
+            SELECT id FROM briefings WHERE user_id = ? ORDER BY created_at DESC LIMIT ?
         )
         ORDER BY b.created_at DESC
         """,
-        (limit,),
+        (user_id, limit),
     ) as cursor:
         rows = await cursor.fetchall()
 
@@ -575,8 +659,8 @@ async def get_recent_briefings(limit: int = 10) -> list[dict]:
     return list(briefings.values())
 
 
-async def get_briefing_history(ticker: str, days: int = 30) -> list[dict]:
-    """Return briefing entries for a specific ticker within the last N days."""
+async def get_briefing_history(ticker: str, user_id: str, days: int = 30) -> list[dict]:
+    """Return briefing entries for a specific ticker+user within the last N days."""
     db = await get_db()
     ticker = ticker.upper()
     async with db.execute("""
@@ -586,9 +670,10 @@ async def get_briefing_history(ticker: str, days: int = 30) -> list[dict]:
         FROM briefing_tickers bt
         JOIN briefings b ON bt.briefing_id = b.id
         WHERE bt.ticker = ?
+          AND b.user_id = ?
           AND b.created_at >= datetime('now', ? || ' days')
         ORDER BY b.created_at DESC
-    """, (ticker, f"-{days}")) as cursor:
+    """, (ticker, user_id, f"-{days}")) as cursor:
         rows = await cursor.fetchall()
         return [
             {

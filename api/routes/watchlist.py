@@ -6,7 +6,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.db import (
-    get_db, get_watchlist, add_to_watchlist, remove_from_watchlist,
+    get_watchlist, get_watchlist_enriched, add_to_watchlist, remove_from_watchlist,
     save_briefing, get_recent_briefings, get_briefing_history,
 )
 from api.dependencies import ApiKeys, get_api_keys
@@ -17,43 +17,22 @@ _TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,10}$")
 
 
 @router.get("")
-async def list_watchlist():
-    """Return all tickers in the watchlist, enriched with company name/sector.
-
-    Uses a single JOIN query instead of N+1 individual get_company() calls.
-    """
-    from api.db import get_db
-
-    db = await get_db()
-    async with db.execute("""
-        SELECT w.ticker, w.added_at, c.name, c.sector
-        FROM watchlist w
-        LEFT JOIN companies c ON w.ticker = c.ticker
-        ORDER BY w.added_at
-    """) as cursor:
-        rows = await cursor.fetchall()
-
-    enriched = [
-        {
-            "ticker": row["ticker"],
-            "added_at": row["added_at"],
-            "name": row["name"],
-            "sector": row["sector"],
-        }
-        for row in rows
-    ]
-
+async def list_watchlist(keys: ApiKeys = Depends(get_api_keys)):
+    """Return tickers in the user's watchlist, enriched with company name/sector."""
+    user_id = keys.require_user_id()
+    enriched = await get_watchlist_enriched(user_id)
     return {"tickers": enriched}
 
 
 @router.post("")
-async def add_ticker(data: dict):
-    """Add a ticker to the watchlist. Body: {"ticker": "AAPL"}"""
+async def add_ticker(data: dict, keys: ApiKeys = Depends(get_api_keys)):
+    """Add a ticker to the user's watchlist. Body: {"ticker": "AAPL"}"""
+    user_id = keys.require_user_id()
     ticker = data.get("ticker", "").strip().upper()
     if not ticker or not _TICKER_RE.match(ticker):
         raise HTTPException(status_code=422, detail="Invalid ticker symbol")
 
-    added = await add_to_watchlist(ticker)
+    added = await add_to_watchlist(ticker, user_id)
     if not added:
         raise HTTPException(
             status_code=409,
@@ -71,9 +50,10 @@ async def add_ticker(data: dict):
 
 
 @router.delete("/{ticker}")
-async def remove_ticker(ticker: str):
-    """Remove a ticker from the watchlist."""
-    removed = await remove_from_watchlist(ticker)
+async def remove_ticker(ticker: str, keys: ApiKeys = Depends(get_api_keys)):
+    """Remove a ticker from the user's watchlist."""
+    user_id = keys.require_user_id()
+    removed = await remove_from_watchlist(ticker, user_id)
     if not removed:
         raise HTTPException(status_code=404, detail=f"{ticker.upper()} not in watchlist")
     return {"success": True}
@@ -81,8 +61,9 @@ async def remove_ticker(ticker: str):
 
 @router.get("/briefing")
 async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
-    """Generate AI briefing for all watchlist tickers."""
-    tickers_list = await get_watchlist()
+    """Generate AI briefing for the user's watchlist tickers."""
+    user_id = keys.require_user_id()
+    tickers_list = await get_watchlist(user_id)
     if not tickers_list:
         raise HTTPException(status_code=400, detail="Watchlist is empty")
 
@@ -119,6 +100,7 @@ async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
             alerts_json=json.dumps(analysis.alerts),
             thinking=result.thinking or None,
             tickers=[t.model_dump() for t in analysis.tickers],
+            user_id=user_id,
         )
     except Exception:
         pass  # DB persistence is best-effort; don't break the response
@@ -132,14 +114,18 @@ async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
 
 
 @router.get("/briefing/history")
-async def briefing_history():
-    """Return recent briefings."""
-    briefings = await get_recent_briefings(limit=20)
+async def briefing_history(keys: ApiKeys = Depends(get_api_keys)):
+    """Return recent briefings for this user."""
+    user_id = keys.require_user_id()
+    briefings = await get_recent_briefings(user_id=user_id, limit=20)
     return {"briefings": briefings}
 
 
 @router.get("/briefing/history/{ticker}")
-async def briefing_history_by_ticker(ticker: str, days: int = 30):
-    """Return briefing history for a specific ticker."""
-    history = await get_briefing_history(ticker, days=days)
+async def briefing_history_by_ticker(
+    ticker: str, days: int = 30, keys: ApiKeys = Depends(get_api_keys)
+):
+    """Return briefing history for a specific ticker, scoped to the user."""
+    user_id = keys.require_user_id()
+    history = await get_briefing_history(ticker, user_id, days=days)
     return {"ticker": ticker.upper(), "history": history}
