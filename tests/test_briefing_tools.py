@@ -8,6 +8,8 @@ from agents.tools.briefing_tools import (
     create_briefing_tools,
 )
 
+USER_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
 
 class TestBriefingHistoryTool:
     @patch("agents.tools.briefing_tools.asyncio.run")
@@ -22,7 +24,7 @@ class TestBriefingHistoryTool:
                 "news_summary": "Apple Q2 earnings beat",
             },
         ]
-        result = _tool_briefing_history("AAPL", "7")
+        result = _tool_briefing_history("AAPL", USER_ID, "7")
         assert "AAPL" in result
         assert "BULLISH" in result
         assert "180.50" in result
@@ -31,14 +33,14 @@ class TestBriefingHistoryTool:
     @patch("agents.tools.briefing_tools.asyncio.run")
     def test_no_history(self, mock_run):
         mock_run.return_value = []
-        result = _tool_briefing_history("MSFT", "7")
+        result = _tool_briefing_history("MSFT", USER_ID, "7")
         assert "No briefing history" in result
         assert "MSFT" in result
 
     @patch("agents.tools.briefing_tools.asyncio.run")
     def test_default_days(self, mock_run):
         mock_run.return_value = []
-        _tool_briefing_history("AAPL", "invalid")
+        _tool_briefing_history("AAPL", USER_ID, "invalid")
         # Should default to 7 days and not crash
         mock_run.assert_called_once()
 
@@ -50,9 +52,13 @@ class TestBriefingHistoryTool:
             {"created_at": "2026-03-31", "outlook": "bearish", "price": 178.0,
              "change_pct": -0.5, "technical_signal": "MACD bearish", "news_summary": "News 2"},
         ]
-        result = _tool_briefing_history("AAPL")
+        result = _tool_briefing_history("AAPL", USER_ID)
         assert "BULLISH" in result
         assert "BEARISH" in result
+
+    def test_no_user_id_returns_message(self):
+        result = _tool_briefing_history("AAPL", None)
+        assert "no user context" in result
 
 
 class TestLatestBriefingTool:
@@ -71,7 +77,7 @@ class TestLatestBriefingTool:
                 ],
             },
         ]
-        result = _tool_latest_briefing()
+        result = _tool_latest_briefing(USER_ID)
         assert "Bull, Low Volatility" in result
         assert "AAPL" in result
         assert "RSI divergence on XOM" in result
@@ -79,13 +85,13 @@ class TestLatestBriefingTool:
     @patch("agents.tools.briefing_tools.asyncio.run")
     def test_no_briefings(self, mock_run):
         mock_run.return_value = []
-        result = _tool_latest_briefing()
+        result = _tool_latest_briefing(USER_ID)
         assert "No briefings" in result
 
 
 class TestCreateBriefingTools:
     def test_creates_two_tools(self):
-        tools = create_briefing_tools("AAPL")
+        tools = create_briefing_tools("AAPL", user_id=USER_ID)
         assert len(tools) == 2
         names = [t.name for t in tools]
         assert "get_briefing_history" in names

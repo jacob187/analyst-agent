@@ -18,6 +18,8 @@ from api.db import (
     mark_filing_downloaded,
 )
 
+USER_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
 
 @pytest.fixture
 async def db(tmp_path, monkeypatch):
@@ -83,7 +85,7 @@ class TestCompanies:
 
 class TestWatchlistCompanyIntegration:
     async def test_add_to_watchlist_creates_company(self, db):
-        await add_to_watchlist("AAPL")
+        await add_to_watchlist("AAPL", USER_A)
         company = await get_company("AAPL")
         assert company is not None
         assert company["ticker"] == "AAPL"
@@ -96,8 +98,8 @@ class TestWatchlistCompanyIntegration:
 
         # First init: create watchlist entries without companies table
         await init_db()
-        await add_to_watchlist("XOM")
-        await add_to_watchlist("BP")
+        await add_to_watchlist("XOM", USER_A)
+        await add_to_watchlist("BP", USER_A)
         await db_mod.close_db()
 
         # Second init: simulates app restart — backfill should run
@@ -138,10 +140,11 @@ class TestBriefingPersistence:
             alerts_json=json.dumps(["RSI divergence on AAPL"]),
             thinking="Let me analyze...",
             tickers=SAMPLE_TICKERS,
+            user_id=USER_A,
         )
         assert briefing_id is not None
 
-        recent = await get_recent_briefings(limit=5)
+        recent = await get_recent_briefings(user_id=USER_A, limit=5)
         assert len(recent) == 1
         assert recent[0]["market_regime"] == "Bull, Low Vol"
         assert recent[0]["thinking"] == "Let me analyze..."
@@ -152,6 +155,7 @@ class TestBriefingPersistence:
         await save_briefing(
             raw_json="{}", market_regime="Bear", market_positioning="Reduce",
             alerts_json="[]", thinking=None, tickers=SAMPLE_TICKERS,
+            user_id=USER_A,
         )
         assert (await get_company("AAPL")) is not None
         assert (await get_company("XOM")) is not None
@@ -160,29 +164,32 @@ class TestBriefingPersistence:
         await save_briefing(
             raw_json="{}", market_regime="Bull", market_positioning="Long",
             alerts_json="[]", thinking=None, tickers=SAMPLE_TICKERS,
+            user_id=USER_A,
         )
-        aapl_history = await get_briefing_history("AAPL", days=30)
+        aapl_history = await get_briefing_history("AAPL", USER_A, days=30)
         assert len(aapl_history) == 1
         assert aapl_history[0]["outlook"] == "mixed"
 
-        xom_history = await get_briefing_history("XOM", days=30)
+        xom_history = await get_briefing_history("XOM", USER_A, days=30)
         assert len(xom_history) == 1
         assert xom_history[0]["outlook"] == "bullish"
 
         # Ticker not in any briefing
-        msft_history = await get_briefing_history("MSFT", days=30)
+        msft_history = await get_briefing_history("MSFT", USER_A, days=30)
         assert len(msft_history) == 0
 
     async def test_get_recent_briefings_ordered(self, db):
         await save_briefing(
             raw_json="{}", market_regime="First", market_positioning="...",
             alerts_json="[]", thinking=None, tickers=SAMPLE_TICKERS[:1],
+            user_id=USER_A,
         )
         await save_briefing(
             raw_json="{}", market_regime="Second", market_positioning="...",
             alerts_json="[]", thinking=None, tickers=SAMPLE_TICKERS[:1],
+            user_id=USER_A,
         )
-        recent = await get_recent_briefings(limit=10)
+        recent = await get_recent_briefings(user_id=USER_A, limit=10)
         assert len(recent) == 2
         # Most recent first
         assert recent[0]["market_regime"] == "Second"
@@ -193,9 +200,19 @@ class TestBriefingPersistence:
                 raw_json="{}", market_regime=f"Briefing {i}",
                 market_positioning="...", alerts_json="[]",
                 thinking=None, tickers=SAMPLE_TICKERS[:1],
+                user_id=USER_A,
             )
-        recent = await get_recent_briefings(limit=3)
+        recent = await get_recent_briefings(user_id=USER_A, limit=3)
         assert len(recent) == 3
+
+    async def test_get_recent_briefings_none_user_returns_empty(self, db):
+        """When user_id is None, return empty list (safety guard)."""
+        await save_briefing(
+            raw_json="{}", market_regime="Bull", market_positioning="...",
+            alerts_json="[]", thinking=None, tickers=SAMPLE_TICKERS[:1],
+            user_id=USER_A,
+        )
+        assert await get_recent_briefings(user_id=None) == []
 
 
 # =========================================================================

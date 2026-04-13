@@ -10,6 +10,8 @@ from api.db import (
     save_briefing,
 )
 
+USER_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
 
 @pytest.fixture
 async def db(tmp_path, monkeypatch):
@@ -24,20 +26,20 @@ async def db(tmp_path, monkeypatch):
 
 class TestSessionCreatesCompany:
     async def test_create_session_ensures_company(self, db):
-        await create_session("AAPL")
+        await create_session("AAPL", USER_A)
         company = await get_company("AAPL")
         assert company is not None
         assert company["ticker"] == "AAPL"
 
     async def test_get_or_create_session_ensures_company(self, db):
-        session_id = await get_or_create_session("XOM")
+        session_id = await get_or_create_session("XOM", USER_A)
         assert session_id is not None
         company = await get_company("XOM")
         assert company is not None
 
     async def test_session_does_not_duplicate_company(self, db):
-        await create_session("AAPL")
-        await create_session("AAPL")
+        await create_session("AAPL", USER_A)
+        await create_session("AAPL", USER_A)
         # Should not raise — INSERT OR IGNORE handles duplicates
 
 
@@ -45,15 +47,15 @@ class TestCompanyActivity:
     async def test_empty_activity(self, db):
         from api.db import ensure_company
         await ensure_company("MSFT")
-        activity = await get_company_activity("MSFT")
+        activity = await get_company_activity("MSFT", USER_A)
         assert activity["ticker"] == "MSFT"
         assert activity["sessions"] == []
         assert activity["briefings"] == []
 
     async def test_activity_with_sessions(self, db):
-        await create_session("AAPL")
-        await create_session("AAPL")
-        activity = await get_company_activity("AAPL")
+        await create_session("AAPL", USER_A)
+        await create_session("AAPL", USER_A)
+        activity = await get_company_activity("AAPL", USER_A)
         assert len(activity["sessions"]) == 2
 
     async def test_activity_with_briefings(self, db):
@@ -65,13 +67,14 @@ class TestCompanyActivity:
                 "technical_signal": "RSI", "news_summary": "News",
                 "outlook": "bullish",
             }],
+            user_id=USER_A,
         )
-        activity = await get_company_activity("AAPL")
+        activity = await get_company_activity("AAPL", USER_A)
         assert len(activity["briefings"]) == 1
         assert activity["briefings"][0]["outlook"] == "bullish"
 
     async def test_activity_mixed(self, db):
-        await create_session("XOM")
+        await create_session("XOM", USER_A)
         await save_briefing(
             raw_json="{}", market_regime="Bear", market_positioning="Short",
             alerts_json="[]", thinking=None,
@@ -80,7 +83,8 @@ class TestCompanyActivity:
                 "technical_signal": "MACD", "news_summary": "Oil down",
                 "outlook": "bearish",
             }],
+            user_id=USER_A,
         )
-        activity = await get_company_activity("XOM")
+        activity = await get_company_activity("XOM", USER_A)
         assert len(activity["sessions"]) == 1
         assert len(activity["briefings"]) == 1

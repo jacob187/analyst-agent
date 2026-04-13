@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import patch
 
-from api.dependencies import ApiKeys, get_api_keys, resolve_ws_keys
+from api.dependencies import ApiKeys, get_api_keys, resolve_ws_keys, _validate_user_id
 
 
 class TestGetApiKeys:
@@ -130,3 +130,76 @@ class TestApiKeysGetProviderKey:
             model_id=None,
         )
         assert keys.get_provider_key("unknown") is None
+
+
+class TestUserIdValidation:
+    @pytest.mark.eval_unit
+    def test_valid_uuid(self):
+        assert _validate_user_id("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa") == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+    @pytest.mark.eval_unit
+    def test_none_returns_none(self):
+        assert _validate_user_id(None) is None
+
+    @pytest.mark.eval_unit
+    def test_empty_string_returns_none(self):
+        assert _validate_user_id("") is None
+
+    @pytest.mark.eval_unit
+    def test_invalid_format_returns_none(self):
+        assert _validate_user_id("not-a-uuid") is None
+
+    @pytest.mark.eval_unit
+    def test_uppercase_uuid_rejected(self):
+        """UUIDs must be lowercase hex."""
+        assert _validate_user_id("AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA") is None
+
+
+class TestUserIdInGetApiKeys:
+    @pytest.mark.eval_unit
+    async def test_resolves_user_id_from_header(self):
+        result = await get_api_keys(x_user_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        assert result.user_id == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+    @pytest.mark.eval_unit
+    async def test_invalid_user_id_becomes_none(self):
+        result = await get_api_keys(x_user_id="bad-value")
+        assert result.user_id is None
+
+    @pytest.mark.eval_unit
+    async def test_missing_user_id_is_none(self):
+        result = await get_api_keys()
+        assert result.user_id is None
+
+
+class TestUserIdInWsKeys:
+    @pytest.mark.eval_unit
+    def test_resolves_user_id_from_auth(self):
+        result = resolve_ws_keys({"user_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"})
+        assert result.user_id == "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+    @pytest.mark.eval_unit
+    def test_invalid_user_id_in_auth(self):
+        result = resolve_ws_keys({"user_id": "garbage"})
+        assert result.user_id is None
+
+
+class TestRequireUserId:
+    @pytest.mark.eval_unit
+    def test_returns_id_when_present(self):
+        keys = ApiKeys(
+            google_api_key=None, openai_api_key=None, anthropic_api_key=None,
+            sec_header=None, tavily_api_key=None, model_id=None,
+            user_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        )
+        assert keys.require_user_id() == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+    @pytest.mark.eval_unit
+    def test_raises_when_missing(self):
+        keys = ApiKeys(
+            google_api_key=None, openai_api_key=None, anthropic_api_key=None,
+            sec_header=None, tavily_api_key=None, model_id=None,
+            user_id=None,
+        )
+        with pytest.raises(ValueError):
+            keys.require_user_id()

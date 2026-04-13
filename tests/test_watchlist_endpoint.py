@@ -7,56 +7,69 @@ from api.main import app
 
 client = TestClient(app)
 
+USER_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+HEADERS = {"X-User-Id": USER_ID}
+
 
 class TestListWatchlist:
-    @patch("api.routes.watchlist.get_watchlist", new_callable=AsyncMock)
+    @patch("api.routes.watchlist.get_watchlist_enriched", new_callable=AsyncMock)
     def test_list_empty(self, mock_get):
         mock_get.return_value = []
-        resp = client.get("/watchlist")
+        resp = client.get("/watchlist", headers=HEADERS)
         assert resp.status_code == 200
         assert resp.json() == {"tickers": []}
+        mock_get.assert_called_once_with(USER_ID)
 
-    @patch("api.routes.watchlist.get_watchlist", new_callable=AsyncMock)
+    @patch("api.routes.watchlist.get_watchlist_enriched", new_callable=AsyncMock)
     def test_list_with_tickers(self, mock_get):
         mock_get.return_value = [
-            {"ticker": "AAPL", "added_at": "2026-01-01"},
-            {"ticker": "MSFT", "added_at": "2026-01-02"},
+            {"ticker": "AAPL", "added_at": "2026-01-01", "name": "Apple", "sector": "Tech"},
         ]
-        resp = client.get("/watchlist")
+        resp = client.get("/watchlist", headers=HEADERS)
         assert resp.status_code == 200
-        assert len(resp.json()["tickers"]) == 2
+        assert len(resp.json()["tickers"]) == 1
+
+    def test_list_without_user_id_returns_422(self):
+        resp = client.get("/watchlist")
+        assert resp.status_code == 422
 
 
 class TestAddTicker:
     @patch("api.routes.watchlist.add_to_watchlist", new_callable=AsyncMock)
     def test_add_valid(self, mock_add):
         mock_add.return_value = True
-        resp = client.post("/watchlist", json={"ticker": "AAPL"})
+        resp = client.post("/watchlist", json={"ticker": "AAPL"}, headers=HEADERS)
         assert resp.status_code == 200
         assert resp.json()["ticker"] == "AAPL"
+        mock_add.assert_called_once_with("AAPL", USER_ID)
 
     def test_add_invalid_ticker(self):
-        resp = client.post("/watchlist", json={"ticker": "!!!"})
+        resp = client.post("/watchlist", json={"ticker": "!!!"}, headers=HEADERS)
         assert resp.status_code == 422
 
     @patch("api.routes.watchlist.add_to_watchlist", new_callable=AsyncMock)
     def test_add_duplicate_or_full(self, mock_add):
         mock_add.return_value = False
-        resp = client.post("/watchlist", json={"ticker": "AAPL"})
+        resp = client.post("/watchlist", json={"ticker": "AAPL"}, headers=HEADERS)
         assert resp.status_code == 409
+
+    def test_add_without_user_id_returns_422(self):
+        resp = client.post("/watchlist", json={"ticker": "AAPL"})
+        assert resp.status_code == 422
 
 
 class TestRemoveTicker:
     @patch("api.routes.watchlist.remove_from_watchlist", new_callable=AsyncMock)
     def test_remove_existing(self, mock_remove):
         mock_remove.return_value = True
-        resp = client.delete("/watchlist/AAPL")
+        resp = client.delete("/watchlist/AAPL", headers=HEADERS)
         assert resp.status_code == 200
+        mock_remove.assert_called_once_with("AAPL", USER_ID)
 
     @patch("api.routes.watchlist.remove_from_watchlist", new_callable=AsyncMock)
     def test_remove_nonexistent(self, mock_remove):
         mock_remove.return_value = False
-        resp = client.delete("/watchlist/XYZ")
+        resp = client.delete("/watchlist/XYZ", headers=HEADERS)
         assert resp.status_code == 404
 
 
@@ -64,14 +77,17 @@ class TestBriefingEndpoint:
     @patch("api.routes.watchlist.get_watchlist", new_callable=AsyncMock)
     def test_empty_watchlist(self, mock_wl):
         mock_wl.return_value = []
-        resp = client.get("/watchlist/briefing", headers={"X-Google-Api-Key": "test"})
+        resp = client.get(
+            "/watchlist/briefing",
+            headers={**HEADERS, "X-Google-Api-Key": "test"}
+        )
         assert resp.status_code == 400
 
     @patch.dict("os.environ", {}, clear=True)
     @patch("api.routes.watchlist.get_watchlist", new_callable=AsyncMock)
     def test_no_api_key(self, mock_wl):
         mock_wl.return_value = [{"ticker": "AAPL", "added_at": "2026-01-01"}]
-        resp = client.get("/watchlist/briefing")
+        resp = client.get("/watchlist/briefing", headers=HEADERS)
         assert resp.status_code == 400
 
 
@@ -81,14 +97,14 @@ class TestBriefingHistory:
         mock_recent.return_value = [
             {"id": "abc", "market_regime": "Bull", "tickers": [], "created_at": "2026-04-01"},
         ]
-        resp = client.get("/watchlist/briefing/history")
+        resp = client.get("/watchlist/briefing/history", headers=HEADERS)
         assert resp.status_code == 200
         assert len(resp.json()["briefings"]) == 1
 
     @patch("api.routes.watchlist.get_recent_briefings", new_callable=AsyncMock)
     def test_history_empty(self, mock_recent):
         mock_recent.return_value = []
-        resp = client.get("/watchlist/briefing/history")
+        resp = client.get("/watchlist/briefing/history", headers=HEADERS)
         assert resp.status_code == 200
         assert resp.json()["briefings"] == []
 
@@ -97,7 +113,7 @@ class TestBriefingHistory:
         mock_hist.return_value = [
             {"briefing_id": "abc", "outlook": "bullish", "price": 180.0, "created_at": "2026-04-01"},
         ]
-        resp = client.get("/watchlist/briefing/history/AAPL")
+        resp = client.get("/watchlist/briefing/history/AAPL", headers=HEADERS)
         assert resp.status_code == 200
         assert resp.json()["ticker"] == "AAPL"
         assert len(resp.json()["history"]) == 1
@@ -105,6 +121,10 @@ class TestBriefingHistory:
     @patch("api.routes.watchlist.get_briefing_history", new_callable=AsyncMock)
     def test_history_by_ticker_with_days_param(self, mock_hist):
         mock_hist.return_value = []
-        resp = client.get("/watchlist/briefing/history/XOM?days=7")
+        resp = client.get("/watchlist/briefing/history/XOM?days=7", headers=HEADERS)
         assert resp.status_code == 200
-        mock_hist.assert_called_once_with("XOM", days=7)
+        mock_hist.assert_called_once_with("XOM", USER_ID, days=7)
+
+    def test_history_without_user_id_returns_422(self):
+        resp = client.get("/watchlist/briefing/history")
+        assert resp.status_code == 422
