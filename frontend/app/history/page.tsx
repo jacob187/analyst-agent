@@ -1,11 +1,8 @@
+"use client";
+
 import { ChatHistory } from "@/components/chat/ChatHistory";
-import { api } from "@/lib/api";
 
-export const dynamic = "force-dynamic";
-
-export default async function HistoryPage() {
-  const { tickers } = await api.tickers().catch(() => ({ tickers: [] }));
-
+export default function HistoryPage() {
   return (
     <div className="mx-auto max-w-2xl px-4 py-12 sm:px-6">
       <div className="mb-8">
@@ -14,7 +11,7 @@ export default async function HistoryPage() {
           All past analysis sessions, grouped by ticker.
         </p>
       </div>
-      <ChatHistory initialTickers={tickers} />
+      <ChatHistory />
     </div>
   );
 }

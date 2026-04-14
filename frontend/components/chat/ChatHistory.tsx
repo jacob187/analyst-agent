@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ChevronDown, Eye, ArrowRight, Trash2, MessageSquare } from "lucide-react";
+import { ChevronDown, Eye, ArrowRight, Trash2, MessageSquare, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -10,13 +10,18 @@ import { api } from "@/lib/api";
 import { formatDate, cn } from "@/lib/utils";
 import type { Session, TickerSummary } from "@/types";
 
-interface ChatHistoryProps {
-  initialTickers: TickerSummary[];
-}
-
-export function ChatHistory({ initialTickers }: ChatHistoryProps) {
+export function ChatHistory() {
   const router = useRouter();
-  const [tickers, setTickers] = useState<TickerSummary[]>(initialTickers);
+  const [tickers, setTickers] = useState<TickerSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api
+      .tickers()
+      .then(({ tickers }) => setTickers(tickers))
+      .catch(() => setTickers([]))
+      .finally(() => setLoading(false));
+  }, []);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [sessions, setSessions] = useState<Record<string, Session[]>>({});
   const [loadingSessions, setLoadingSessions] = useState<string | null>(null);
@@ -47,6 +52,14 @@ export function ChatHistory({ initialTickers }: ChatHistoryProps) {
           t.ticker === ticker ? { ...t, session_count: t.session_count - 1 } : t
         )
         .filter((t) => t.session_count > 0)
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="py-16 text-center">
+        <Loader2 className="mx-auto mb-3 h-10 w-10 animate-spin text-muted-foreground/40" />
+      </div>
     );
   }
 

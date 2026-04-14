@@ -1,11 +1,22 @@
-import { Building2 } from "lucide-react";
+"use client";
+
+import { useEffect, useState } from "react";
+import { Building2, Loader2 } from "lucide-react";
 import { CompanyCard } from "@/components/companies/CompanyCard";
 import { api } from "@/lib/api";
+import type { TickerSummary } from "@/types";
 
-export const dynamic = "force-dynamic";
+export default function CompaniesPage() {
+  const [tickers, setTickers] = useState<TickerSummary[]>([]);
+  const [loading, setLoading] = useState(true);
 
-export default async function CompaniesPage() {
-  const { tickers } = await api.tickers().catch(() => ({ tickers: [] }));
+  useEffect(() => {
+    api
+      .tickers()
+      .then(({ tickers }) => setTickers(tickers))
+      .catch(() => setTickers([]))
+      .finally(() => setLoading(false));
+  }, []);
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-12 sm:px-6">
@@ -16,7 +27,11 @@ export default async function CompaniesPage() {
         </p>
       </div>
 
-      {tickers.length === 0 ? (
+      {loading ? (
+        <div className="py-16 text-center">
+          <Loader2 className="mx-auto mb-3 h-10 w-10 animate-spin text-muted-foreground/40" />
+        </div>
+      ) : tickers.length === 0 ? (
         <div className="py-16 text-center">
           <Building2 className="mx-auto mb-3 h-10 w-10 text-muted-foreground/40" />
           <p className="text-sm text-muted-foreground">No companies yet.</p>

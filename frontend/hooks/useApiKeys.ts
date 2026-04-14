@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { ApiKeys } from "@/types";
+import { api } from "@/lib/api";
+import type { ApiKeys, EnvKeysResponse } from "@/types";
 
 const STORAGE_KEY = "analyst_agent_keys";
 
@@ -16,10 +17,11 @@ const DEFAULT_KEYS: ApiKeys = {
 
 export function useApiKeys() {
   const [keys, setKeysState] = useState<ApiKeys>(DEFAULT_KEYS);
+  const [envKeys, setEnvKeys] = useState<EnvKeysResponse | null>(null);
   const [loaded, setLoaded] = useState(false);
 
-  // Load from localStorage on mount (SSR-safe: only runs client-side)
   useEffect(() => {
+    // Load local keys from localStorage
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
@@ -29,7 +31,12 @@ export function useApiKeys() {
     } catch {
       // Ignore parse errors
     }
-    setLoaded(true);
+
+    // Fetch server-side env key availability
+    api.envKeys()
+      .then(setEnvKeys)
+      .catch(() => {})
+      .finally(() => setLoaded(true));
   }, []);
 
   function setKeys(updated: ApiKeys) {
@@ -42,12 +49,17 @@ export function useApiKeys() {
   }
 
   function hasRequiredKeys(): boolean {
+    // Keys can come from localStorage (user-entered) OR server .env
     const hasProviderKey =
       !!keys.google_api_key ||
       !!keys.openai_api_key ||
-      !!keys.anthropic_api_key;
-    return hasProviderKey && !!keys.sec_header;
+      !!keys.anthropic_api_key ||
+      !!envKeys?.google ||
+      !!envKeys?.openai ||
+      !!envKeys?.anthropic;
+    const hasSecHeader = !!keys.sec_header || !!envKeys?.sec_header;
+    return hasProviderKey && hasSecHeader;
   }
 
-  return { keys, setKeys, loaded, hasRequiredKeys };
+  return { keys, setKeys, loaded, envKeys, hasRequiredKeys };
 }
