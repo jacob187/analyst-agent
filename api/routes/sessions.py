@@ -7,7 +7,7 @@ from api.dependencies import ApiKeys, get_api_keys
 from api.db import (
     get_or_create_session, get_session, get_session_by_ticker,
     get_tickers, get_sessions_for_ticker,
-    get_session_messages, delete_session,
+    get_session_messages, delete_session, claim_orphaned_data,
 )
 
 router = APIRouter()
@@ -17,6 +17,7 @@ router = APIRouter()
 async def list_tickers(limit: int = 50, keys: ApiKeys = Depends(get_api_keys)):
     """Return distinct tickers with session count for this user."""
     user_id = keys.require_user_id()
+    await claim_orphaned_data(user_id)
     tickers = await get_tickers(user_id, limit)
     return {"tickers": tickers}
 

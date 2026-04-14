@@ -225,6 +225,32 @@ async def init_db():
 
     await db.commit()
 
+_orphans_claimed = False
+
+async def claim_orphaned_data(user_id: str) -> None:
+    """Assign any rows with NULL/empty user_id to the given user.
+
+    Runs at most once per process — after the first call it's a no-op.
+    This handles the migration from pre-user-isolation databases where
+    existing sessions and briefings have no user_id.
+    """
+    global _orphans_claimed
+    if _orphans_claimed:
+        return
+    _orphans_claimed = True
+
+    db = await get_db()
+    await db.execute(
+        "UPDATE sessions SET user_id = ? WHERE user_id IS NULL OR user_id = ''",
+        (user_id,),
+    )
+    await db.execute(
+        "UPDATE briefings SET user_id = ? WHERE user_id IS NULL OR user_id = ''",
+        (user_id,),
+    )
+    await db.commit()
+
+
 async def close_db():
     """Close the database connection."""
     global _db
