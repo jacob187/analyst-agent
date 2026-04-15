@@ -13,6 +13,7 @@ prompts:
       {research_note}
 
       COMPLEXITY LEVELS:
+      - unclear: The message is gibberish, random characters, not in any recognizable language, or otherwise not a coherent question about the company or its financials. Examples: "asdf asdf", "aaaaaaa", "xkcd 123 zzzz", keyboard smashing. Do NOT classify as unclear if the message is a recognizable question, even if it has typos or is poorly worded.
       - simple: Single piece of information, answerable with 1 tool (e.g., "What's the stock price?", "Show me RSI")
       - moderate: Requires 2-3 tools or light synthesis (e.g., "How is the stock performing technically?", "What are the main risks?")
       - complex: Requires 4+ tools, deep analysis, or significant synthesis (e.g., "Should I invest in this company?", "Give me a full due diligence report", "Compare fundamentals to technicals")

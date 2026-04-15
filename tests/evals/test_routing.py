@@ -9,7 +9,7 @@ logic by constructing state dicts directly and calling the routing functions.
 
 import pytest
 
-from agents.graph.analyst_graph import route_by_complexity, check_more_steps
+from agents.graph.analyst_graph import route_by_complexity, check_more_steps, UNCLEAR_QUERY_RESPONSE
 from agents.planner import QueryPlan, AnalysisStep
 
 
@@ -76,6 +76,19 @@ class TestRouteByComplexity:
         """Moderate is NOT simple, so it should route to planner."""
         state = _make_state("moderate")
         assert route_by_complexity(state) == "planner"
+
+    @pytest.mark.eval_unit
+    def test_unclear_routes_to_end(self):
+        """Unclear queries should route to __end__ — no tools invoked."""
+        state = _make_state("unclear", final_response=UNCLEAR_QUERY_RESPONSE)
+        assert route_by_complexity(state) == "__end__"
+
+    @pytest.mark.eval_unit
+    def test_unclear_state_has_response(self):
+        """When routed as unclear, final_response should contain a clarification."""
+        state = _make_state("unclear", final_response=UNCLEAR_QUERY_RESPONSE)
+        assert "rephrase" in state["final_response"].lower()
+        assert route_by_complexity(state) == "__end__"
 
     @pytest.mark.eval_unit
     def test_empty_string_routes_to_planner(self):

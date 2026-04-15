@@ -26,8 +26,8 @@ class AnalysisStep(BaseModel):
 class QueryClassification(BaseModel):
     """Classification of query complexity."""
 
-    complexity: Literal["simple", "moderate", "complex"] = Field(
-        description="Query complexity level"
+    complexity: Literal["simple", "moderate", "complex", "unclear"] = Field(
+        description="Query complexity level. Use 'unclear' for gibberish, random characters, or messages that are not a coherent question about the company."
     )
     reasoning: str = Field(description="Brief explanation of why this complexity level")
     estimated_tools: int = Field(description="Estimated number of tools needed")

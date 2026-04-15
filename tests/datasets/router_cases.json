@@ -46,5 +46,29 @@
     "query": "Should I invest in Apple? Analyze the fundamentals, technicals, and SEC filings to give me a complete picture",
     "expected_complexity": "complex",
     "reasoning": "Full investment thesis requires all data sources"
+  },
+  {
+    "id": "unclear_gibberish",
+    "query": "asdfasdfas adsf asdfasfdasdf asdf asdf adsfasdf asdfassf",
+    "expected_complexity": "unclear",
+    "reasoning": "Random keyboard mashing, no coherent question"
+  },
+  {
+    "id": "unclear_random_chars",
+    "query": "aaaa bbb cccc ddd eeee fffff",
+    "expected_complexity": "unclear",
+    "reasoning": "Repeated random characters with no meaning"
+  },
+  {
+    "id": "unclear_keyboard_smash",
+    "query": "qwerty uiop asdfg hjkl zxcvb",
+    "expected_complexity": "unclear",
+    "reasoning": "Keyboard rows typed sequentially, not a question"
+  },
+  {
+    "id": "unclear_mixed_noise",
+    "query": "lksjdf 93847 sdkjf !@#$ askdjf",
+    "expected_complexity": "unclear",
+    "reasoning": "Mix of random strings, numbers, and symbols"
   }
 ]

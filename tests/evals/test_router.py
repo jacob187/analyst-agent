@@ -4,7 +4,7 @@ Marker: eval_fast — each test makes a single LLM call to classify a query.
 Uses router_cases.json as the golden dataset.
 
 The classifier returns a QueryClassification with:
-- complexity: "simple" | "moderate" | "complex"
+- complexity: "simple" | "moderate" | "complex" | "unclear"
 - reasoning: str
 - estimated_tools: int
 """
@@ -47,6 +47,57 @@ class TestQueryClassifier:
                 f"expected moderate/complex. Reasoning: {result.reasoning}"
             )
 
+    def test_unclear_queries_classified_unclear(self, planner, router_cases):
+        """Gibberish and nonsensical input should be classified as unclear.
+
+        These are messages with no coherent question — keyboard smashing,
+        random characters, etc. The classifier should recognize them as
+        unclear rather than guessing intent and calling tools.
+        """
+        unclear_cases = [c for c in router_cases if c["expected_complexity"] == "unclear"]
+        assert len(unclear_cases) > 0, "No unclear cases found in router_cases.json"
+
+        for case in unclear_cases:
+            result = planner.classify_query(case["query"])
+            assert result.complexity == "unclear", (
+                f"Query '{case['id']}' classified as {result.complexity}, "
+                f"expected unclear. Reasoning: {result.reasoning}"
+            )
+
+    def test_unclear_queries_estimate_zero_tools(self, planner, router_cases):
+        """Unclear queries should estimate 0 tools needed.
+
+        Since no tools should be invoked for gibberish, the estimated_tools
+        count should be 0. We accept 0-1 as a pass since the LLM might
+        conservatively estimate 1.
+        """
+        unclear_cases = [c for c in router_cases if c["expected_complexity"] == "unclear"]
+
+        for case in unclear_cases:
+            result = planner.classify_query(case["query"])
+            assert result.estimated_tools <= 1, (
+                f"Query '{case['id']}' estimated {result.estimated_tools} tools, "
+                f"expected 0-1 for an unclear query"
+            )
+
+    def test_valid_queries_not_classified_unclear(self, planner, router_cases):
+        """Legitimate queries (simple or complex) should never be classified as unclear.
+
+        This is a guard against false positives — the classifier should only
+        flag truly nonsensical input, not poorly worded but valid questions.
+        """
+        valid_cases = [
+            c for c in router_cases
+            if c["expected_complexity"] in ("simple", "complex")
+        ]
+
+        for case in valid_cases:
+            result = planner.classify_query(case["query"])
+            assert result.complexity != "unclear", (
+                f"Query '{case['id']}' incorrectly classified as unclear. "
+                f"Reasoning: {result.reasoning}"
+            )
+
     def test_estimated_tools_reasonable(self, planner, router_cases):
         """estimated_tools should be within sensible bounds.
 
@@ -54,6 +105,9 @@ class TestQueryClassifier:
         tools, so requesting more than 8 for a single query is suspicious).
         """
         for case in router_cases:
+            if case["expected_complexity"] == "unclear":
+                continue  # covered by test_unclear_queries_estimate_zero_tools
+
             result = planner.classify_query(case["query"])
 
             if case["expected_complexity"] == "simple":

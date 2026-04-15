@@ -95,6 +95,13 @@ def _build_tools_dict(tools: List[Any]) -> Dict[str, Any]:
 # =============================================================================
 
 
+UNCLEAR_QUERY_RESPONSE = (
+    "I couldn't understand that message. Could you rephrase your question? "
+    "For example, you can ask about stock price, financials, risk factors, "
+    "technical indicators, or recent SEC filings."
+)
+
+
 def create_router_node(planner: QueryPlanner):
     """Create router node that classifies query complexity."""
 
@@ -109,6 +116,12 @@ def create_router_node(planner: QueryPlanner):
         # Classify the query
         classification = planner.classify_query(query)
         state["classification"] = classification
+
+        # Unclear queries get a clarification response — no tools invoked
+        if classification.complexity == "unclear":
+            state["query_complexity"] = "unclear"
+            state["final_response"] = UNCLEAR_QUERY_RESPONSE
+            return state
 
         # Determine complexity routing
         if classification.complexity == "simple" and classification.estimated_tools <= 1:
@@ -326,8 +339,14 @@ def create_synthesizer_node(llm: BaseChatModel, ticker: str):
 # =============================================================================
 
 
-def route_by_complexity(state: AnalysisState) -> Literal["react_agent", "planner"]:
-    """Route based on query complexity."""
+def route_by_complexity(state: AnalysisState) -> Literal["react_agent", "planner", "__end__"]:
+    """Route based on query complexity.
+
+    Returns "__end__" for unclear queries — the router already set
+    final_response, so no further processing is needed.
+    """
+    if state["query_complexity"] == "unclear":
+        return END
     if state["query_complexity"] == "simple":
         return "react_agent"
     return "planner"
