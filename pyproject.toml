@@ -18,7 +18,7 @@ dependencies = [
     "langchain-openai>=0.3.0",
     "langchain-anthropic>=0.3.0",
     "langchain-tavily==0.2.18",
-    "langgraph==1.1.8",
+    "langgraph==1.1.9",
     "tavily-python==0.7.23",
     "yfinance==0.2.66",
     "pydantic==2.13.3",
