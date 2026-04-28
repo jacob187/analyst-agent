@@ -559,7 +559,11 @@ class PlanningAgent:
                     if final:
                         yield {"type": "response", "message": extract_text(final)}
 
-    async def stream(self, inputs: Dict[str, Any]):
+    async def stream(
+        self,
+        inputs: Dict[str, Any],
+        config: Optional[Dict[str, Any]] = None,
+    ):
         """
         Async generator yielding streaming events via LangGraph's native astream().
 
@@ -567,13 +571,16 @@ class PlanningAgent:
         Uses astream(stream_mode="updates") which yields {node_name: state_delta}
         after each node completes. Custom events (thinking/tokens) are emitted
         via get_stream_writer() inside the synthesizer when available.
+
+        ``config`` is a LangChain RunnableConfig forwarded to the graph. Pass
+        ``metadata={"session_id": ...}`` to group runs into a LangSmith thread.
         """
         messages = inputs.get("messages", [])
         initial_state = self._build_initial_state(messages)
         current_plan: Optional[QueryPlan] = None
 
         async for chunk in self.workflow.astream(
-            initial_state, stream_mode="updates"
+            initial_state, stream_mode="updates", config=config
         ):
             # chunk is {node_name: state_delta}
             for node_name, state_update in chunk.items():

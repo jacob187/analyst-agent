@@ -185,7 +185,15 @@ async def chat(websocket: WebSocket, ticker: str):
                     full_response = ""
                     try:
                         async for event in agent.stream(
-                            {"messages": conversation_history}
+                            {"messages": conversation_history},
+                            config={
+                                "metadata": {
+                                    "session_id": session_id,
+                                    "ticker": ticker,
+                                    "user_id": user_id,
+                                },
+                                "run_name": f"chat:{ticker}",
+                            },
                         ):
                             if not await _safe_send(websocket, event):
                                 return  # client disconnected mid-stream
