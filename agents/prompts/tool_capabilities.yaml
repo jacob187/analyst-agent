@@ -20,10 +20,8 @@ prompts:
       - get_legal_proceedings: Significant pending litigation and regulatory actions (10-K Item 3)
 
       8-K FILING TOOLS:
-      - get_8k_overview: Latest 8-K event type, items, dates, and whether it contains earnings data
-      - get_8k_item: Raw text of a specific 8-K item by number (e.g. '2.02' for earnings, '1.01' for agreements)
-      - get_earnings_summary: Structured analysis of 8-K earnings release (Item 2.02) with key metrics, beats/misses, guidance
-      - get_material_event_summary: Structured analysis of non-earnings 8-K events (agreements, leadership changes, cybersecurity)
+      - analyze_latest_8k: Structured analysis of the latest 8-K filing (JSON). Automatically routes to earnings analysis (Item 2.02) or material event analysis (leadership changes, agreements, cybersecurity, Reg FD) based on the filing's contents. Use this for ANY question about the most recent 8-K — pick exactly one 8-K analysis tool per query.
+      - get_8k_item: Raw text of a specific 8-K item by number (e.g. '2.02' for earnings, '1.01' for agreements, '5.02' for leadership changes). Use only when raw text of a specific item is needed; for analysis use analyze_latest_8k.
 
       STOCK MARKET TOOLS:
       - get_stock_info: Current price, P/E ratios, market cap, 52-week range, dividend yield

@@ -14,9 +14,11 @@ These tests verify two performance optimizations:
    - Produces the same output structure as the sequential version
 """
 
+import contextvars
 import time
 
 import pytest
+from langchain_core.tools import Tool
 
 from agents.graph.analyst_graph import (
     create_step_executor_node,
@@ -28,6 +30,18 @@ from agents.planner import QueryPlan, AnalysisStep
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _as_tool(name: str, func) -> Tool:
+    """Wrap a callable as a langchain Tool with an ``.invoke`` method.
+
+    The step executor calls ``tools_dict[name].invoke("")`` (rather than calling
+    the func directly) so LangChain's tracing context propagates to any LLM
+    calls inside. Tests must therefore expose ``Tool``-shaped objects, not raw
+    lambdas — wrapping via ``Tool.from_function`` mirrors how production code
+    builds the tools dict.
+    """
+    return Tool.from_function(name=name, description=name, func=func)
 
 
 def _make_step(id: int, tool: str, depends_on: list[int] | None = None) -> AnalysisStep:
@@ -62,12 +76,12 @@ def _make_state(plan: QueryPlan) -> dict:
     }
 
 
-def _slow_tool(delay: float = 0.2):
-    """Return a tool function that sleeps for `delay` seconds."""
-    def tool(query=""):
+def _slow_tool(name: str, delay: float = 0.2) -> Tool:
+    """Return a Tool wrapping a function that sleeps for `delay` seconds."""
+    def fn(query=""):
         time.sleep(delay)
         return f"result after {delay}s"
-    return tool
+    return _as_tool(name, fn)
 
 
 # ===========================================================================
@@ -133,9 +147,9 @@ class TestParallelStepExecutor:
     def test_all_steps_executed(self):
         """Every step should have a result after execution."""
         tools_dict = {
-            "tool_a": lambda q="": "result_a",
-            "tool_b": lambda q="": "result_b",
-            "tool_c": lambda q="": "result_c",
+            "tool_a": _as_tool("tool_a", lambda q="": "result_a"),
+            "tool_b": _as_tool("tool_b", lambda q="": "result_b"),
+            "tool_c": _as_tool("tool_c", lambda q="": "result_c"),
         }
         plan = _make_plan([
             _make_step(1, "tool_a"),
@@ -157,9 +171,9 @@ class TestParallelStepExecutor:
         We assert total time < 0.5s to leave margin for thread overhead.
         """
         tools_dict = {
-            "tool_a": _slow_tool(0.2),
-            "tool_b": _slow_tool(0.2),
-            "tool_c": _slow_tool(0.2),
+            "tool_a": _slow_tool("tool_a", 0.2),
+            "tool_b": _slow_tool("tool_b", 0.2),
+            "tool_c": _slow_tool("tool_c", 0.2),
         }
         plan = _make_plan([
             _make_step(1, "tool_a"),
@@ -186,12 +200,12 @@ class TestParallelStepExecutor:
         """
         timestamps: dict[str, float] = {}
 
-        def make_timestamped_tool(name: str):
-            def tool(query=""):
+        def make_timestamped_tool(name: str) -> Tool:
+            def fn(query=""):
                 time.sleep(0.1)
                 timestamps[name] = time.monotonic()
                 return f"{name} done"
-            return tool
+            return _as_tool(name, fn)
 
         tools_dict = {
             "tool_a": make_timestamped_tool("tool_a"),
@@ -210,7 +224,7 @@ class TestParallelStepExecutor:
 
     def test_missing_tool_handled(self):
         """A missing tool should produce an error string, not crash the batch."""
-        tools_dict = {"tool_a": lambda q="": "ok"}
+        tools_dict = {"tool_a": _as_tool("tool_a", lambda q="": "ok")}
         plan = _make_plan([
             _make_step(1, "tool_a"),
             _make_step(2, "missing_tool"),
@@ -225,10 +239,10 @@ class TestParallelStepExecutor:
 
     def test_exception_in_tool_handled(self):
         """A tool that raises should produce an error string, not crash."""
-        def failing_tool(query=""):
+        def failing_fn(query=""):
             raise RuntimeError("boom")
 
-        tools_dict = {"tool_a": failing_tool}
+        tools_dict = {"tool_a": _as_tool("tool_a", failing_fn)}
         plan = _make_plan([_make_step(1, "tool_a")])
         state = _make_state(plan)
 
@@ -236,6 +250,49 @@ class TestParallelStepExecutor:
         result = executor(state)
 
         assert "[ERROR: boom]" in result["step_results"][1]
+
+    def test_parent_contextvars_visible_in_worker_threads(self):
+        """Worker threads must inherit the parent's contextvars.
+
+        LangChain's tracer stores the active run_id in a contextvar; if it
+        doesn't propagate across the ThreadPoolExecutor boundary, tool LLM
+        calls become orphan top-level runs in LangSmith and the parent chat
+        trace under-counts cost. We don't import LangChain's tracer here —
+        we just prove the propagation mechanism works with a sentinel
+        contextvar, which is the same primitive the tracer relies on.
+        """
+        sentinel: contextvars.ContextVar[str] = contextvars.ContextVar(
+            "test_sentinel", default="UNSET"
+        )
+        observed: dict[str, str] = {}
+
+        def capturing_fn(name: str):
+            def fn(query: str = "") -> str:
+                observed[name] = sentinel.get()
+                return "ok"
+            return fn
+
+        tools_dict = {
+            "tool_a": _as_tool("tool_a", capturing_fn("a")),
+            "tool_b": _as_tool("tool_b", capturing_fn("b")),
+        }
+        plan = _make_plan([
+            _make_step(1, "tool_a"),
+            _make_step(2, "tool_b"),
+        ])
+        state = _make_state(plan)
+
+        # Set the sentinel in the parent thread, then run the executor.
+        # If contextvar propagation works, both workers see "PARENT".
+        # If it doesn't, they see the default "UNSET".
+        sentinel.set("PARENT")
+        executor = create_step_executor_node(tools_dict, "TEST")
+        executor(state)
+
+        assert observed == {"a": "PARENT", "b": "PARENT"}, (
+            "Workers did not inherit parent contextvars — the tracing context "
+            "fix in step_executor regressed."
+        )
 
 
 # ===========================================================================

@@ -11,6 +11,7 @@ Streaming:
 - invoke() remains unchanged for backward compatibility
 """
 
+import contextvars
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, TypedDict, Annotated, Optional, List, Literal, Generator
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -86,8 +87,15 @@ def _create_tools(ticker: str, llm: BaseChatModel, tavily_api_key: Optional[str]
 
 
 def _build_tools_dict(tools: List[Any]) -> Dict[str, Any]:
-    """Convert tools list to name->func dict for direct execution."""
-    return {tool.name: tool.func for tool in tools}
+    """Convert tools list to name->Tool dict for traced execution.
+
+    Mapping to the Tool object (not ``tool.func``) lets the executor call
+    ``tool.invoke()`` later, which propagates LangChain's tracing contextvars.
+    Calling ``tool.func()`` directly bypasses tracing, so per-tool LLM runs
+    appear as orphan ``RunnableSequence`` spans in LangSmith and the parent
+    chat trace under-counts cost by 5-15x.
+    """
+    return {tool.name: tool for tool in tools}
 
 
 # =============================================================================
@@ -200,11 +208,16 @@ def _build_dependency_layers(steps: List[AnalysisStep]) -> List[List[AnalysisSte
 
 
 def _execute_step(step: AnalysisStep, tools_dict: Dict[str, Any]) -> tuple[int, str]:
-    """Execute a single step and return (step_id, result). Thread-safe helper."""
+    """Execute a single step and return (step_id, result). Thread-safe helper.
+
+    Uses ``tool.invoke("")`` rather than ``tool.func("")`` so LangChain's
+    tracing context propagates to any LLM calls inside the tool — without
+    this, per-tool LLM runs show up as orphan spans in LangSmith.
+    """
     if step.tool not in tools_dict:
         return step.id, f"[ERROR: Tool '{step.tool}' not found]"
     try:
-        return step.id, str(tools_dict[step.tool](""))
+        return step.id, str(tools_dict[step.tool].invoke(""))
     except Exception as e:
         return step.id, f"[ERROR: {str(e)}]"
 
@@ -233,12 +246,25 @@ def create_step_executor_node(tools_dict: Dict[str, Any], ticker: str):
                 step_id, result = _execute_step(layer[0], tools_dict)
                 step_results[step_id] = result
             else:
-                # Multiple independent steps — run concurrently
+                # Multiple independent steps — run concurrently.
+                #
+                # Each pool.submit() captures a fresh copy of the parent
+                # thread's contextvars (LangChain's tracer stores the active
+                # run id there). Without this copy, ThreadPoolExecutor workers
+                # see an empty context and tool LLM calls show up as orphan
+                # top-level runs in LangSmith instead of nested children of
+                # step_executor — which makes the parent chat trace under-
+                # count cost by 5-15x.
+                #
+                # ``ctx.run`` cannot be entered concurrently from multiple
+                # threads on the same Context object, so each submit captures
+                # its own snapshot via copy_context().
                 with ThreadPoolExecutor(max_workers=len(layer)) as pool:
-                    futures = {
-                        pool.submit(_execute_step, step, tools_dict): step
-                        for step in layer
-                    }
+                    futures = {}
+                    for step in layer:
+                        ctx = contextvars.copy_context()
+                        future = pool.submit(ctx.run, _execute_step, step, tools_dict)
+                        futures[future] = step
                     for future in as_completed(futures):
                         step_id, result = future.result()
                         step_results[step_id] = result

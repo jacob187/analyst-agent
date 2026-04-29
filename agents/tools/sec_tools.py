@@ -1,10 +1,29 @@
+import json
 from concurrent.futures import ThreadPoolExecutor
 from langchain_core.tools import Tool
 from langchain_core.language_models.chat_models import BaseChatModel
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from agents.sec_workflow.get_SEC_data import SECDataRetrieval
 from agents.sec_workflow.sec_llm_models import SECDocumentProcessor
+
+
+def _dump_analysis_json(result: Any) -> str:
+    """Serialize a cached analysis dict (or error) to JSON for the synthesizer.
+
+    Each LLM-analysis tool caches ``analysis.model_dump()`` as a dict. Returning
+    the full dict as JSON preserves every Pydantic field (financial_highlights,
+    liquidity_analysis, sentiment_analysis, filing_metadata, etc.) instead of
+    cherry-picking 2-5 fields into a hand-formatted f-string. The synthesizer
+    can then reconcile across tools by inspecting structured fields like
+    ``filing_metadata`` rather than parsing prose.
+
+    ``default=str`` handles non-serializable types (numpy scalars, datetimes)
+    that may slip through ``model_dump()``.
+    """
+    if isinstance(result, dict):
+        return json.dumps(result, indent=2, default=str)
+    return json.dumps({"value": str(result)}, indent=2)
 
 
 # Global cache for shared SEC data retrievers, processors, and processed outputs
@@ -77,13 +96,6 @@ def _fetch_best_section(fetch_fn) -> Dict[str, Any]:
     return fetch_fn("10-K")
 
 
-def _format_top_n(items: list[str], n: int = 3) -> str:
-    lines = []
-    for i, item in enumerate(items[:n], 1):
-        lines.append(f"{i}. {item}")
-    return "\n".join(lines)
-
-
 def _tool_raw_risk_factors(ticker: str, llm: BaseChatModel, sec_header: str = "") -> str:
     """Return raw Risk Factors text, preferring 10-Q (most recent) with 10-K fallback."""
     try:
@@ -112,14 +124,7 @@ def _tool_risk_factors_summary(ticker: str, llm: BaseChatModel, sec_header: str 
             _processed_cache[ticker][cache_key] = analysis.model_dump()
         except Exception as e:
             return f"Failed to analyze risk factors for {ticker}: {e}"
-    result = _processed_cache[ticker][cache_key]
-    if isinstance(result, dict) and "error" not in result:
-        sentiment = result.get("sentiment_score", "N/A")
-        key_risks = result.get("key_risks", [])
-        summary = result.get("summary", "")
-        response = f"Risk Analysis Summary:\n{summary}\n\nRisk Severity Score: {sentiment}/10\n\nTop Risk Factors:\n{_format_top_n(key_risks, 3)}"
-        return response
-    return str(result)
+    return _dump_analysis_json(_processed_cache[ticker][cache_key])
 
 
 def _tool_raw_mda(ticker: str, llm: BaseChatModel, sec_header: str = "") -> str:
@@ -150,19 +155,7 @@ def _tool_mda_summary(ticker: str, llm: BaseChatModel, sec_header: str = "") -> 
             _processed_cache[ticker][cache_key] = analysis.model_dump()
         except Exception as e:
             return f"Failed to analyze MD&A for {ticker}: {e}"
-    result = _processed_cache[ticker][cache_key]
-    if isinstance(result, dict) and "error" not in result:
-        sentiment = result.get("sentiment_score", "N/A")
-        outlook = result.get("future_outlook", "N/A")
-        key_points = result.get("key_points", [])
-        summary_text = result.get("summary", "")
-        response = (
-            f"MD&A Summary:\n{summary_text}\n\n"
-            f"Management Sentiment: {sentiment}\n\n"
-            f"Future Outlook: {outlook}\n\nKey Points:\n{_format_top_n(key_points, 3)}"
-        )
-        return response
-    return str(result)
+    return _dump_analysis_json(_processed_cache[ticker][cache_key])
 
 
 def _tool_raw_balance_sheets(ticker: str, llm: BaseChatModel, sec_header: str = "") -> str:
@@ -195,16 +188,7 @@ def _tool_balance_sheet_summary(ticker: str, llm: BaseChatModel, sec_header: str
             _processed_cache[ticker][cache_key] = analysis.model_dump()
         except Exception as e:
             return f"Failed to analyze balance sheet for {ticker}: {e}"
-    result = _processed_cache[ticker][cache_key]
-    if isinstance(result, dict) and "error" not in result:
-        summary = result.get("summary", "N/A")
-        key_metrics = result.get("key_metrics", [])
-        red_flags = result.get("red_flags", [])
-        response = f"Financial Summary: {summary}\n\nKey Metrics:\n{_format_top_n(key_metrics, 3)}"
-        if red_flags:
-            response += f"\n\nRed Flags: {', '.join(red_flags[:2])}"
-        return response
-    return str(result)
+    return _dump_analysis_json(_processed_cache[ticker][cache_key])
 
 
 def _tool_business_overview(ticker: str, sec_header: str = "") -> str:
@@ -343,34 +327,28 @@ def _tool_earnings_summary(ticker: str, llm: BaseChatModel, sec_header: str = ""
             _processed_cache[ticker][cache_key] = analysis.model_dump()
         except Exception as e:
             return f"Failed to analyze earnings for {ticker}: {e}"
-    result = _processed_cache[ticker][cache_key]
-    if isinstance(result, dict) and "error" not in result:
-        sentiment = result.get("sentiment_score", "N/A")
-        key_metrics = result.get("key_metrics", [])
-        beats = result.get("beats_misses", [])
-        summary = result.get("summary", "")
-        guidance = result.get("guidance", "")
-        response = (
-            f"Earnings Analysis:\n{summary}\n\n"
-            f"Sentiment: {sentiment}/10\n\n"
-            f"Key Metrics:\n{_format_top_n(key_metrics, 5)}"
-        )
-        if beats:
-            response += f"\n\nBeats/Misses:\n{_format_top_n(beats, 3)}"
-        if guidance:
-            response += f"\n\nGuidance: {guidance}"
-        return response
-    return str(result)
+    return _dump_analysis_json(_processed_cache[ticker][cache_key])
 
 
-def _tool_material_event_summary(ticker: str, llm: BaseChatModel, sec_header: str = "") -> str:
-    """Return structured analysis of non-earnings 8-K material event (cached)."""
+def _tool_material_event_summary(
+    ticker: str,
+    llm: BaseChatModel,
+    sec_header: str = "",
+    overview: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Return structured analysis of non-earnings 8-K material event (cached).
+
+    If ``overview`` is provided (the dispatcher does this), reuse it instead
+    of re-fetching from the retriever — saves one round-trip + dict construction
+    per material-event 8-K query.
+    """
     cache_key = _get_cache_key(ticker, "material_event_summary")
     if cache_key not in _processed_cache.get(ticker, {}):
         try:
             retriever = _get_shared_retriever(ticker, sec_header)
             processor = _get_shared_processor(ticker, llm)
-            overview = retriever.get_8k_overview()
+            if overview is None:
+                overview = retriever.get_8k_overview()
             if not overview.get("found"):
                 return f"No 8-K filing found for {ticker}."
             # Get the text of the primary (first) item for analysis
@@ -391,21 +369,39 @@ def _tool_material_event_summary(ticker: str, llm: BaseChatModel, sec_header: st
             _processed_cache[ticker][cache_key] = analysis.model_dump()
         except Exception as e:
             return f"Failed to analyze material event for {ticker}: {e}"
-    result = _processed_cache[ticker][cache_key]
-    if isinstance(result, dict) and "error" not in result:
-        event_type = result.get("event_type", "Unknown")
-        summary = result.get("summary", "")
-        impact = result.get("impact_assessment", "")
-        key_points = result.get("key_points", [])
-        sentiment = result.get("sentiment_score", "N/A")
-        response = (
-            f"Material Event ({event_type}):\n{summary}\n\n"
-            f"Sentiment: {sentiment}/10\n\n"
-            f"Key Points:\n{_format_top_n(key_points, 3)}\n\n"
-            f"Impact: {impact}"
+    return _dump_analysis_json(_processed_cache[ticker][cache_key])
+
+
+def _tool_analyze_latest_8k(ticker: str, llm: BaseChatModel, sec_header: str = "") -> str:
+    """Analyze the latest 8-K, dispatching to the right analyzer by item code.
+
+    Earnings releases (Item 2.02 with a parseable EX-99.1 press release) go to
+    the earnings analyzer; everything else (leadership changes, agreements,
+    cybersecurity incidents, Reg FD disclosures) goes to the material event
+    analyzer. Picking exactly one of the two analyzers prevents the planner
+    from double-fetching overlapping tools and emitting contradictory event
+    classifications for the same filing.
+    """
+    try:
+        retriever = _get_shared_retriever(ticker, sec_header)
+        overview = retriever.get_8k_overview()
+        if not overview.get("found"):
+            return json.dumps(
+                {"found": False, "reason": f"No 8-K filing found for {ticker}"},
+                indent=2,
+            )
+    except Exception as e:
+        return json.dumps(
+            {"error": str(e), "tool": "analyze_latest_8k", "ticker": ticker},
+            indent=2,
         )
-        return response
-    return str(result)
+
+    if overview.get("has_earnings"):
+        # The earnings analyzer fetches its data via ``get_earnings_data()``,
+        # not from the overview, so there's nothing to forward here.
+        return _tool_earnings_summary(ticker, llm, sec_header)
+    # Forward the overview so the material-event analyzer doesn't re-fetch it.
+    return _tool_material_event_summary(ticker, llm, sec_header, overview=overview)
 
 
 def create_sec_tools(ticker: str, llm: BaseChatModel, sec_header: str = "") -> tuple[list, str]:
@@ -477,13 +473,22 @@ def create_sec_tools(ticker: str, llm: BaseChatModel, sec_header: str = "") -> t
             func=lambda query="": _tool_all_summaries(ticker, llm, sec_header),
         ),
         # ── 8-K tools ────────────────────────────────────────────────────
+        # Dispatcher pattern: a single planner-visible tool routes internally
+        # to either the earnings analyzer or the material event analyzer.
+        # Replaces the older overview / earnings_summary / material_event_summary
+        # trio, which let the planner pick overlapping tools that classified
+        # the same filing differently.
         Tool.from_function(
-            name="get_8k_overview",
+            name="analyze_latest_8k",
             description=(
-                "Get overview of the latest 8-K filing: event type, items, dates, "
-                "and whether it contains earnings data."
+                "Get structured analysis of the latest 8-K filing. Automatically "
+                "routes to earnings analysis (Item 2.02 with a press release) or "
+                "material event analysis (leadership changes, agreements, "
+                "cybersecurity incidents, Reg FD) based on the filing's contents. "
+                "Returns sentiment, key points, impact assessment, and filing "
+                "metadata as JSON."
             ),
-            func=lambda query="": _tool_8k_overview(ticker, sec_header),
+            func=lambda query="": _tool_analyze_latest_8k(ticker, llm, sec_header),
         ),
         Tool.from_function(
             name="get_8k_item",
@@ -493,22 +498,6 @@ def create_sec_tools(ticker: str, llm: BaseChatModel, sec_header: str = "") -> t
                 "Pass the item number as the query."
             ),
             func=lambda item="2.02": _tool_8k_item(ticker, item, sec_header),
-        ),
-        Tool.from_function(
-            name="get_earnings_summary",
-            description=(
-                "Get structured analysis of the latest 8-K earnings release (Item 2.02). "
-                "Includes key metrics, beats/misses, sentiment, and forward guidance."
-            ),
-            func=lambda query="": _tool_earnings_summary(ticker, llm, sec_header),
-        ),
-        Tool.from_function(
-            name="get_material_event_summary",
-            description=(
-                "Get structured analysis of the latest 8-K material event (non-earnings). "
-                "Covers agreements, leadership changes, cybersecurity incidents, etc."
-            ),
-            func=lambda query="": _tool_material_event_summary(ticker, llm, sec_header),
         ),
     ]
 
