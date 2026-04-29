@@ -26,7 +26,10 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 DATASETS_DIR = Path(__file__).parent / "datasets"
 DEFAULT_TICKER = "AAPL"
 
-# SEC filing tool names (15)
+# SEC filing tool names (13)
+# 8-K analysis is a single dispatcher tool (analyze_latest_8k) that routes
+# internally to earnings or material event analyzers — replaces the older
+# overview / earnings_summary / material_event_summary trio.
 SEC_TOOL_NAMES = {
     "get_raw_risk_factors",
     "get_risk_factors_summary",
@@ -39,10 +42,8 @@ SEC_TOOL_NAMES = {
     "get_business_overview",
     "get_cybersecurity_disclosure",
     "get_legal_proceedings",
-    "get_8k_overview",
+    "analyze_latest_8k",
     "get_8k_item",
-    "get_earnings_summary",
-    "get_material_event_summary",
 }
 
 # Stock / technical analysis tool names (7)
@@ -144,8 +145,14 @@ def tools(llm, sec_header):
 
 @pytest.fixture(scope="session")
 def tools_dict(tools):
-    """Dict mapping tool name → callable for AAPL."""
-    return {tool.name: tool.func for tool in tools}
+    """Dict mapping tool name → callable for AAPL.
+
+    Maps to ``tool.invoke`` (a bound method) rather than ``tool.func`` so the
+    test path matches the graph runtime — both go through LangChain's Tool
+    wrapper. Existing tests that call ``tools_dict[name]("")`` keep working
+    because the invoke method has the same call signature.
+    """
+    return {tool.name: tool.invoke for tool in tools}
 
 
 # ---------------------------------------------------------------------------
