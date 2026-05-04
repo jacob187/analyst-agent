@@ -79,9 +79,10 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
             ticker,
             tenk: event.tenk_metadata ? { metadata: event.tenk_metadata } : undefined,
             tenq: event.tenq_metadata ? { metadata: event.tenq_metadata } : undefined,
-            earnings: event.earnings_has_earnings
-              ? { has_earnings: true, metadata: event.earnings_metadata ?? undefined }
-              : { has_earnings: false },
+            eightk:
+              event.eightk_kind === "none"
+                ? { kind: "none" }
+                : { kind: event.eightk_kind, metadata: event.eightk_metadata ?? undefined },
           });
         } else if (event.type === "section") {
           setFilingsData((prev) => {
@@ -93,7 +94,9 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
               return { ...prev, tenq: { ...prev.tenq!, [event.key]: event.data } };
             }
             if (event.form === "8-K") {
-              return { ...prev, earnings: { ...prev.earnings!, analysis: event.data } };
+              // Both "earnings" and "event" keys go into the same eightk slot —
+              // the kind discriminator was set when the metadata event arrived.
+              return { ...prev, eightk: { ...prev.eightk!, analysis: event.data } };
             }
             return prev;
           });

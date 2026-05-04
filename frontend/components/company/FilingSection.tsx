@@ -35,6 +35,9 @@ export function FilingSection({ title, analysis, metadata }: FilingSectionProps)
   const keyMetrics = analysis.key_metrics as string[] | undefined;
   const outlook = analysis.outlook as string | undefined;
   const redFlags = analysis.red_flags as string[] | undefined;
+  // MaterialEventAnalysis fields (8-K event)
+  const keyPoints = analysis.key_points as string[] | undefined;
+  const impactAssessment = analysis.impact_assessment as string | undefined;
 
   return (
     <div className="rounded-xl border border-border/60 bg-card overflow-hidden">
@@ -108,6 +111,22 @@ export function FilingSection({ title, analysis, metadata }: FilingSectionProps)
             </div>
           )}
 
+          {keyPoints && keyPoints.length > 0 && (
+            <div>
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Key Points
+              </p>
+              <ul className="space-y-1">
+                {keyPoints.map((p, i) => (
+                  <li key={i} className="flex items-start gap-2 text-xs text-foreground/80">
+                    <span className="mt-0.5 shrink-0 text-muted-foreground">·</span>
+                    <span>{p}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {redFlags && redFlags.length > 0 && (
             <div>
               <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-destructive">
@@ -128,6 +147,13 @@ export function FilingSection({ title, analysis, metadata }: FilingSectionProps)
             <div className="flex items-start gap-2 rounded-lg bg-primary/5 border border-primary/20 px-3 py-2">
               <TrendingUp className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
               <p className="text-xs leading-relaxed">{outlook}</p>
+            </div>
+          )}
+
+          {impactAssessment && (
+            <div className="flex items-start gap-2 rounded-lg bg-primary/5 border border-primary/20 px-3 py-2">
+              <TrendingUp className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+              <p className="text-xs leading-relaxed">{impactAssessment}</p>
             </div>
           )}
         </div>
