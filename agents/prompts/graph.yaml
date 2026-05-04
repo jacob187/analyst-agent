@@ -21,6 +21,11 @@ prompts:
       4. Notes any conflicts or uncertainties in the data
       5. Provides a clear conclusion or recommendation if appropriate
 
+      If a "=== CONFLICTS DETECTED ===" block is present in the input, surface
+      those conflicts explicitly in your response. Do NOT emit two contradictory
+      descriptions of the same filing as separate sections — describe the
+      filing once and acknowledge the disagreement between sources.
+
       Be specific and cite the data you're referencing. Avoid generic statements.
 
   STEP_EXECUTOR_PROMPT:
@@ -39,33 +44,3 @@ prompts:
       Execute this step by calling the appropriate tool and returning the results.
       Focus only on this specific task - do not try to answer the full user question yet.
       Return the raw data/analysis from the tool.
-
-  REPLAN_CHECK_PROMPT:
-    description: >
-      Reviews progress of a multi-step plan and decides if replanning is needed.
-    input_variables: [ticker, query, plan_summary, completed_results, remaining_steps]
-    template: |
-      You are reviewing the progress of a financial analysis plan for {ticker}.
-
-      ORIGINAL QUERY: {query}
-
-      ORIGINAL PLAN:
-      {plan_summary}
-
-      COMPLETED STEPS AND RESULTS:
-      {completed_results}
-
-      REMAINING STEPS:
-      {remaining_steps}
-
-      Based on what you've learned so far, should the remaining plan be adjusted?
-
-      Consider:
-      1. Did any results reveal unexpected information that changes the analysis approach?
-      2. Are any remaining steps now unnecessary given what we've learned?
-      3. Should any new steps be added based on discoveries?
-
-      Respond with:
-      - should_replan: true/false
-      - reasoning: brief explanation
-      - new_steps: (only if replanning) list of adjusted remaining steps

@@ -1,28 +1,29 @@
-"""Tests for parallel step execution and parallel get_all_summaries.
+"""Tests for the Send-based fan-out worker and parallel get_all_summaries.
 
 Marker: eval_unit — no API keys needed, all tools are mocked.
 
-These tests verify two performance optimizations:
+These tests verify two performance/architecture properties:
 
-1. Parallel step executor (sec_graph.py):
-   - Groups steps into dependency layers
-   - Runs independent steps concurrently within each layer
-   - Respects depends_on ordering between layers
+1. Send-based fan-out (analyst_graph.py):
+   - dispatch_steps emits one Send per plan step (depends_on intentionally ignored).
+   - The worker node returns a typed StepResult merged via the step_results reducer.
+   - End-to-end the compiled graph runs all workers in a single superstep.
 
 2. Parallel get_all_summaries (sec_tools.py):
-   - Runs risk, MD&A, and balance sheet summaries concurrently
-   - Produces the same output structure as the sequential version
+   - Runs risk, MD&A, and balance sheet summaries concurrently.
 """
 
-import contextvars
 import time
 
 import pytest
 from langchain_core.tools import Tool
+from langgraph.types import Send
 
 from agents.graph.analyst_graph import (
-    create_step_executor_node,
-    _build_dependency_layers,
+    create_worker_node,
+    dispatch_steps,
+    _extract_filing_ref,
+    merge_step_results,
 )
 from agents.planner import QueryPlan, AnalysisStep
 
@@ -70,7 +71,6 @@ def _make_state(plan: QueryPlan) -> dict:
         "query_complexity": "complex",
         "classification": None,
         "plan": plan,
-        "current_step_index": 0,
         "step_results": {},
         "final_response": "",
     }
@@ -85,214 +85,245 @@ def _slow_tool(name: str, delay: float = 0.2) -> Tool:
 
 
 # ===========================================================================
-# _build_dependency_layers tests
+# dispatch_steps tests
 # ===========================================================================
 
 
 @pytest.mark.eval_unit
-class TestDependencyLayers:
-    """Test that _build_dependency_layers groups steps correctly."""
+class TestDispatchSteps:
+    """dispatch_steps emits one Send('worker', {'step': s}) per plan step."""
 
-    def test_no_dependencies_single_layer(self):
-        """Steps with no depends_on should all land in layer 0."""
-        steps = [_make_step(1, "tool_a"), _make_step(2, "tool_b"), _make_step(3, "tool_c")]
-        layers = _build_dependency_layers(steps)
+    def test_emits_one_send_per_step(self):
+        plan = _make_plan(
+            [_make_step(1, "tool_a"), _make_step(2, "tool_b"), _make_step(3, "tool_c")]
+        )
+        sends = dispatch_steps({"plan": plan})
 
-        assert len(layers) == 1
-        assert {s.id for s in layers[0]} == {1, 2, 3}
+        assert len(sends) == 3
+        assert all(isinstance(s, Send) for s in sends)
+        assert all(s.node == "worker" for s in sends)
+        assert [s.arg["step"].id for s in sends] == [1, 2, 3]
 
-    def test_linear_chain(self):
-        """A → B → C should produce three layers, one step each."""
-        steps = [
-            _make_step(1, "tool_a"),
-            _make_step(2, "tool_b", depends_on=[1]),
-            _make_step(3, "tool_c", depends_on=[2]),
-        ]
-        layers = _build_dependency_layers(steps)
+    def test_ignores_depends_on(self):
+        """Phase-3 design choice: depends_on is preserved in AnalysisStep but
+        not respected by dispatch — every step fans out into the same superstep."""
+        plan = _make_plan(
+            [
+                _make_step(1, "tool_a"),
+                _make_step(2, "tool_b", depends_on=[1]),
+                _make_step(3, "tool_c", depends_on=[2]),
+            ]
+        )
+        sends = dispatch_steps({"plan": plan})
+        assert len(sends) == 3
+        assert all(s.node == "worker" for s in sends)
 
-        assert len(layers) == 3
-        assert layers[0][0].id == 1
-        assert layers[1][0].id == 2
-        assert layers[2][0].id == 3
+    def test_empty_plan_routes_to_synthesizer(self):
+        empty_plan = QueryPlan(
+            query_type="simple",
+            requires_planning=False,
+            steps=[],
+            synthesis_approach="direct",
+        )
+        assert dispatch_steps({"plan": empty_plan}) == ["synthesizer"]
 
-    def test_diamond_dependency(self):
-        """Diamond: A → (B, C) → D. B and C should be in the same layer."""
-        steps = [
-            _make_step(1, "tool_a"),
-            _make_step(2, "tool_b", depends_on=[1]),
-            _make_step(3, "tool_c", depends_on=[1]),
-            _make_step(4, "tool_d", depends_on=[2, 3]),
-        ]
-        layers = _build_dependency_layers(steps)
-
-        assert len(layers) == 3
-        assert {s.id for s in layers[0]} == {1}
-        assert {s.id for s in layers[1]} == {2, 3}
-        assert {s.id for s in layers[2]} == {4}
-
-    def test_empty_steps(self):
-        """No steps should return no layers."""
-        assert _build_dependency_layers([]) == []
+    def test_no_plan_routes_to_synthesizer(self):
+        assert dispatch_steps({"plan": None}) == ["synthesizer"]
 
 
 # ===========================================================================
-# Parallel step executor tests
+# worker node tests (Send payload → StepResult delta)
 # ===========================================================================
 
 
 @pytest.mark.eval_unit
-class TestParallelStepExecutor:
-    """Test that the step executor runs independent steps concurrently."""
+class TestWorkerNode:
+    """The worker runs a single step and returns {step_results: {id: StepResult}}."""
 
-    def test_all_steps_executed(self):
-        """Every step should have a result after execution."""
-        tools_dict = {
-            "tool_a": _as_tool("tool_a", lambda q="": "result_a"),
-            "tool_b": _as_tool("tool_b", lambda q="": "result_b"),
-            "tool_c": _as_tool("tool_c", lambda q="": "result_c"),
-        }
-        plan = _make_plan([
-            _make_step(1, "tool_a"),
-            _make_step(2, "tool_b"),
-            _make_step(3, "tool_c"),
-        ])
-        state = _make_state(plan)
+    def test_returns_step_result_for_prose_tool(self):
+        tools_dict = {"tool_a": _as_tool("tool_a", lambda q="": "result_a")}
+        worker = create_worker_node(tools_dict)
 
-        executor = create_step_executor_node(tools_dict, "TEST")
-        result = executor(state)
+        delta = worker({"step": _make_step(1, "tool_a")})
 
-        assert result["step_results"] == {1: "result_a", 2: "result_b", 3: "result_c"}
-        assert result["current_step_index"] == 3
+        assert "step_results" in delta
+        assert set(delta["step_results"].keys()) == {1}
+        result = delta["step_results"][1]
+        assert result["tool"] == "tool_a"
+        assert result["raw"] == "result_a"
+        assert result["data"] == {}
+        assert result["filing_ref"] is None
+        assert result["error"] is None
 
-    def test_independent_steps_run_concurrently(self):
-        """Three independent slow tools should complete in ~1x delay, not ~3x.
+    def test_parses_json_tool_output(self):
+        payload = (
+            '{"filing_metadata": {"accession_number": "0000320193-25-000001",'
+            ' "form_type": "8-K", "filing_date": "2025-04-01"},'
+            ' "event_type": "earnings_release"}'
+        )
+        tools_dict = {"json_tool": _as_tool("json_tool", lambda q="": payload)}
+        worker = create_worker_node(tools_dict)
 
-        Each tool sleeps 0.2s. Sequential would take ~0.6s, parallel ~0.2s.
-        We assert total time < 0.5s to leave margin for thread overhead.
+        delta = worker({"step": _make_step(7, "json_tool")})
+        result = delta["step_results"][7]
+
+        assert result["data"]["event_type"] == "earnings_release"
+        assert result["filing_ref"] == "0000320193-25-000001"
+        assert result["raw"] == payload
+        assert result["error"] is None
+
+    def test_handles_non_json_tool_output(self):
+        """Prose-returning tools land in raw with empty data."""
+        tools_dict = {"tool_a": _as_tool("tool_a", lambda q="": "AAPL is at $185")}
+        worker = create_worker_node(tools_dict)
+
+        result = worker({"step": _make_step(1, "tool_a")})["step_results"][1]
+        assert result["raw"] == "AAPL is at $185"
+        assert result["data"] == {}
+        assert result["error"] is None
+
+    def test_handles_tool_exception(self):
+        def boom(query=""):
+            raise RuntimeError("boom")
+
+        tools_dict = {"tool_a": _as_tool("tool_a", boom)}
+        worker = create_worker_node(tools_dict)
+
+        result = worker({"step": _make_step(1, "tool_a")})["step_results"][1]
+        assert "[ERROR: boom]" in result["raw"]
+        assert result["error"] == "boom"
+
+    def test_missing_tool_returns_error_step_result(self):
+        worker = create_worker_node({})
+        result = worker({"step": _make_step(1, "ghost_tool")})["step_results"][1]
+        assert "[ERROR" in result["raw"]
+        assert result["error"] == "Tool 'ghost_tool' not found"
+
+
+# ===========================================================================
+# End-to-end fan-out: compiled graph runs N workers in one superstep
+# ===========================================================================
+
+
+@pytest.mark.eval_unit
+class TestSendFanOutEndToEnd:
+    """Compile a minimal StateGraph and verify Send fan-out actually parallelizes."""
+
+    def _compile_minimal_graph(self, tools_dict):
+        """Build a tiny StateGraph: planner_stub → dispatch → worker → END.
+
+        Mirrors the relevant slice of create_planning_workflow without the
+        router/react/synthesizer branches we don't need for this test.
         """
+        from langgraph.graph import StateGraph, END
+        from agents.graph.analyst_graph import AnalysisState
+
+        graph = StateGraph(AnalysisState)
+        graph.add_node("planner_stub", lambda state: state)
+        graph.add_node("worker", create_worker_node(tools_dict))
+        graph.set_entry_point("planner_stub")
+        graph.add_conditional_edges("planner_stub", dispatch_steps, ["worker", END])
+        graph.add_edge("worker", END)
+        return graph.compile()
+
+    def test_workers_run_in_parallel(self):
+        """Three Send-fanned workers should complete in ~1x delay, not ~3x."""
         tools_dict = {
             "tool_a": _slow_tool("tool_a", 0.2),
             "tool_b": _slow_tool("tool_b", 0.2),
             "tool_c": _slow_tool("tool_c", 0.2),
         }
-        plan = _make_plan([
-            _make_step(1, "tool_a"),
-            _make_step(2, "tool_b"),
-            _make_step(3, "tool_c"),
-        ])
-        state = _make_state(plan)
+        plan = _make_plan(
+            [_make_step(1, "tool_a"), _make_step(2, "tool_b"), _make_step(3, "tool_c")]
+        )
+        compiled = self._compile_minimal_graph(tools_dict)
 
-        executor = create_step_executor_node(tools_dict, "TEST")
         start = time.monotonic()
-        result = executor(state)
+        final = compiled.invoke(_make_state(plan))
         elapsed = time.monotonic() - start
 
-        assert len(result["step_results"]) == 3
-        assert elapsed < 0.5, f"Took {elapsed:.2f}s — steps likely ran sequentially"
+        assert set(final["step_results"].keys()) == {1, 2, 3}
+        assert elapsed < 0.5, f"Took {elapsed:.2f}s — workers likely ran sequentially"
 
-    def test_dependency_ordering_respected(self):
-        """Steps in later layers should only run after earlier layers complete.
-
-        Layer 0: tool_a (records timestamp)
-        Layer 1: tool_b depends on tool_a (records timestamp)
-
-        tool_b's timestamp must be >= tool_a's.
-        """
-        timestamps: dict[str, float] = {}
-
-        def make_timestamped_tool(name: str) -> Tool:
-            def fn(query=""):
-                time.sleep(0.1)
-                timestamps[name] = time.monotonic()
-                return f"{name} done"
-            return _as_tool(name, fn)
-
+    def test_reducer_unions_concurrent_writes(self):
+        """All workers' step_results land in state via the merge reducer."""
         tools_dict = {
-            "tool_a": make_timestamped_tool("tool_a"),
-            "tool_b": make_timestamped_tool("tool_b"),
+            "tool_a": _as_tool("tool_a", lambda q="": "ra"),
+            "tool_b": _as_tool("tool_b", lambda q="": "rb"),
         }
-        plan = _make_plan([
-            _make_step(1, "tool_a"),
-            _make_step(2, "tool_b", depends_on=[1]),
-        ])
-        state = _make_state(plan)
+        plan = _make_plan([_make_step(1, "tool_a"), _make_step(2, "tool_b")])
+        compiled = self._compile_minimal_graph(tools_dict)
 
-        executor = create_step_executor_node(tools_dict, "TEST")
-        executor(state)
+        final = compiled.invoke(_make_state(plan))
 
-        assert timestamps["tool_b"] >= timestamps["tool_a"]
+        assert final["step_results"][1]["raw"] == "ra"
+        assert final["step_results"][2]["raw"] == "rb"
 
-    def test_missing_tool_handled(self):
-        """A missing tool should produce an error string, not crash the batch."""
-        tools_dict = {"tool_a": _as_tool("tool_a", lambda q="": "ok")}
-        plan = _make_plan([
-            _make_step(1, "tool_a"),
-            _make_step(2, "missing_tool"),
-        ])
-        state = _make_state(plan)
 
-        executor = create_step_executor_node(tools_dict, "TEST")
-        result = executor(state)
+# ===========================================================================
+# StepResult plumbing: reducer and filing_ref extractor
+# ===========================================================================
 
-        assert result["step_results"][1] == "ok"
-        assert "[ERROR" in result["step_results"][2]
 
-    def test_exception_in_tool_handled(self):
-        """A tool that raises should produce an error string, not crash."""
-        def failing_fn(query=""):
-            raise RuntimeError("boom")
+@pytest.mark.eval_unit
+class TestMergeStepResults:
+    """The reducer merges parallel step writes by unioning unique step_id keys."""
 
-        tools_dict = {"tool_a": _as_tool("tool_a", failing_fn)}
-        plan = _make_plan([_make_step(1, "tool_a")])
-        state = _make_state(plan)
+    def test_unions_disjoint_keys(self):
+        left = {1: {"tool": "a", "data": {}, "raw": "ra", "filing_ref": None, "error": None}}
+        right = {2: {"tool": "b", "data": {}, "raw": "rb", "filing_ref": None, "error": None}}
 
-        executor = create_step_executor_node(tools_dict, "TEST")
-        result = executor(state)
+        merged = merge_step_results(left, right)
 
-        assert "[ERROR: boom]" in result["step_results"][1]
+        assert set(merged.keys()) == {1, 2}
+        assert merged[1]["raw"] == "ra"
+        assert merged[2]["raw"] == "rb"
 
-    def test_parent_contextvars_visible_in_worker_threads(self):
-        """Worker threads must inherit the parent's contextvars.
+    def test_empty_inputs(self):
+        assert merge_step_results({}, {}) == {}
 
-        LangChain's tracer stores the active run_id in a contextvar; if it
-        doesn't propagate across the ThreadPoolExecutor boundary, tool LLM
-        calls become orphan top-level runs in LangSmith and the parent chat
-        trace under-counts cost. We don't import LangChain's tracer here —
-        we just prove the propagation mechanism works with a sentinel
-        contextvar, which is the same primitive the tracer relies on.
+    def test_right_wins_on_collision(self):
+        """If a key appears on both sides (shouldn't in practice), right wins.
+
+        We don't rely on this because each worker writes a unique step_id,
+        but the dict-union semantics need to be predictable.
         """
-        sentinel: contextvars.ContextVar[str] = contextvars.ContextVar(
-            "test_sentinel", default="UNSET"
-        )
-        observed: dict[str, str] = {}
+        left = {1: {"tool": "a", "data": {}, "raw": "old", "filing_ref": None, "error": None}}
+        right = {1: {"tool": "a", "data": {}, "raw": "new", "filing_ref": None, "error": None}}
 
-        def capturing_fn(name: str):
-            def fn(query: str = "") -> str:
-                observed[name] = sentinel.get()
-                return "ok"
-            return fn
+        assert merge_step_results(left, right)[1]["raw"] == "new"
 
-        tools_dict = {
-            "tool_a": _as_tool("tool_a", capturing_fn("a")),
-            "tool_b": _as_tool("tool_b", capturing_fn("b")),
+
+@pytest.mark.eval_unit
+class TestExtractFilingRef:
+    """Filing-ref priority: accession_number > form_type:filing_date > filing_date > None."""
+
+    def test_accession_wins(self):
+        data = {
+            "filing_metadata": {
+                "accession_number": "0000320193-25-000001",
+                "form_type": "8-K",
+                "filing_date": "2025-04-01",
+            }
         }
-        plan = _make_plan([
-            _make_step(1, "tool_a"),
-            _make_step(2, "tool_b"),
-        ])
-        state = _make_state(plan)
+        assert _extract_filing_ref(data) == "0000320193-25-000001"
 
-        # Set the sentinel in the parent thread, then run the executor.
-        # If contextvar propagation works, both workers see "PARENT".
-        # If it doesn't, they see the default "UNSET".
-        sentinel.set("PARENT")
-        executor = create_step_executor_node(tools_dict, "TEST")
-        executor(state)
+    def test_form_and_date_fallback(self):
+        data = {"filing_metadata": {"form_type": "8-K", "filing_date": "2025-04-01"}}
+        assert _extract_filing_ref(data) == "8-K:2025-04-01"
 
-        assert observed == {"a": "PARENT", "b": "PARENT"}, (
-            "Workers did not inherit parent contextvars — the tracing context "
-            "fix in step_executor regressed."
-        )
+    def test_date_only_fallback(self):
+        data = {"filing_metadata": {"filing_date": "2025-04-01"}}
+        assert _extract_filing_ref(data) == "2025-04-01"
+
+    def test_no_metadata_returns_none(self):
+        assert _extract_filing_ref({"event_type": "earnings"}) is None
+
+    def test_empty_data_returns_none(self):
+        assert _extract_filing_ref({}) is None
+
+    def test_non_dict_metadata_returns_none(self):
+        assert _extract_filing_ref({"filing_metadata": "not a dict"}) is None
 
 
 # ===========================================================================

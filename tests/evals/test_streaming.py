@@ -1,4 +1,4 @@
-"""Tests for streaming functionality in sec_graph.py.
+"""Tests for streaming functionality in analyst_graph.py.
 
 Marker: eval_unit — NO API keys needed. These test the streaming logic
 by mocking the LLM and workflow, verifying that stream_sync() yields
@@ -7,18 +7,26 @@ the correct events in the correct order.
 Tests cover:
 - _process_streaming_chunk: parsing string vs list content from LLM chunks
 - stream_sync: node events, tool events, response events from graph streaming
+- Per-step streaming: workers emit one tool event each via Send fan-out
 - Backward compat: invoke() still works after the refactor
 """
+
+import time
 
 import pytest
 from unittest.mock import MagicMock, patch
 from dataclasses import dataclass
 
 from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.tools import Tool
 
 from agents.graph.analyst_graph import (
     _process_streaming_chunk,
     PlanningAgent,
+    AnalysisState,
+    create_worker_node,
+    create_reconciler_node,
+    dispatch_steps,
 )
 from agents.planner import QueryPlan, AnalysisStep
 
@@ -199,31 +207,33 @@ class TestStreamSync:
 
     @pytest.mark.eval_unit
     def test_complex_query_yields_tool_events(self):
-        """A complex query should yield tool events from step_executor.
+        """A complex query should yield one tool event per worker emission.
 
-        The step executor runs all steps in a single node pass (parallel by
-        dependency layer), so there is one step_executor update containing all
-        results. The streaming method emits a tool event for every step in the plan.
+        With Send-based fan-out, each worker is its own LangGraph node
+        invocation, so `astream(stream_mode="updates")` emits one chunk per
+        worker as it completes. Each chunk's step_results delta carries the
+        single step_id that worker just wrote.
         """
         plan = _make_plan(2)
 
         mock_workflow = MagicMock()
         mock_workflow.stream.return_value = [
             ("updates", {"router": {"query_complexity": "complex"}}),
-            ("updates", {"planner": {"plan": plan, "current_step_index": 0}}),
-            ("updates", {"step_executor": {"current_step_index": 2, "step_results": {1: "result1", 2: "result2"}}}),
+            ("updates", {"planner": {"plan": plan}}),
+            ("updates", {"worker": {"step_results": {1: {"tool": "tool_1", "raw": "r1", "data": {}, "filing_ref": None, "error": None}}}}),
+            ("updates", {"worker": {"step_results": {2: {"tool": "tool_2", "raw": "r2", "data": {}, "filing_ref": None, "error": None}}}}),
             ("updates", {"synthesizer": {"final_response": "Combined analysis..."}}),
         ]
 
         agent = PlanningAgent(mock_workflow, "AAPL")
         events = list(agent.stream_sync({"messages": [HumanMessage(content="analyze risks")]}))
 
-        # Should have tool events for each step
         tool_events = [e for e in events if e["type"] == "tool"]
         assert len(tool_events) == 2
         assert tool_events[0]["tool"] == "tool_1"
         assert tool_events[0]["step"] == 1
         assert tool_events[0]["total"] == 2
+        assert tool_events[0]["node"] == "worker"
         assert tool_events[1]["tool"] == "tool_2"
         assert tool_events[1]["step"] == 2
 
@@ -264,6 +274,141 @@ class TestStreamSync:
         node_events = [e for e in events if e["type"] == "node"]
         assert any("Classifying" in e["message"] for e in node_events)
         assert any("Processing" in e["message"] for e in node_events)
+
+
+# ---------------------------------------------------------------------------
+# Per-step streaming via real Send fan-out
+# ---------------------------------------------------------------------------
+
+
+def _make_streaming_workflow(tools_dict, plan):
+    """Compile a minimal StateGraph with the real Send fan-out, so
+    stream_sync() exercises actual LangGraph streaming semantics."""
+    from langgraph.graph import StateGraph, END
+
+    graph = StateGraph(AnalysisState)
+    # Stub planner just injects the pre-built plan into state
+    graph.add_node("planner_stub", lambda state: {"plan": plan, "step_results": {}})
+    graph.add_node("worker", create_worker_node(tools_dict))
+    graph.add_node("reconciler", create_reconciler_node())
+    graph.set_entry_point("planner_stub")
+    graph.add_conditional_edges(
+        "planner_stub", dispatch_steps, ["worker", END]
+    )
+    graph.add_edge("worker", "reconciler")
+    graph.add_edge("reconciler", END)
+    return graph.compile()
+
+
+class TestPerStepStreaming:
+    """Send-based fan-out emits one updates chunk per worker as it completes,
+    so stream_sync() should yield one tool event per step."""
+
+    @pytest.mark.eval_unit
+    def test_worker_events_stream_per_step(self):
+        """N-step plan → N tool events, one per worker emission."""
+        tools_dict = {
+            "tool_a": Tool.from_function(name="tool_a", description="a", func=lambda q="": "ra"),
+            "tool_b": Tool.from_function(name="tool_b", description="b", func=lambda q="": "rb"),
+            "tool_c": Tool.from_function(name="tool_c", description="c", func=lambda q="": "rc"),
+        }
+        plan = QueryPlan(
+            query_type="complex",
+            requires_planning=True,
+            steps=[
+                AnalysisStep(id=1, action="A", tool="tool_a", rationale="r"),
+                AnalysisStep(id=2, action="B", tool="tool_b", rationale="r"),
+                AnalysisStep(id=3, action="C", tool="tool_c", rationale="r"),
+            ],
+            synthesis_approach="combine",
+        )
+        workflow = _make_streaming_workflow(tools_dict, plan)
+        agent = PlanningAgent(workflow, "TEST")
+
+        events = list(agent.stream_sync({"messages": [HumanMessage(content="q")]}))
+
+        tool_events = [e for e in events if e["type"] == "tool"]
+        assert len(tool_events) == 3, f"Expected 3 tool events, got {len(tool_events)}: {tool_events}"
+        assert {e["step"] for e in tool_events} == {1, 2, 3}
+        assert all(e["total"] == 3 for e in tool_events)
+        assert all(e["node"] == "worker" for e in tool_events)
+
+    @pytest.mark.eval_unit
+    def test_worker_events_carry_correct_step_metadata(self):
+        """Each tool event carries the right tool/action for its step."""
+        tools_dict = {
+            "tool_a": Tool.from_function(name="tool_a", description="a", func=lambda q="": "ra"),
+            "tool_b": Tool.from_function(name="tool_b", description="b", func=lambda q="": "rb"),
+        }
+        plan = QueryPlan(
+            query_type="complex",
+            requires_planning=True,
+            steps=[
+                AnalysisStep(id=1, action="Analyze risks", tool="tool_a", rationale="r"),
+                AnalysisStep(id=2, action="Get prices", tool="tool_b", rationale="r"),
+            ],
+            synthesis_approach="combine",
+        )
+        workflow = _make_streaming_workflow(tools_dict, plan)
+        agent = PlanningAgent(workflow, "TEST")
+
+        events = list(agent.stream_sync({"messages": [HumanMessage(content="q")]}))
+        tool_events = sorted(
+            (e for e in events if e["type"] == "tool"), key=lambda e: e["step"]
+        )
+
+        assert tool_events[0]["tool"] == "tool_a"
+        assert tool_events[0]["action"] == "Analyze risks"
+        assert tool_events[1]["tool"] == "tool_b"
+        assert tool_events[1]["action"] == "Get prices"
+
+    @pytest.mark.eval_unit
+    def test_worker_events_arrive_as_workers_complete(self):
+        """Workers running at staggered speeds emit their tool events at
+        staggered times — the user sees per-step UX, not a batch after the
+        slowest worker."""
+        slow_finished_at: dict[str, float] = {}
+        first_event_at: list[float] = []
+
+        def slow(name: str, delay: float):
+            def fn(q=""):
+                time.sleep(delay)
+                slow_finished_at[name] = time.monotonic()
+                return f"done {name}"
+            return Tool.from_function(name=name, description=name, func=fn)
+
+        tools_dict = {
+            "fast_a": slow("fast_a", 0.05),
+            "slow_b": slow("slow_b", 0.30),
+        }
+        plan = QueryPlan(
+            query_type="complex",
+            requires_planning=True,
+            steps=[
+                AnalysisStep(id=1, action="A", tool="fast_a", rationale="r"),
+                AnalysisStep(id=2, action="B", tool="slow_b", rationale="r"),
+            ],
+            synthesis_approach="combine",
+        )
+        workflow = _make_streaming_workflow(tools_dict, plan)
+        agent = PlanningAgent(workflow, "TEST")
+
+        events = []
+        start = time.monotonic()
+        for ev in agent.stream_sync({"messages": [HumanMessage(content="q")]}):
+            events.append((time.monotonic() - start, ev))
+            if ev.get("type") == "tool" and not first_event_at:
+                first_event_at.append(time.monotonic() - start)
+
+        tool_events = [(t, e) for t, e in events if e["type"] == "tool"]
+        assert len(tool_events) == 2
+
+        # The first tool event should arrive well before the slow worker finishes,
+        # proving per-step emission rather than batched-after-everything.
+        assert first_event_at[0] < 0.25, (
+            f"First tool event arrived at {first_event_at[0]:.2f}s — looks batched "
+            f"(slow worker takes 0.30s)"
+        )
 
 
 # ---------------------------------------------------------------------------
