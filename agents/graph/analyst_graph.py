@@ -3,7 +3,7 @@ LangGraph workflow for financial analysis with query planning.
 
 Architecture:
 - Simple queries → ReAct agent directly
-- Complex queries → Planner → Step Executor (loop) → Synthesizer
+- Complex queries → Planner → Step Executor → Synthesizer
 
 Streaming:
 - stream_sync() yields events as the graph executes (node transitions,
@@ -11,14 +11,14 @@ Streaming:
 - invoke() remains unchanged for backward compatibility
 """
 
-import contextvars
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, Any, TypedDict, Annotated, Optional, List, Literal, Generator
+import json
+from typing import Dict, Any, TypedDict, Annotated, Optional, List, Literal, Generator, Union
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import create_react_agent
+from langgraph.types import Send
 
 from agents.llm_utils import extract_text, parse_llm_response
 from agents.prompts import (
@@ -35,6 +35,74 @@ from agents.planner import (
 )
 
 
+class StepResult(TypedDict):
+    """Typed record for a single executed plan step.
+
+    `data` is the parsed JSON payload from a structured tool (e.g. the SEC
+    LLM-analysis tools, which dump Pydantic models as JSON). For tools that
+    return prose, `data` is empty and `raw` carries the string. `filing_ref`
+    is extracted from `data.filing_metadata` so downstream nodes (the
+    reconciler) can group results by the filing they describe.
+    """
+
+    tool: str
+    data: Dict[str, Any]
+    raw: str
+    filing_ref: Optional[str]
+    error: Optional[str]
+
+
+def merge_step_results(
+    left: Dict[int, StepResult], right: Dict[int, StepResult]
+) -> Dict[int, StepResult]:
+    """Reducer for `step_results` — concurrent workers each write a unique step_id.
+
+    Keys are unique by construction (one step_id per worker), so dict union is
+    commutative and associative — the requirements LangGraph imposes on
+    reducers for parallel writes.
+    """
+    return {**left, **right}
+
+
+def _extract_filing_ref(data: Dict[str, Any]) -> Optional[str]:
+    """Pull a stable filing identifier out of a tool's structured payload.
+
+    Priority: accession_number > form_type:filing_date > filing_date > None.
+    Tools that don't include `filing_metadata` (stock, market, briefing) return
+    None and are skipped by the reconciler.
+    """
+    metadata = data.get("filing_metadata") if isinstance(data, dict) else None
+    if not isinstance(metadata, dict):
+        return None
+
+    accession = metadata.get("accession_number")
+    if accession:
+        return str(accession)
+
+    form_type = metadata.get("form_type")
+    filing_date = metadata.get("filing_date")
+    if form_type and filing_date:
+        return f"{form_type}:{filing_date}"
+    if filing_date:
+        return str(filing_date)
+    return None
+
+
+class Conflict(TypedDict):
+    """A cross-tool disagreement on a structured field for the same filing.
+
+    Surfaced by the reconciler when two or more workers describe the same
+    `filing_ref` but report different values for a structured field
+    (e.g. `event_type`). The synthesizer is instructed to address conflicts
+    explicitly rather than emitting two contradictory descriptions.
+    """
+
+    filing_ref: str
+    step_ids: List[int]
+    field: str
+    values: List[Any]
+
+
 class AnalysisState(TypedDict):
     """Unified state for the analysis workflow."""
 
@@ -48,8 +116,8 @@ class AnalysisState(TypedDict):
     plan: Optional[QueryPlan]
 
     # Execution
-    current_step_index: int
-    step_results: Dict[int, str]
+    step_results: Annotated[Dict[int, StepResult], merge_step_results]
+    conflicts: List[Conflict]
 
     # Output
     final_response: str
@@ -169,7 +237,6 @@ def create_planner_node(planner: QueryPlanner):
 
         plan = planner.create_plan(query)
         state["plan"] = plan
-        state["current_step_index"] = 0
         state["step_results"] = {}
 
         return state
@@ -177,124 +244,190 @@ def create_planner_node(planner: QueryPlanner):
     return planner_node
 
 
-def _build_dependency_layers(steps: List[AnalysisStep]) -> List[List[AnalysisStep]]:
-    """Group steps into layers where each layer's dependencies are satisfied by prior layers.
+def _build_step_result(
+    tool_name: str,
+    raw: str,
+    error: Optional[str] = None,
+) -> StepResult:
+    """Wrap a tool's raw output as a typed StepResult.
 
-    Steps declare which earlier step IDs they depend on via `depends_on`.
-    Layer 0 contains all steps with no dependencies — these run first, in parallel.
-    Layer 1 contains steps whose dependencies are all in layer 0, and so on.
-
-    This is a topological sort by depth. Steps within the same layer are independent
-    of each other and safe to execute concurrently.
+    Tries to parse `raw` as JSON; if it isn't structured, `data` stays empty
+    and downstream nodes fall back to the raw string. `filing_ref` is pulled
+    from `data.filing_metadata` so the reconciler can group results across
+    tools that hit the same filing.
     """
-    completed_ids: set[int] = set()
-    remaining = list(steps)
-    layers: List[List[AnalysisStep]] = []
+    data: Dict[str, Any] = {}
+    if not error:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                data = parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
 
-    while remaining:
-        # Find steps whose dependencies are all satisfied
-        ready = [s for s in remaining if all(d in completed_ids for d in s.depends_on)]
-
-        if not ready:
-            # Circular dependency or missing IDs — flush remaining to avoid infinite loop
-            layers.append(remaining)
-            break
-
-        layers.append(ready)
-        completed_ids.update(s.id for s in ready)
-        remaining = [s for s in remaining if s.id not in completed_ids]
-
-    return layers
+    return StepResult(
+        tool=tool_name,
+        data=data,
+        raw=raw,
+        filing_ref=_extract_filing_ref(data),
+        error=error,
+    )
 
 
-def _execute_step(step: AnalysisStep, tools_dict: Dict[str, Any]) -> tuple[int, str]:
-    """Execute a single step and return (step_id, result). Thread-safe helper.
+def create_worker_node(tools_dict: Dict[str, Any]):
+    """Create the per-step worker node fanned out via Send.
 
-    Uses ``tool.invoke("")`` rather than ``tool.func("")`` so LangChain's
-    tracing context propagates to any LLM calls inside the tool — without
-    this, per-tool LLM runs show up as orphan spans in LangSmith.
-    """
-    if step.tool not in tools_dict:
-        return step.id, f"[ERROR: Tool '{step.tool}' not found]"
-    try:
-        return step.id, str(tools_dict[step.tool].invoke(""))
-    except Exception as e:
-        return step.id, f"[ERROR: {str(e)}]"
+    The worker receives a Send payload `{"step": AnalysisStep}` and runs the
+    tool referenced by that step. It returns `{"step_results": {step_id: ...}}`,
+    which `merge_step_results` unions into the parent state.
 
-
-def create_step_executor_node(tools_dict: Dict[str, Any], ticker: str):
-    """Create node that executes all plan steps, running independent steps in parallel.
-
-    Steps are grouped into dependency layers via _build_dependency_layers().
-    Each layer runs concurrently with ThreadPoolExecutor — only steps that share
-    a layer run at the same time, and a layer only starts once the previous layer
-    has fully completed. This respects the depends_on declarations from the planner
-    while maximising throughput.
+    Tracing context (LangChain run ids) is propagated automatically by
+    LangGraph's runtime across Send invocations — no manual `contextvars`
+    handling needed, unlike the previous ThreadPoolExecutor implementation.
     """
 
-    def step_executor(state: AnalysisState) -> AnalysisState:
-        plan = state["plan"]
-        if not plan or not plan.steps:
-            return state
+    def worker(payload: Dict[str, Any]) -> Dict[str, Any]:
+        step: AnalysisStep = payload["step"]
 
-        layers = _build_dependency_layers(plan.steps)
-        step_results: Dict[int, str] = {}
+        if step.tool not in tools_dict:
+            msg = f"Tool '{step.tool}' not found"
+            result = _build_step_result(step.tool, f"[ERROR: {msg}]", error=msg)
+        else:
+            try:
+                raw = str(tools_dict[step.tool].invoke(""))
+                result = _build_step_result(step.tool, raw)
+            except Exception as e:
+                msg = str(e)
+                result = _build_step_result(step.tool, f"[ERROR: {msg}]", error=msg)
 
-        for layer in layers:
-            if len(layer) == 1:
-                # Single step — no thread overhead needed
-                step_id, result = _execute_step(layer[0], tools_dict)
-                step_results[step_id] = result
-            else:
-                # Multiple independent steps — run concurrently.
-                #
-                # Each pool.submit() captures a fresh copy of the parent
-                # thread's contextvars (LangChain's tracer stores the active
-                # run id there). Without this copy, ThreadPoolExecutor workers
-                # see an empty context and tool LLM calls show up as orphan
-                # top-level runs in LangSmith instead of nested children of
-                # step_executor — which makes the parent chat trace under-
-                # count cost by 5-15x.
-                #
-                # ``ctx.run`` cannot be entered concurrently from multiple
-                # threads on the same Context object, so each submit captures
-                # its own snapshot via copy_context().
-                with ThreadPoolExecutor(max_workers=len(layer)) as pool:
-                    futures = {}
-                    for step in layer:
-                        ctx = contextvars.copy_context()
-                        future = pool.submit(ctx.run, _execute_step, step, tools_dict)
-                        futures[future] = step
-                    for future in as_completed(futures):
-                        step_id, result = future.result()
-                        step_results[step_id] = result
+        return {"step_results": {step.id: result}}
 
-        state["step_results"] = step_results
-        state["current_step_index"] = len(plan.steps)
-        return state
+    return worker
 
-    return step_executor
+
+def dispatch_steps(state: AnalysisState) -> Union[List[Send], List[str]]:
+    """Conditional edge from `planner`: fan out one Send per plan step.
+
+    `depends_on` is intentionally ignored — every step runs in parallel in a
+    single LangGraph superstep. The planner emits independent steps in
+    practice; ordering is a follow-up if a real query surfaces it.
+
+    If the plan is missing or empty, route directly to the synthesizer so the
+    graph terminates cleanly instead of waiting for workers that never fire.
+    """
+    plan = state.get("plan")
+    if not plan or not plan.steps:
+        return ["synthesizer"]
+    return [Send("worker", {"step": step}) for step in plan.steps]
+
+
+# Structured fields the reconciler compares across step_results sharing a
+# filing_ref. `event_type` is the canonical case (the GOOGL bug shape from
+# #30); add new fields here when other cross-tool conflicts surface.
+RECONCILABLE_FIELDS = ("event_type",)
+
+
+def create_reconciler_node():
+    """Create the reconciler node: groups step_results by filing_ref and flags
+    structured-field disagreements between tools that hit the same filing.
+
+    Pure Python — no LLM. The synthesizer consumes the resulting `conflicts`
+    list and is prompted to surface them explicitly. This moves cross-tool
+    deduplication out of prose-judgement and into deterministic code.
+    """
+
+    def reconciler(state: AnalysisState) -> Dict[str, Any]:
+        groups: Dict[str, List[tuple[int, StepResult]]] = {}
+        for step_id, result in (state.get("step_results") or {}).items():
+            ref = result.get("filing_ref") if isinstance(result, dict) else None
+            if not ref:
+                continue
+            groups.setdefault(ref, []).append((step_id, result))
+
+        conflicts: List[Conflict] = []
+        for ref, items in groups.items():
+            if len(items) < 2:
+                continue
+            for field in RECONCILABLE_FIELDS:
+                values = []
+                step_ids = []
+                seen: set = set()
+                for step_id, result in items:
+                    val = result.get("data", {}).get(field)
+                    if val is None:
+                        continue
+                    step_ids.append(step_id)
+                    if val not in seen:
+                        seen.add(val)
+                        values.append(val)
+                if len(values) > 1:
+                    conflicts.append(
+                        Conflict(
+                            filing_ref=ref,
+                            step_ids=sorted(step_ids),
+                            field=field,
+                            values=values,
+                        )
+                    )
+
+        return {"conflicts": conflicts}
+
+    return reconciler
+
+
+def _format_step_result_for_prompt(result: StepResult) -> str:
+    """Render a StepResult for the synthesizer.
+
+    Prefer the structured `data` payload (full Pydantic dump from the SEC
+    analysis tools) so the synthesizer sees every field. Fall back to `raw`
+    for prose-returning tools (stock, market, briefing) and error markers.
+    """
+    if result.get("data"):
+        return json.dumps(result["data"], indent=2, default=str)
+    return result.get("raw", "[No result]")
+
+
+def _format_conflicts_for_prompt(conflicts: List[Conflict]) -> str:
+    """Render the reconciler's conflict list as a CONFLICTS DETECTED block.
+
+    Empty when no conflicts — the synthesizer prompt absorbs the empty string
+    cleanly so the existing input_variables list doesn't change.
+    """
+    if not conflicts:
+        return ""
+
+    lines = ["", "=== CONFLICTS DETECTED ==="]
+    for c in conflicts:
+        lines.append(
+            f"Filing {c['filing_ref']} (steps {c['step_ids']}): "
+            f"{c['field']} disagreement — {c['values']}"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _build_synthesis_prompt(state: AnalysisState, ticker: str) -> str:
     """Build the synthesis prompt from plan state. Shared by streaming and non-streaming paths."""
     plan = state["plan"]
     step_results = state["step_results"]
+    conflicts = state.get("conflicts") or []
     query = _get_latest_query(state["messages"])
 
     results_text = []
     if plan:
         for step in plan.steps:
-            result = step_results.get(step.id, "[No result]")
+            result = step_results.get(step.id)
+            rendered = (
+                _format_step_result_for_prompt(result) if result else "[No result]"
+            )
             results_text.append(
-                f"=== Step {step.id}: {step.action} (via {step.tool}) ===\n{result}\n"
+                f"=== Step {step.id}: {step.action} (via {step.tool}) ===\n{rendered}\n"
             )
 
     synthesis_approach = plan.synthesis_approach if plan else "Combine findings into a comprehensive answer"
 
     return SYNTHESIS_SYSTEM_PROMPT.format(
         ticker=ticker,
-        step_results="\n".join(results_text),
+        step_results="\n".join(results_text) + _format_conflicts_for_prompt(conflicts),
         query=query,
         synthesis_approach=synthesis_approach,
     )
@@ -378,18 +511,6 @@ def route_by_complexity(state: AnalysisState) -> Literal["react_agent", "planner
     return "planner"
 
 
-def check_more_steps(state: AnalysisState) -> Literal["step_executor", "synthesizer"]:
-    """Check if there are more steps to execute."""
-    plan = state["plan"]
-    if not plan or not plan.steps:
-        return "synthesizer"
-
-    if state["current_step_index"] < len(plan.steps):
-        return "step_executor"
-
-    return "synthesizer"
-
-
 # =============================================================================
 # Graph Construction
 # =============================================================================
@@ -409,7 +530,7 @@ def create_planning_workflow(
     Flow:
     1. Router classifies query complexity
     2. Simple → ReAct agent → END
-    3. Complex → Planner → Step Executor (loop) → Synthesizer → END
+    3. Complex → Planner → dispatch_steps (Send fan-out) → Worker (×N) → Reconciler → Synthesizer → END
 
     Args:
         llm: Main LLM for router, planner, react agent (must NOT have thinking
@@ -439,7 +560,8 @@ def create_planning_workflow(
     workflow.add_node("router", create_router_node(planner))
     workflow.add_node("react_agent", create_react_node(react_agent))
     workflow.add_node("planner", create_planner_node(planner))
-    workflow.add_node("step_executor", create_step_executor_node(tools_dict, ticker))
+    workflow.add_node("worker", create_worker_node(tools_dict))
+    workflow.add_node("reconciler", create_reconciler_node())
     workflow.add_node("synthesizer", create_synthesizer_node(synthesizer_llm or llm, ticker))
 
     # Set entry point
@@ -448,8 +570,17 @@ def create_planning_workflow(
     # Add edges
     workflow.add_conditional_edges("router", route_by_complexity)
     workflow.add_edge("react_agent", END)
-    workflow.add_edge("planner", "step_executor")
-    workflow.add_conditional_edges("step_executor", check_more_steps)
+    # Planner fans out one Send per plan step → worker (parallel within one
+    # superstep). If the plan is empty, dispatch_steps routes straight to
+    # synthesizer instead, bypassing the reconciler.
+    workflow.add_conditional_edges(
+        "planner", dispatch_steps, ["worker", "synthesizer"]
+    )
+    # All workers join at the reconciler, then synthesize. The reconciler is
+    # pure Python (no LLM) — it groups step_results by filing_ref and emits a
+    # structured `conflicts` list for the synthesizer to surface explicitly.
+    workflow.add_edge("worker", "reconciler")
+    workflow.add_edge("reconciler", "synthesizer")
     workflow.add_edge("synthesizer", END)
 
     return workflow.compile()
@@ -474,7 +605,8 @@ class PlanningAgent:
     _NODE_MESSAGES = {
         "router": "Classifying query complexity...",
         "planner": "Planning analysis steps...",
-        "step_executor": "Executing analysis step...",
+        "worker": "Executing analysis step...",
+        "reconciler": "Reconciling step results...",
         "react_agent": "Processing query...",
         "synthesizer": "Synthesizing final response...",
     }
@@ -495,8 +627,8 @@ class PlanningAgent:
             "query_complexity": "",
             "classification": None,
             "plan": None,
-            "current_step_index": 0,
             "step_results": {},
+            "conflicts": [],
             "final_response": "",
         }
 
@@ -521,6 +653,36 @@ class PlanningAgent:
 
         return {"messages": messages}
 
+    def _worker_tool_events(
+        self,
+        state_update: Dict[str, Any],
+        plan: Optional[QueryPlan],
+    ) -> Generator[Dict[str, Any], None, None]:
+        """Convert a worker node's state delta into one tool event per step.
+
+        Send-based fan-out emits one updates-mode chunk per worker. Each
+        worker's `step_results` delta carries exactly one (step_id → result)
+        entry — but iterating defensively handles the case where multiple
+        workers' updates get coalesced into a single emission.
+        """
+        if not plan:
+            return
+        delta_results: Dict[int, Any] = state_update.get("step_results") or {}
+        steps_by_id = {s.id: s for s in plan.steps}
+        total = len(plan.steps)
+        for step_id in delta_results:
+            step = steps_by_id.get(step_id)
+            if step is None:
+                continue
+            yield {
+                "type": "tool",
+                "node": "worker",
+                "tool": step.tool,
+                "action": step.action,
+                "step": step.id,
+                "total": total,
+            }
+
     def stream_sync(self, inputs: Dict[str, Any]) -> Generator[Dict[str, Any], None, None]:
         """
         Yield streaming events as the graph executes.
@@ -539,8 +701,7 @@ class PlanningAgent:
         messages = inputs.get("messages", [])
         initial_state = self._build_initial_state(messages)
 
-        # Track the plan across node iterations so we can extract
-        # tool info when step_executor completes
+        # Track the plan so worker-update deltas can be mapped back to step metadata
         current_plan: Optional[QueryPlan] = None
 
         for mode, chunk in self.workflow.stream(
@@ -566,19 +727,10 @@ class PlanningAgent:
                     if plan_update is not None:
                         current_plan = plan_update
 
-                    # After step_executor, emit a tool event for every executed step.
-                    # All steps run in a single node pass now (parallel by layer),
-                    # so we report them all at once when the node completes.
-                    if node_name == "step_executor" and current_plan:
-                        for i, step in enumerate(current_plan.steps):
-                            yield {
-                                "type": "tool",
-                                "node": node_name,
-                                "tool": step.tool,
-                                "action": step.action,
-                                "step": i + 1,
-                                "total": len(current_plan.steps),
-                            }
+                    # Per-step UX: each Send-fanned worker emission becomes
+                    # one tool event tagged with its step's metadata.
+                    if node_name == "worker":
+                        yield from self._worker_tool_events(state_update, current_plan)
 
                     # Emit final response (from react_agent or synthesizer)
                     final = state_update.get("final_response")
@@ -622,16 +774,9 @@ class PlanningAgent:
                 if plan_update is not None:
                     current_plan = plan_update
 
-                if node_name == "step_executor" and current_plan:
-                    for i, step in enumerate(current_plan.steps):
-                        yield {
-                            "type": "tool",
-                            "node": node_name,
-                            "tool": step.tool,
-                            "action": step.action,
-                            "step": i + 1,
-                            "total": len(current_plan.steps),
-                        }
+                if node_name == "worker":
+                    for event in self._worker_tool_events(state_update, current_plan):
+                        yield event
 
                 final = state_update.get("final_response")
                 if final:
