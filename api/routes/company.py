@@ -340,24 +340,56 @@ def _fetch_filing_data(ticker: str, sec_header: str) -> dict[str, Any]:
     except (ValueError, Exception):
         pass  # No 10-Q available
 
-    # --- 8-K earnings ---
+    # --- 8-K (earnings or material event) ---
+    # Always fetch the overview first; branch on `has_earnings` to dispatch to
+    # the right analyzer downstream. Earnings (Item 2.02 + parseable EX-99.1)
+    # goes to the earnings analyzer; everything else goes to the material-event
+    # analyzer (leadership changes, M&A, cyber incidents, Reg FD, etc.).
     try:
-        earnings = retriever.get_earnings_data()
-        if earnings.get("has_earnings"):
-            eightk_meta = retriever._eightk_metadata
-            result["earnings_raw"] = {
-                **earnings,
-                "metadata": {
-                    **(eightk_meta.to_dict() if eightk_meta else {}),
-                    "edgar_url": _build_edgar_url(
-                        eightk_meta.cik, eightk_meta.accession
-                    ) if eightk_meta else "",
-                },
+        overview = retriever.get_8k_overview()
+        if not overview.get("found"):
+            result["eightk"] = {
+                "kind": "none",
+                "reason": overview.get("text", "No 8-K available"),
             }
         else:
-            result["earnings_raw"] = earnings
-    except (ValueError, Exception):
-        result["earnings_raw"] = {"has_earnings": False, "reason": "No 8-K available"}
+            eightk_meta = retriever._eightk_metadata
+            metadata = {
+                **(eightk_meta.to_dict() if eightk_meta else {}),
+                "edgar_url": _build_edgar_url(
+                    eightk_meta.cik, eightk_meta.accession
+                ) if eightk_meta else "",
+                "form_type": "8-K",
+            }
+            if overview.get("has_earnings"):
+                earnings = retriever.get_earnings_data()
+                result["eightk"] = {
+                    "kind": "earnings",
+                    "raw": {**earnings, "metadata": metadata},
+                    "metadata": metadata,
+                }
+            else:
+                # Match the dict shape `_tool_material_event_summary` builds
+                # so `analyze_material_event` accepts it directly.
+                items = overview.get("items", [])
+                primary_item = items[0] if items else None
+                item_text = ""
+                if primary_item:
+                    item_result = retriever.get_8k_item(primary_item)
+                    item_text = item_result.get("text", "") if item_result.get("found") else ""
+                result["eightk"] = {
+                    "kind": "event",
+                    "raw": {
+                        "content_type": overview.get("content_type", "other"),
+                        "items": items,
+                        "context": overview.get("context", ""),
+                        "text": item_text,
+                        "metadata": metadata,
+                    },
+                    "metadata": metadata,
+                }
+    except (ValueError, Exception) as e:
+        result["eightk"] = {"kind": "none", "reason": f"No 8-K available ({e})"}
 
     return result
 
@@ -369,7 +401,8 @@ def _run_llm_analysis(
     """Run a single LLM analysis and return the Pydantic model as a dict.
 
     analysis_type is one of: 'risk_10k', 'mda_10k', 'balance', 'risk_10q',
-    'mda_10q', 'earnings'.
+    'mda_10q', 'earnings', 'event', 'business', 'cybersecurity', 'legal',
+    'market_risk', 'income_stmt', 'cashflow'.
     """
     from agents.llm_factory import create_llm
     from agents.sec_workflow.sec_llm_models import SECDocumentProcessor
@@ -392,6 +425,8 @@ def _run_llm_analysis(
         result = processor.analyze_mda(ticker, raw_data)
     elif analysis_type == "earnings":
         result = processor.analyze_earnings(ticker, raw_data)
+    elif analysis_type == "event":
+        result = processor.analyze_material_event(ticker, raw_data)
     elif analysis_type == "business":
         result = processor.analyze_business_overview(ticker, raw_data)
     elif analysis_type == "cybersecurity":
@@ -508,10 +543,13 @@ async def get_company_filings(
         for atype, raw_key in [("risk_10q", "risk_raw"), ("mda_10q", "mda_raw")]:
             analysis_tasks.append(("tenq", atype, _cached_analysis("10-Q", acc, atype, tenq[raw_key])))
 
-    earnings_raw = filing_data.get("earnings_raw", {})
-    if earnings_raw.get("has_earnings"):
-        acc = earnings_raw.get("metadata", {}).get("accession", "")
-        analysis_tasks.append(("earnings", "analysis", _cached_analysis("8-K", acc, "earnings", earnings_raw)))
+    eightk = filing_data.get("eightk", {})
+    eightk_kind = eightk.get("kind", "none")
+    if eightk_kind in ("earnings", "event"):
+        acc = eightk.get("metadata", {}).get("accession", "")
+        analysis_tasks.append(
+            ("eightk", "analysis", _cached_analysis("8-K", acc, eightk_kind, eightk["raw"]))
+        )
 
     # Run all LLM analyses concurrently — on cache hit they return instantly,
     # on cache miss the LLM calls run in parallel threads via asyncio.to_thread.
@@ -530,17 +568,17 @@ async def get_company_filings(
             continue
         if section in ("tenk", "tenq"):
             response[section][key] = result
-        elif section == "earnings":
-            response["earnings"] = {
-                "has_earnings": True,
-                "metadata": earnings_raw.get("metadata", {}),
+        elif section == "eightk":
+            response["eightk"] = {
+                "kind": eightk_kind,
+                "metadata": eightk.get("metadata", {}),
                 "analysis": result,
             }
 
-    if "earnings" not in response:
-        response["earnings"] = {
-            "has_earnings": False,
-            "reason": earnings_raw.get("reason", "No earnings data available"),
+    if "eightk" not in response:
+        response["eightk"] = {
+            "kind": eightk_kind,
+            "reason": eightk.get("reason", "No 8-K data available"),
         }
 
     return JSONResponse(content=response)
@@ -628,13 +666,14 @@ async def stream_company_filings(
                 return
 
             # Emit metadata immediately so the frontend can render section headers
-            earnings_raw = filing_data.get("earnings_raw", {})
+            eightk = filing_data.get("eightk", {})
+            eightk_kind = eightk.get("kind", "none")
             yield _sse({
                 "type": "metadata",
                 "tenk_metadata": filing_data.get("tenk", {}).get("metadata"),
                 "tenq_metadata": filing_data.get("tenq", {}).get("metadata"),
-                "earnings_has_earnings": earnings_raw.get("has_earnings", False),
-                "earnings_metadata": earnings_raw.get("metadata") if earnings_raw.get("has_earnings") else None,
+                "eightk_kind": eightk_kind,
+                "eightk_metadata": eightk.get("metadata") if eightk_kind != "none" else None,
             })
 
             # Run all LLM sections concurrently using a shared queue.
@@ -712,9 +751,9 @@ async def stream_company_filings(
                 for analysis_type, raw_key in [("risk_10q", "risk_raw"), ("mda_10q", "mda_raw")]:
                     tasks.append(section_task("10-Q", accession, analysis_type, tenq[raw_key]))
 
-            if earnings_raw.get("has_earnings"):
-                accession = earnings_raw.get("metadata", {}).get("accession", "")
-                tasks.append(section_task("8-K", accession, "earnings", earnings_raw))
+            if eightk_kind in ("earnings", "event"):
+                accession = eightk.get("metadata", {}).get("accession", "")
+                tasks.append(section_task("8-K", accession, eightk_kind, eightk["raw"]))
 
             if tasks:
                 async def run_all():
