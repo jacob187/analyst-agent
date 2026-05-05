@@ -168,10 +168,11 @@ export interface FilingsResponse {
     risk_10q?: FilingAnalysis;
     mda_10q?: FilingAnalysis;
   };
-  earnings?: {
-    has_earnings: boolean;
+  eightk?: {
+    kind: "earnings" | "event" | "none";
     metadata?: FilingMetadata;
     analysis?: FilingAnalysis;
+    reason?: string;
   };
 }
 
@@ -208,14 +209,14 @@ export interface FilingMetadataEvent {
   type: "metadata";
   tenk_metadata: FilingMetadata | null;
   tenq_metadata: FilingMetadata | null;
-  earnings_has_earnings: boolean;
-  earnings_metadata: FilingMetadata | null;
+  eightk_kind: "earnings" | "event" | "none";
+  eightk_metadata: FilingMetadata | null;
 }
 
 export interface FilingSectionEvent {
   type: "section";
   form: string; // "10-K" | "10-Q" | "8-K"
-  key: string;  // "risk_10k" | "mda_10k" | "balance" | "risk_10q" | "mda_10q" | "earnings"
+  key: string;  // "risk_10k" | "mda_10k" | "balance" | "risk_10q" | "mda_10q" | "earnings" | "event"
   data: FilingAnalysis;
 }
 

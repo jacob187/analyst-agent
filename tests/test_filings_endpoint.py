@@ -91,6 +91,16 @@ _MOCK_EARNINGS_ANALYSIS = {
     "filing_metadata": _MOCK_8K_METADATA,
 }
 
+_MOCK_EVENT_ANALYSIS = {
+    "summary": "CEO transition announced.",
+    "event_type": "Leadership Change",
+    "key_points": ["CEO stepping down effective immediately", "CFO named interim CEO"],
+    "impact_assessment": "Short-term volatility expected; long-term impact depends on successor.",
+    "sentiment_score": -2.0,
+    "sentiment_analysis": "Mildly negative pending clarity on succession.",
+    "filing_metadata": _MOCK_8K_METADATA,
+}
+
 
 # ── Fixture that mocks all dependencies ───────────────────────────────────
 
@@ -143,6 +153,20 @@ def mock_filings_deps():
             "text": "MD&A text...", "metadata": _MOCK_TENK_METADATA, "found": True,
         }
         sec_instance.extract_balance_sheet_as_str.return_value = {"10-K": "Balance sheet text"}
+        sec_instance.get_8k_overview.return_value = {
+            "found": True,
+            "has_earnings": True,
+            "items": ["2.02"],
+            "content_type": "earnings",
+            "is_amendment": False,
+            "has_press_release": True,
+            "date_of_report": "2026-01-30",
+            "context": "Q1 2026 earnings context",
+            "metadata": _MOCK_8K_METADATA,
+        }
+        sec_instance.get_8k_item.return_value = {
+            "text": "Item text...", "metadata": _MOCK_8K_METADATA, "found": True,
+        }
         sec_instance.get_earnings_data.return_value = {
             "has_earnings": True,
             "context": "Q1 2026 earnings context",
@@ -167,6 +191,9 @@ def mock_filings_deps():
         )
         processor_instance.analyze_earnings.return_value = MagicMock(
             model_dump=lambda: _MOCK_EARNINGS_ANALYSIS
+        )
+        processor_instance.analyze_material_event.return_value = MagicMock(
+            model_dump=lambda: _MOCK_EVENT_ANALYSIS
         )
         MockProcessor.return_value = processor_instance
 
@@ -197,7 +224,7 @@ class TestFilingsEndpointSuccess:
         assert data["ticker"] == "AAPL"
         assert "tenk" in data
         assert "tenq" in data
-        assert "earnings" in data
+        assert "eightk" in data
 
     def test_tenk_has_all_analysis_types(self, client, mock_filings_deps):
         data = client.get(
@@ -216,10 +243,10 @@ class TestFilingsEndpointSuccess:
             "/api/company/AAPL/filings",
             headers={"X-Google-Api-Key": "test-key", "X-Sec-Header": "test@test.com"},
         ).json()
-        earnings = data["earnings"]
-        assert earnings["has_earnings"] is True
-        assert "analysis" in earnings
-        assert earnings["analysis"]["summary"] == "Revenue beat estimates by 3%."
+        eightk = data["eightk"]
+        assert eightk["kind"] == "earnings"
+        assert "analysis" in eightk
+        assert eightk["analysis"]["summary"] == "Revenue beat estimates by 3%."
 
     def test_edgar_url_construction(self, client, mock_filings_deps):
         data = client.get(
@@ -271,18 +298,43 @@ class TestFilingsCaching:
 # ── No earnings ────────────────────────────────────────────────────────────
 
 
-class TestFilingsNoEarnings:
-    def test_no_earnings_section_when_absent(self, client, mock_filings_deps):
-        mock_filings_deps["sec"].get_earnings_data.return_value = {
-            "has_earnings": False,
-            "reason": "Latest 8-K does not contain Item 2.02",
+class TestFilings8K:
+    def test_no_eightk_when_overview_not_found(self, client, mock_filings_deps):
+        mock_filings_deps["sec"].get_8k_overview.return_value = {
+            "found": False,
+            "text": "No 8-K available",
+            "metadata": {},
         }
         data = client.get(
             "/api/company/AAPL/filings",
             headers={"X-Google-Api-Key": "test-key", "X-Sec-Header": "test@test.com"},
         ).json()
-        assert data["earnings"]["has_earnings"] is False
-        assert "reason" in data["earnings"]
+        assert data["eightk"]["kind"] == "none"
+        assert "reason" in data["eightk"]
+
+    def test_material_event_when_non_earnings_eightk(self, client, mock_filings_deps):
+        """Non-earnings 8-K (e.g. leadership change) should route to event analyzer."""
+        mock_filings_deps["sec"].get_8k_overview.return_value = {
+            "found": True,
+            "has_earnings": False,
+            "items": ["5.02"],
+            "content_type": "director_change",
+            "is_amendment": False,
+            "has_press_release": False,
+            "date_of_report": "2026-02-15",
+            "context": "Departure of CEO; appointment of interim CEO.",
+            "metadata": _MOCK_8K_METADATA,
+        }
+        data = client.get(
+            "/api/company/AAPL/filings",
+            headers={"X-Google-Api-Key": "test-key", "X-Sec-Header": "test@test.com"},
+        ).json()
+        assert data["eightk"]["kind"] == "event"
+        assert data["eightk"]["analysis"]["event_type"] == "Leadership Change"
+        assert data["eightk"]["analysis"]["impact_assessment"].startswith("Short-term")
+        # Event analyzer should have been invoked, earnings analyzer should not
+        mock_filings_deps["processor"].analyze_material_event.assert_called_once()
+        mock_filings_deps["processor"].analyze_earnings.assert_not_called()
 
 
 # ── Error cases ────────────────────────────────────────────────────────────

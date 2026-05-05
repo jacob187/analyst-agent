@@ -21,6 +21,7 @@ const STEP_LABELS: Record<string, string> = {
   "10-Q/risk_10q": "10-Q · Risk Factors",
   "10-Q/mda_10q": "10-Q · MD&A",
   "8-K/earnings": "8-K · Earnings Analysis",
+  "8-K/event": "8-K · Material Event",
 };
 
 // ─── Progress activity log ─────────────────────────────────────────────────────
@@ -110,7 +111,8 @@ export function FilingsTab({ data, loading, progressSteps }: FilingsTabProps) {
 
   if (!data) return null;
 
-  const hasFilings = data.tenk || data.tenq || data.earnings?.has_earnings;
+  const hasFilings =
+    data.tenk || data.tenq || (data.eightk && data.eightk.kind !== "none");
 
   if (!loading && !hasFilings) {
     return (
@@ -263,20 +265,41 @@ export function FilingsTab({ data, loading, progressSteps }: FilingsTabProps) {
         </>
       )}
 
-      {/* 8-K earnings */}
-      {data.earnings?.has_earnings && (
+      {/* 8-K — earnings or material event (leadership change, M&A, cyber, Reg FD, etc.) */}
+      {data.eightk && data.eightk.kind === "earnings" && (
         <>
           <p className="mt-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
             Earnings (8-K)
           </p>
-          {data.earnings.analysis ? (
+          {data.eightk.analysis ? (
             <FilingSection
               title="Earnings Analysis"
-              analysis={data.earnings.analysis}
-              metadata={data.earnings.metadata}
+              analysis={data.eightk.analysis}
+              metadata={data.eightk.metadata}
             />
           ) : loading ? (
             <PendingSection title="Earnings Analysis" />
+          ) : null}
+        </>
+      )}
+
+      {data.eightk && data.eightk.kind === "event" && (
+        <>
+          <p className="mt-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Material Event (8-K)
+          </p>
+          {data.eightk.analysis ? (
+            <FilingSection
+              title={
+                typeof data.eightk.analysis.event_type === "string" && data.eightk.analysis.event_type
+                  ? `Material Event — ${data.eightk.analysis.event_type}`
+                  : "Material Event"
+              }
+              analysis={data.eightk.analysis}
+              metadata={data.eightk.metadata}
+            />
+          ) : loading ? (
+            <PendingSection title="Material Event" />
           ) : null}
         </>
       )}
