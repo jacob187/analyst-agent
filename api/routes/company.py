@@ -42,18 +42,15 @@ _stream_semaphores: dict[str, asyncio.Semaphore] = defaultdict(
 )
 
 
-def _build_profile(ticker: str) -> dict[str, Any]:
-    """Synchronous profile assembly — runs in a thread pool.
+def _safe(fn, default):
+    try:
+        return fn()
+    except Exception:
+        return default
 
-    Aggregates four independent data sources:
-    1. yfinance company info + live quote + earnings calendar
-    2. Technical indicators (RSI, MACD, ADX, etc.)
-    3. Chart pattern detection
-    4. Market regime (SPY/VIX-based)
 
-    Each source fails independently — partial data is returned rather
-    than failing the whole request.
-    """
+async def _build_profile(ticker: str) -> dict[str, Any]:
+    """Async profile assembly. Fans out yfinance calls in parallel."""
     from agents.technical_workflow.get_stock_data import YahooFinanceDataRetrieval
     from agents.technical_workflow.process_technical_indicators import TechnicalIndicators
     from agents.technical_workflow.pattern_recognition import PatternRecognitionEngine
@@ -61,20 +58,24 @@ def _build_profile(ticker: str) -> dict[str, Any]:
 
     retriever = YahooFinanceDataRetrieval(ticker)
 
-    # --- Company info + quote + earnings ---
-    company = retriever.get_company_profile()
-    quote = retriever.get_live_price()
-    earnings = retriever.get_earnings_calendar()
+    # Fan out 5 independent network fetches in parallel.
+    company, quote, earnings, df, regime = await asyncio.gather(
+        asyncio.to_thread(_safe, retriever.get_company_profile, {}),
+        asyncio.to_thread(_safe, retriever.get_live_price, {}),
+        asyncio.to_thread(_safe, retriever.get_earnings_calendar, {}),
+        asyncio.to_thread(_safe, lambda: retriever.get_historical_prices(period="1y", interval="1d"), None),
+        asyncio.to_thread(_safe, lambda: MarketRegimeDetector().detect_regime(), {}),
+    )
 
-    # --- Technical indicators (needs 1y daily OHLCV) ---
-    technicals: dict[str, Any] = {}
-    patterns: list[dict[str, Any]] = []
-    df = retriever.get_historical_prices(period="1y", interval="1d")
-    if df is not None and not df.empty:
+    # Technical indicators + patterns from the OHLCV frame. CPU-bound;
+    # run on a worker thread so the event loop stays free.
+    def _compute_ta(frame):
+        technicals: dict[str, Any] = {}
+        patterns: list[dict[str, Any]] = []
+        if frame is None or frame.empty:
+            return technicals, patterns
         ti = TechnicalIndicators(ticker)
-        all_ind = ti.calculate_all_indicators(df)
-
-        # Extract the dashboard-relevant snapshot from the full indicator set
+        all_ind = ti.calculate_all_indicators(frame)
         technicals = {
             "rsi": all_ind.get("rsi", {}),
             "macd": all_ind.get("macd", {}),
@@ -83,10 +84,9 @@ def _build_profile(ticker: str) -> dict[str, Any]:
             "moving_averages": all_ind.get("moving_averages", {}),
             "volatility": all_ind.get("volatility", {}),
         }
-
         try:
             engine = PatternRecognitionEngine()
-            raw = engine.detect_all_patterns(df)
+            raw = engine.detect_all_patterns(frame)
             patterns = [
                 {
                     "type": p.get("type", ""),
@@ -97,14 +97,10 @@ def _build_profile(ticker: str) -> dict[str, Any]:
                 for p in raw
             ]
         except Exception:
-            pass  # Patterns are supplementary
+            pass
+        return technicals, patterns
 
-    # --- Market regime ---
-    regime: dict[str, Any] = {}
-    try:
-        regime = MarketRegimeDetector().detect_regime()
-    except Exception:
-        pass  # Regime is supplementary
+    technicals, patterns = await asyncio.to_thread(_compute_ta, df)
 
     # Sanitise external URL — only allow http(s) schemes to prevent
     # javascript: URI injection when the frontend renders the link.
@@ -145,11 +141,13 @@ def _build_profile(ticker: str) -> dict[str, Any]:
         "patterns": patterns,
         "regime": regime,
     }
-    return json.loads(json.dumps(raw, default=str))
+    # Round-trip through JSON off the event loop to coerce numpy floats,
+    # Timestamps, etc. to JSON-safe primitives.
+    return await asyncio.to_thread(lambda: json.loads(json.dumps(raw, default=str)))
 
 
 @router.get("/{ticker}/profile")
-async def get_company_profile(ticker: str):
+async def get_company_profile(ticker: str, keys: ApiKeys = Depends(get_api_keys)):
     """Return aggregated company profile for the dashboard Overview tab.
 
     Combines yfinance metadata, live quote, technical indicators, chart
@@ -173,16 +171,18 @@ async def get_company_profile(ticker: str):
                 headers={"Cache-Control": f"public, max-age={_PROFILE_CACHE_TTL}"},
             )
 
-        # Run synchronous data fetching in a thread to avoid blocking the event loop.
-        # _build_profile handles JSON round-trip internally for numpy/Timestamp safety.
-        payload = await asyncio.to_thread(_build_profile, ticker)
+        # _build_profile fans out yfinance calls in parallel via asyncio.gather.
+        payload = await _build_profile(ticker)
         _profile_cache[ticker] = (time.monotonic(), payload)
 
         # Track the company as soon as its profile is first loaded.
         # This is the earliest signal that a user is interested in a ticker —
         # before any chat session or filings analysis is triggered.
-        from api.db import ensure_company
-        await ensure_company(ticker)
+        from api.db import ensure_company, track_company_view
+        if keys.user_id:
+            await track_company_view(ticker, keys.user_id)
+        else:
+            await ensure_company(ticker)
 
     return JSONResponse(
         content=payload,

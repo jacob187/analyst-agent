@@ -4,6 +4,12 @@ import { useEffect, useState } from "react";
 
 const STORAGE_KEY = "analyst_agent_user_id";
 
+// Optional stable dev user ID. When set (e.g. in .env.local), every
+// request uses this ID instead of the per-browser localStorage UUID —
+// so clearing storage or switching browsers doesn't fragment local data.
+// Never set this in production builds.
+const DEV_USER_ID = process.env.NEXT_PUBLIC_DEV_USER_ID;
+
 /**
  * Get or create a stable anonymous user ID from localStorage.
  *
@@ -13,6 +19,7 @@ const STORAGE_KEY = "analyst_agent_user_id";
  * but must not be called during SSR.
  */
 export function getUserId(): string {
+  if (DEV_USER_ID) return DEV_USER_ID;
   try {
     const existing = localStorage.getItem(STORAGE_KEY);
     if (existing) return existing;

@@ -93,6 +93,21 @@ async def init_db():
         )
     """)
 
+    # --- Per-user company views (every dashboard a user has opened) ---
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS user_companies (
+            user_id TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            viewed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, ticker),
+            FOREIGN KEY (ticker) REFERENCES companies(ticker)
+        )
+    """)
+    await db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_user_companies_user
+        ON user_companies(user_id)
+    """)
+
     # --- Filing metadata cache (content lives on disk or in pgvector later) ---
     await db.execute("""
         CREATE TABLE IF NOT EXISTS filings_cache (
@@ -223,6 +238,20 @@ async def init_db():
         SELECT ticker, added_at FROM watchlist
     """)
 
+    # Migration: backfill user_companies from existing sessions + watchlist
+    # so historical activity surfaces on the Saved Companies page.
+    await db.execute("""
+        INSERT OR IGNORE INTO user_companies (user_id, ticker, viewed_at)
+        SELECT user_id, ticker, MIN(created_at)
+        FROM sessions
+        WHERE user_id IS NOT NULL AND user_id != ''
+        GROUP BY user_id, ticker
+    """)
+    await db.execute("""
+        INSERT OR IGNORE INTO user_companies (user_id, ticker, viewed_at)
+        SELECT user_id, ticker, added_at FROM watchlist
+    """)
+
     await db.commit()
 
 _orphans_claimed = False
@@ -248,6 +277,18 @@ async def claim_orphaned_data(user_id: str) -> None:
         "UPDATE briefings SET user_id = ? WHERE user_id IS NULL OR user_id = ''",
         (user_id,),
     )
+    # Backfill user_companies for the claimed sessions so Saved Companies
+    # reflects the just-claimed history.
+    await db.execute(
+        """
+        INSERT OR IGNORE INTO user_companies (user_id, ticker, viewed_at)
+        SELECT user_id, ticker, MIN(created_at)
+        FROM sessions
+        WHERE user_id = ?
+        GROUP BY ticker
+        """,
+        (user_id,),
+    )
     await db.commit()
 
 
@@ -267,6 +308,10 @@ async def create_session(ticker: str, user_id: str, model: str | None = None) ->
     db = await get_db()
     ticker = ticker.upper()
     await db.execute("INSERT OR IGNORE INTO companies (ticker) VALUES (?)", (ticker,))
+    await db.execute(
+        "INSERT OR IGNORE INTO user_companies (user_id, ticker) VALUES (?, ?)",
+        (user_id, ticker),
+    )
     await db.execute(
         "INSERT INTO sessions (id, ticker, user_id, model) VALUES (?, ?, ?, ?)",
         (session_id, ticker, user_id, model)
@@ -293,6 +338,10 @@ async def get_or_create_session(ticker: str, user_id: str, model: str | None = N
     # No existing session — create one (and ensure company exists)
     session_id = str(uuid.uuid4())
     await db.execute("INSERT OR IGNORE INTO companies (ticker) VALUES (?)", (ticker,))
+    await db.execute(
+        "INSERT OR IGNORE INTO user_companies (user_id, ticker) VALUES (?, ?)",
+        (user_id, ticker),
+    )
     await db.execute(
         "INSERT INTO sessions (id, ticker, user_id, model) VALUES (?, ?, ?, ?)",
         (session_id, ticker, user_id, model),
@@ -352,29 +401,26 @@ async def get_sessions(user_id: str, limit: int = 50) -> list[dict]:
         return [{"id": row["id"], "ticker": row["ticker"], "model": row["model"], "created_at": row["created_at"]} for row in rows]
 
 async def get_tickers(user_id: str, limit: int = 50) -> list[dict]:
-    """Return companies this user has interacted with (sessions or watchlist).
+    """Return companies this user has interacted with.
 
-    Only shows companies where the user has at least one session or a
-    watchlist entry — not every company in the global table.
+    A company is included if the user has opened its dashboard, has any
+    session, or has a watchlist entry — all tracked in user_companies.
     """
     db = await get_db()
     async with db.execute(
         """
         SELECT c.ticker,
-               COUNT(s.id)                            AS session_count,
-               COALESCE(MAX(s.created_at), c.added_at) AS last_active
-        FROM companies c
+               COUNT(s.id)                                          AS session_count,
+               COALESCE(MAX(s.created_at), uc.viewed_at, c.added_at) AS last_active
+        FROM user_companies uc
+        JOIN companies c ON c.ticker = uc.ticker
         LEFT JOIN sessions s ON s.ticker = c.ticker AND s.user_id = ?
-        WHERE c.ticker IN (
-            SELECT ticker FROM sessions WHERE user_id = ?
-            UNION
-            SELECT ticker FROM watchlist WHERE user_id = ?
-        )
+        WHERE uc.user_id = ?
         GROUP BY c.ticker
         ORDER BY last_active DESC
         LIMIT ?
         """,
-        (user_id, user_id, user_id, limit)
+        (user_id, user_id, limit)
     ) as cursor:
         rows = await cursor.fetchall()
         return [
@@ -460,8 +506,12 @@ async def add_to_watchlist(ticker: str, user_id: str) -> bool:
         "INSERT OR IGNORE INTO watchlist (user_id, ticker) VALUES (?, ?)",
         (user_id, ticker)
     )
-    # Ensure company record exists
+    # Ensure company record exists and link to this user
     await db.execute("INSERT OR IGNORE INTO companies (ticker) VALUES (?)", (ticker,))
+    await db.execute(
+        "INSERT OR IGNORE INTO user_companies (user_id, ticker) VALUES (?, ?)",
+        (user_id, ticker),
+    )
     await db.commit()
     return cursor.rowcount > 0
 
@@ -496,6 +546,23 @@ async def ensure_company(ticker: str) -> None:
     """Ensure a companies row exists for the ticker (idempotent upsert)."""
     db = await get_db()
     await db.execute("INSERT OR IGNORE INTO companies (ticker) VALUES (?)", (ticker.upper(),))
+    await db.commit()
+
+
+async def track_company_view(ticker: str, user_id: str) -> None:
+    """Record that a user has viewed a company. Idempotent.
+
+    Ensures the global companies row exists and links it to the user so
+    Saved Companies surfaces every dashboard the user has opened, even
+    without a chat session or watchlist entry.
+    """
+    db = await get_db()
+    ticker = ticker.upper()
+    await db.execute("INSERT OR IGNORE INTO companies (ticker) VALUES (?)", (ticker,))
+    await db.execute(
+        "INSERT OR IGNORE INTO user_companies (user_id, ticker) VALUES (?, ?)",
+        (user_id, ticker),
+    )
     await db.commit()
 
 

@@ -100,7 +100,7 @@ async def get_api_keys(
         anthropic_api_key=x_anthropic_api_key or os.getenv("ANTHROPIC_API_KEY"),
         sec_header=x_sec_header or os.getenv("SEC_HEADER"),
         tavily_api_key=x_tavily_api_key or os.getenv("TAVILY_API_KEY"),
-        model_id=x_model_id,
+        model_id=x_model_id or os.getenv("DEFAULT_MODEL_ID"),
         user_id=_validate_user_id(x_user_id),
     )
 
@@ -117,6 +117,6 @@ def resolve_ws_keys(auth_message: dict) -> ApiKeys:
         anthropic_api_key=auth_message.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY"),
         sec_header=auth_message.get("sec_header") or os.getenv("SEC_HEADER"),
         tavily_api_key=auth_message.get("tavily_api_key") or os.getenv("TAVILY_API_KEY"),
-        model_id=auth_message.get("model_id"),
+        model_id=auth_message.get("model_id") or os.getenv("DEFAULT_MODEL_ID"),
         user_id=_validate_user_id(auth_message.get("user_id")),
     )
