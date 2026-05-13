@@ -64,7 +64,13 @@ def get_model(model_id: str) -> ModelDef | None:
 
 
 def get_default_model() -> ModelDef:
-    """Return the single default model."""
+    """Return the default model — env var DEFAULT_MODEL_ID overrides models.json."""
+    import os
+    env_id = os.getenv("DEFAULT_MODEL_ID")
+    if env_id:
+        model = _MODELS.get(env_id)
+        if model:
+            return model
     return _DEFAULT_MODEL
 
 
