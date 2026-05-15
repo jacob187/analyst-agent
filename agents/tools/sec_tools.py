@@ -1,5 +1,6 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
+from cachetools import LRUCache, TTLCache
 from langchain_core.tools import Tool
 from langchain_core.language_models.chat_models import BaseChatModel
 from typing import Dict, Any, Optional
@@ -26,10 +27,13 @@ def _dump_analysis_json(result: Any) -> str:
     return json.dumps({"value": str(result)}, indent=2)
 
 
-# Global cache for shared SEC data retrievers, processors, and processed outputs
-_shared_retrievers: Dict[str, SECDataRetrieval] = {}
-_shared_processors: Dict[str, SECDocumentProcessor] = {}
-_processed_cache: Dict[str, Dict[str, Any]] = {}
+# Bounded caches: LRU for retriever/processor objects (size-bound only),
+# TTL on analysis results so stale LLM output ages out within an hour.
+# _processed_cache stays nested (ticker -> {analysis_key -> dump}); writes
+# must use setdefault since TTL can evict the outer key between read & write.
+_shared_retrievers: LRUCache = LRUCache(maxsize=128)
+_shared_processors: LRUCache = LRUCache(maxsize=128)
+_processed_cache: TTLCache = TTLCache(maxsize=512, ttl=3600)
 
 
 def _get_shared_retriever(ticker: str, sec_header: str) -> SECDataRetrieval:
@@ -121,7 +125,7 @@ def _tool_risk_factors_summary(ticker: str, llm: BaseChatModel, sec_header: str 
             if not risk_data.get("found", False):
                 return f"Risk Factors section not found for {ticker}."
             analysis = processor.analyze_risk_factors(ticker, risk_data)
-            _processed_cache[ticker][cache_key] = analysis.model_dump()
+            _processed_cache.setdefault(ticker, {})[cache_key] = analysis.model_dump()
         except Exception as e:
             return f"Failed to analyze risk factors for {ticker}: {e}"
     return _dump_analysis_json(_processed_cache[ticker][cache_key])
@@ -152,7 +156,7 @@ def _tool_mda_summary(ticker: str, llm: BaseChatModel, sec_header: str = "") -> 
             if not mda_data.get("found", False):
                 return f"Management Discussion section not found for {ticker}."
             analysis = processor.analyze_mda(ticker, mda_data)
-            _processed_cache[ticker][cache_key] = analysis.model_dump()
+            _processed_cache.setdefault(ticker, {})[cache_key] = analysis.model_dump()
         except Exception as e:
             return f"Failed to analyze MD&A for {ticker}: {e}"
     return _dump_analysis_json(_processed_cache[ticker][cache_key])
@@ -185,7 +189,7 @@ def _tool_balance_sheet_summary(ticker: str, llm: BaseChatModel, sec_header: str
                 balance_data.get("tenk", {}),
                 balance_data.get("tenq", {}),
             )
-            _processed_cache[ticker][cache_key] = analysis.model_dump()
+            _processed_cache.setdefault(ticker, {})[cache_key] = analysis.model_dump()
         except Exception as e:
             return f"Failed to analyze balance sheet for {ticker}: {e}"
     return _dump_analysis_json(_processed_cache[ticker][cache_key])
@@ -324,7 +328,7 @@ def _tool_earnings_summary(ticker: str, llm: BaseChatModel, sec_header: str = ""
                     f"Reason: {earnings_data.get('reason', 'Unknown')}"
                 )
             analysis = processor.analyze_earnings(ticker, earnings_data)
-            _processed_cache[ticker][cache_key] = analysis.model_dump()
+            _processed_cache.setdefault(ticker, {})[cache_key] = analysis.model_dump()
         except Exception as e:
             return f"Failed to analyze earnings for {ticker}: {e}"
     return _dump_analysis_json(_processed_cache[ticker][cache_key])
@@ -366,7 +370,7 @@ def _tool_material_event_summary(
                 "metadata": overview.get("metadata", {}),
             }
             analysis = processor.analyze_material_event(ticker, event_data)
-            _processed_cache[ticker][cache_key] = analysis.model_dump()
+            _processed_cache.setdefault(ticker, {})[cache_key] = analysis.model_dump()
         except Exception as e:
             return f"Failed to analyze material event for {ticker}: {e}"
     return _dump_analysis_json(_processed_cache[ticker][cache_key])

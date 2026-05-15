@@ -1,14 +1,14 @@
 """Tavily research tools for deep web research on companies and financial topics."""
 
 import time
-from typing import Dict, Any
 
+from cachetools import TTLCache
 from langchain_core.tools import Tool
 from langchain_tavily import TavilySearch
 from tavily import TavilyClient
 
-# Cache for research results to minimize API calls
-_research_cache: Dict[str, Dict[str, Any]] = {}
+# Bounded research cache: 15-min TTL matches briefing-cache convention.
+_research_cache: TTLCache = TTLCache(maxsize=256, ttl=900)
 
 
 def _get_cache_key(ticker: str, query: str) -> str:
@@ -344,5 +344,4 @@ def create_research_tools(ticker: str, tavily_api_key: str) -> list[Tool]:
 
 def clear_research_cache() -> None:
     """Clear all cached research results."""
-    global _research_cache
-    _research_cache = {}
+    _research_cache.clear()

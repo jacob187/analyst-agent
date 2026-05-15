@@ -5,15 +5,16 @@ technical indicators (RSI, MACD, Bollinger Bands, pattern recognition, etc.).
 They are ticker-bound but do not require an LLM or SEC header.
 """
 
-from typing import Dict
-
+from cachetools import LRUCache
 from langchain_core.tools import Tool
 
 from agents.technical_workflow.get_stock_data import YahooFinanceDataRetrieval
 
 
-# Per-ticker cache so all stock tools share a single retriever instance
-_shared_stock_retrievers: Dict[str, YahooFinanceDataRetrieval] = {}
+# Bounded per-ticker cache so all stock tools share a single retriever instance.
+# LRU eviction caps memory; evicting a Ticker still leaves yfinance's internal
+# HTTP cache live for as long as the existing instance is referenced.
+_shared_stock_retrievers: LRUCache = LRUCache(maxsize=128)
 
 
 def _get_shared_stock_retriever(ticker: str) -> YahooFinanceDataRetrieval:
