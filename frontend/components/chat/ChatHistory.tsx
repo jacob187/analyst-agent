@@ -7,20 +7,29 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
+import { useUserId } from "@/hooks/useUserId";
 import { formatDate, cn } from "@/lib/utils";
 import type { Session, TickerSummary } from "@/types";
 
 export function ChatHistory() {
   const router = useRouter();
+  const { loaded } = useUserId();
   const [tickers, setTickers] = useState<TickerSummary[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (!loaded) return;
     api
       .tickers()
       .then(({ tickers }) => setTickers(tickers))
       .catch(() => setTickers([]))
       .finally(() => setLoading(false));
+  }, [loaded]);
+
+  // Fallback: if Clerk never loads (network blocked), stop spinning after 5s
+  useEffect(() => {
+    const t = setTimeout(() => setLoading(false), 5000);
+    return () => clearTimeout(t);
   }, []);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [sessions, setSessions] = useState<Record<string, Session[]>>({});

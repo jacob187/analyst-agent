@@ -6,6 +6,8 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { Navbar } from "@/components/layout/Navbar";
 import { Footer } from "@/components/layout/Footer";
 
+const disableAuth = process.env.NEXT_PUBLIC_DISABLE_AUTH === "true";
+
 const bricolage = Bricolage_Grotesque({
   variable: "--font-bricolage",
   subsets: ["latin"],
@@ -45,14 +47,24 @@ export default function RootLayout({
             enableSystem
             disableTransitionOnChange
           >
-            <Show when="signed-in">
-              <Navbar />
-              <main className="flex-1">{children}</main>
-              <Footer />
-            </Show>
-            <Show when="signed-out">
-              <RedirectToSignIn />
-            </Show>
+            {disableAuth ? (
+              <>
+                <Navbar />
+                <main className="flex-1">{children}</main>
+                <Footer />
+              </>
+            ) : (
+              <>
+                <Show when="signed-in">
+                  <Navbar />
+                  <main className="flex-1">{children}</main>
+                  <Footer />
+                </Show>
+                <Show when="signed-out">
+                  <RedirectToSignIn />
+                </Show>
+              </>
+            )}
           </ThemeProvider>
         </body>
       </html>

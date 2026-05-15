@@ -4,18 +4,27 @@ import { useEffect, useState } from "react";
 import { Building2, Loader2 } from "lucide-react";
 import { CompanyCard } from "@/components/companies/CompanyCard";
 import { api } from "@/lib/api";
+import { useUserId } from "@/hooks/useUserId";
 import type { TickerSummary } from "@/types";
 
 export default function CompaniesPage() {
+  const { loaded } = useUserId();
   const [tickers, setTickers] = useState<TickerSummary[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (!loaded) return;
     api
       .tickers()
       .then(({ tickers }) => setTickers(tickers))
       .catch(() => setTickers([]))
       .finally(() => setLoading(false));
+  }, [loaded]);
+
+  // Fallback: if Clerk never loads (network blocked), stop spinning after 5s
+  useEffect(() => {
+    const t = setTimeout(() => setLoading(false), 5000);
+    return () => clearTimeout(t);
   }, []);
 
   return (
