@@ -14,16 +14,24 @@ export default async function SessionPage({ params, searchParams }: Props) {
   const { id } = await params;
   const { ticker = "" } = await searchParams;
 
-  const { messages } = await api
-    .messages(id, ticker)
-    .catch(() => ({ messages: [] }));
+  const [{ messages }, { sessions }] = await Promise.all([
+    api.messages(id, ticker).catch(() => ({ messages: [] })),
+    api.sessions(ticker).catch(() => ({ sessions: [] })),
+  ]);
+
+  const session = sessions.find((s) => s.id === id);
 
   return (
     <div className="mx-auto flex h-[calc(100vh-3.5rem)] max-w-3xl flex-col px-4 py-6 sm:px-6">
       {/* Header */}
       <div className="mb-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <SessionActions sessionId={id} ticker={ticker} />
+          <SessionActions
+            sessionId={id}
+            ticker={ticker}
+            createdAt={session?.created_at ?? new Date().toISOString()}
+            model={session?.model ?? null}
+          />
           <div>
             <div className="flex items-center gap-2">
               <span className="font-display font-bold">{ticker}</span>
