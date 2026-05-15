@@ -171,8 +171,9 @@ export default function StockChartInner({
 
     // ── RSI chart ────────────────────────────────────────────────────────────
     let rsiSeries: ISeriesApi<"Line"> | null = null;
+    let rsiChart: IChartApi | null = null;
     if (indicators.has("RSI") && rsiRef.current) {
-      const rsiChart = createChart(rsiRef.current, {
+      rsiChart = createChart(rsiRef.current, {
         ...chartOpts,
         height: 120,
       });
@@ -205,8 +206,9 @@ export default function StockChartInner({
     }
 
     // ── MACD chart ───────────────────────────────────────────────────────────
+    let macdChart: IChartApi | null = null;
     if (indicators.has("MACD") && macdRef.current) {
-      const macdChart = createChart(macdRef.current, {
+      macdChart = createChart(macdRef.current, {
         ...chartOpts,
         height: 120,
       });
@@ -257,7 +259,7 @@ export default function StockChartInner({
     }
 
     // ── Sync time scales ─────────────────────────────────────────────────────
-    const charts = [priceChart, rsiChartRef.current, macdChartRef.current].filter(Boolean) as IChartApi[];
+    const charts = [priceChart, rsiChart, macdChart].filter(Boolean) as IChartApi[];
     charts.forEach((src) => {
       src.timeScale().subscribeVisibleLogicalRangeChange((range) => {
         if (!range) return;
@@ -277,8 +279,11 @@ export default function StockChartInner({
     return () => {
       ro.disconnect();
       priceChart.remove();
-      rsiChartRef.current?.remove();
-      macdChartRef.current?.remove();
+      rsiChart?.remove();
+      macdChart?.remove();
+      priceChartRef.current = null;
+      rsiChartRef.current = null;
+      macdChartRef.current = null;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, indicators]);
