@@ -1,5 +1,6 @@
 """Tavily research tools for deep web research on companies and financial topics."""
 
+import hashlib
 import time
 
 from cachetools import TTLCache
@@ -12,8 +13,14 @@ _research_cache: TTLCache = TTLCache(maxsize=256, ttl=900)
 
 
 def _get_cache_key(ticker: str, query: str) -> str:
-    """Generate cache key for research results."""
-    return f"{ticker}_{hash(query)}"
+    """Generate a stable cache key for research results.
+
+    Uses sha1 over the encoded query so keys are reproducible across process
+    restarts (Python's builtin hash() is salted per process via PYTHONHASHSEED).
+    Truncated to 16 hex chars — ample collision resistance for a per-process cache.
+    """
+    digest = hashlib.sha1(query.encode("utf-8")).hexdigest()[:16]
+    return f"{ticker}_{digest}"
 
 
 def _tool_tavily_search(

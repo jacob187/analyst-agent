@@ -1,5 +1,6 @@
 """Watchlist endpoints — manage tracked tickers and generate daily briefings."""
 
+import asyncio
 import json
 import re
 
@@ -95,7 +96,9 @@ async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
     tickers = [t["ticker"] for t in tickers_list]
 
     try:
-        result = service.generate(tickers)
+        # BriefingService.generate is sync (yfinance + LLM); offload so it doesn't
+        # block other requests' progress on the asyncio loop during the ~10-30s call.
+        result = await asyncio.to_thread(service.generate, tickers)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Briefing generation failed: {e}")
 

@@ -9,6 +9,7 @@ Performance notes:
   of ticker count — used by the watchlist page instead of N chart fetches.
 """
 
+import asyncio
 import re
 import time
 from enum import Enum
@@ -47,6 +48,58 @@ _ALL_INDICATORS = {"ma5", "ma10", "ma20", "ma50", "ma200", "rsi", "macd", "bolli
 # Stores candles + all indicators so different indicator requests share one fetch.
 _chart_cache: dict[tuple[str, str], tuple[float, dict]] = {}
 _CACHE_TTL = 60  # seconds
+
+
+def _fetch_chart_payload(ticker: str, period_value: str) -> Optional[dict]:
+    """Fetch + compute the full chart payload synchronously.
+
+    Consolidates the blocking yfinance + indicator + pattern work into a single
+    function so route handlers can offload it via a single `asyncio.to_thread`
+    call rather than five thread hops. Returns None when no historical data is
+    available so the caller can raise HTTP 404 cleanly.
+    """
+    from agents.technical_workflow.get_stock_data import YahooFinanceDataRetrieval
+    from agents.technical_workflow.process_technical_indicators import TechnicalIndicators
+
+    retriever = YahooFinanceDataRetrieval(ticker)
+    yf_period, yf_interval = _PERIOD_MAP[period_value]
+    df = retriever.get_historical_prices(period=yf_period, interval=yf_interval)
+
+    if df is None or df.empty:
+        return None
+
+    intraday = yf_interval != "1d"
+    candles = _format_candles(df, intraday=intraday)
+
+    ti = TechnicalIndicators(ticker)
+    all_indicators = ti.calculate_chart_indicators(df, intraday=intraday)
+
+    patterns: list[dict] = []
+    try:
+        from agents.technical_workflow.pattern_recognition import PatternRecognitionEngine
+        engine = PatternRecognitionEngine()
+        raw_patterns = engine.detect_all_patterns(df)
+        for p in raw_patterns:
+            pattern_entry: dict = {
+                "type": p.get("type", ""),
+                "direction": p.get("direction", ""),
+                "confidence": round(p.get("confidence", 0), 2),
+            }
+            if "days_ago" in p and candles:
+                idx = max(0, len(candles) - 1 - p["days_ago"])
+                pattern_entry["time"] = candles[idx]["time"]
+            patterns.append(pattern_entry)
+    except Exception:
+        pass  # Patterns are supplementary
+
+    quote = retriever.get_live_price()
+
+    return {
+        "candles": candles,
+        "all_indicators": all_indicators,
+        "quote": quote,
+        "patterns": patterns,
+    }
 
 
 def _format_candles(df: pd.DataFrame, intraday: bool = False) -> list[dict]:
@@ -105,52 +158,12 @@ async def get_chart_data(
     if cached and (now - cached[0]) < _CACHE_TTL:
         full_data = cached[1]
     else:
-        from agents.technical_workflow.get_stock_data import YahooFinanceDataRetrieval
-        from agents.technical_workflow.process_technical_indicators import TechnicalIndicators
-
-        retriever = YahooFinanceDataRetrieval(ticker)
-        yf_period, yf_interval = _PERIOD_MAP[period.value]
-        df = retriever.get_historical_prices(period=yf_period, interval=yf_interval)
-
-        if df is None or df.empty:
+        # Offload the entire blocking pipeline (yfinance fetch, indicators,
+        # pattern detection, live quote) so the event loop stays responsive
+        # during the ~500–800ms call.
+        full_data = await asyncio.to_thread(_fetch_chart_payload, ticker, period.value)
+        if full_data is None:
             raise HTTPException(status_code=404, detail=f"No data found for {ticker}")
-
-        intraday = yf_interval != "1d"
-        candles = _format_candles(df, intraday=intraday)
-
-        ti = TechnicalIndicators(ticker)
-        all_indicators = ti.calculate_chart_indicators(df, intraday=intraday)
-
-
-        # Pattern detection
-        patterns: list[dict] = []
-        try:
-            from agents.technical_workflow.pattern_recognition import PatternRecognitionEngine
-            engine = PatternRecognitionEngine()
-            raw_patterns = engine.detect_all_patterns(df)
-            for p in raw_patterns:
-                pattern_entry: dict = {
-                    "type": p.get("type", ""),
-                    "direction": p.get("direction", ""),
-                    "confidence": round(p.get("confidence", 0), 2),
-                }
-                # For patterns with a specific bar (crossovers), include the time
-                if "days_ago" in p and candles:
-                    idx = max(0, len(candles) - 1 - p["days_ago"])
-                    pattern_entry["time"] = candles[idx]["time"]
-                patterns.append(pattern_entry)
-        except Exception:
-            pass  # Patterns are supplementary
-
-        # Live quote — uses a fresh Ticker instance for reliable pricing
-        quote = retriever.get_live_price()
-
-        full_data = {
-            "candles": candles,
-            "all_indicators": all_indicators,
-            "quote": quote,
-            "patterns": patterns,
-        }
         _chart_cache[cache_key] = (now, full_data)
 
     # Filter to only requested indicators (cheap dict comprehension)
@@ -219,8 +232,6 @@ async def get_batch_quotes(data: dict):
 
     # Single yf.download() call for all tickers — one HTTP request to Yahoo
     # Fetch 5 days to ensure we get at least 2 trading days for change calc
-    import asyncio
-
     df = await asyncio.to_thread(
         yf.download, tickers, period="5d", interval="1d", progress=False, threads=False
     )
