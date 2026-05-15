@@ -367,6 +367,21 @@ class TestFilingsEndpointErrors:
         assert resp.status_code == 422
 
 
+# ── Rate limiting ─────────────────────────────────────────────────────────
+
+
+class TestFilingsRateLimit:
+    def test_filings_rate_limited_after_10_calls(self, client, mock_filings_deps):
+        """11th request from the same caller within an hour returns 429."""
+        headers = {"X-Google-Api-Key": "test-key", "X-Sec-Header": "test@test.com"}
+        for _ in range(10):
+            resp = client.get("/api/company/AAPL/filings", headers=headers)
+            assert resp.status_code == 200
+        resp = client.get("/api/company/AAPL/filings", headers=headers)
+        assert resp.status_code == 429
+        assert "rate limit" in resp.json()["detail"].lower()
+
+
 # ── Partial data ───────────────────────────────────────────────────────────
 
 

@@ -18,6 +18,14 @@ interface ChatWindowProps {
 export function ChatWindow({ ticker, keys, initialSessionId }: ChatWindowProps) {
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+  }, [input]);
 
   // History loading is handled inside the hook — no callback needed here
   const { messages, status, sendMessage } = useWebSocket({
@@ -96,6 +104,7 @@ export function ChatWindow({ ticker, keys, initialSessionId }: ChatWindowProps) 
       <div className="border-t border-border/60 p-3">
         <div className="flex items-end gap-2 rounded-xl border border-border/60 bg-background px-3 py-2 focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/20">
           <textarea
+            ref={textareaRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -108,8 +117,8 @@ export function ChatWindow({ ticker, keys, initialSessionId }: ChatWindowProps) 
             }
             disabled={status !== "connected"}
             rows={1}
-            className="flex-1 resize-none bg-transparent text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed"
-            style={{ maxHeight: "120px" }}
+            className="flex-1 resize-none overflow-y-auto bg-transparent text-sm leading-5 outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed"
+            style={{ maxHeight: "200px" }}
           />
           <Button
             size="icon"

@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from api.dependencies import ApiKeys, get_api_keys
+from api.rate_limit import check_rest_rate_limit, rate_limit_key
 from api.validators import TICKER_RE
 
 logger = logging.getLogger("analyst.filings")
@@ -450,6 +451,7 @@ def _run_llm_analysis(
 @router.get("/{ticker}/filings")
 async def get_company_filings(
     ticker: str,
+    request: Request,
     keys: ApiKeys = Depends(get_api_keys),
 ):
     """Return LLM-analyzed SEC filing summaries for the Filings tab.
@@ -462,6 +464,15 @@ async def get_company_filings(
     """
     if not TICKER_RE.match(ticker.upper()):
         raise HTTPException(status_code=422, detail="Invalid ticker symbol")
+
+    client_ip = request.client.host if request.client else "unknown"
+    if not check_rest_rate_limit(
+        rate_limit_key(keys.user_id, client_ip),
+        bucket="filings",
+        max_calls=10,
+        window_seconds=3600,
+    ):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded — try again later")
 
     ticker = ticker.upper()
 
@@ -642,6 +653,15 @@ async def stream_company_filings(
             status_code=429,
             detail=f"Too many concurrent filing streams (max {_MAX_CONCURRENT_STREAMS})",
         )
+
+    # Hourly volume cap, complementary to the concurrency cap above.
+    if not check_rest_rate_limit(
+        rate_limit_key(keys.user_id, client_ip),
+        bucket="filings_stream",
+        max_calls=10,
+        window_seconds=3600,
+    ):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded — try again later")
 
     async def generate():
         # Acquire a concurrency slot for the duration of this stream.

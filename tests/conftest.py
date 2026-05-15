@@ -40,6 +40,20 @@ def _scrub_clerk_env(monkeypatch):
     monkeypatch.delenv("DISABLE_AUTH", raising=False)
     yield
 
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limit_state():
+    """Clear in-memory rate-limit caches between tests so REST tests that
+    hit the same endpoint repeatedly don't trip each other's quotas."""
+    from api.rate_limit import _rest_timestamps, _timestamps
+
+    _rest_timestamps.clear()
+    _timestamps.clear()
+    yield
+    _rest_timestamps.clear()
+    _timestamps.clear()
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------

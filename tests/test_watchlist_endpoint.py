@@ -91,6 +91,25 @@ class TestBriefingEndpoint:
         assert resp.status_code == 400
 
 
+class TestBriefingRateLimit:
+    @patch("api.routes.watchlist.get_watchlist", new_callable=AsyncMock)
+    def test_briefing_rate_limited_after_5_calls(self, mock_wl):
+        """6th briefing request from the same user within an hour returns 429.
+
+        We let the first five calls fall through to the "empty watchlist"
+        400, which is fine — the rate limiter gate runs before that branch,
+        so each call still consumes quota.
+        """
+        mock_wl.return_value = []
+        headers = {**HEADERS, "X-Google-Api-Key": "test"}
+        for _ in range(5):
+            resp = client.get("/watchlist/briefing", headers=headers)
+            assert resp.status_code == 400  # empty watchlist, gate passed
+        resp = client.get("/watchlist/briefing", headers=headers)
+        assert resp.status_code == 429
+        assert "rate limit" in resp.json()["detail"].lower()
+
+
 class TestBriefingHistory:
     @patch("api.routes.watchlist.get_recent_briefings", new_callable=AsyncMock)
     def test_history_returns_list(self, mock_recent):

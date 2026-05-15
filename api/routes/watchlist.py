@@ -10,6 +10,7 @@ from api.db import (
     save_briefing, get_recent_briefings, get_briefing_history,
 )
 from api.dependencies import ApiKeys, get_api_keys
+from api.rate_limit import check_rest_rate_limit, rate_limit_key
 
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
 
@@ -63,6 +64,14 @@ async def remove_ticker(ticker: str, keys: ApiKeys = Depends(get_api_keys)):
 async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
     """Generate AI briefing for the user's watchlist tickers."""
     user_id = keys.require_user_id()
+    if not check_rest_rate_limit(
+        rate_limit_key(user_id, ip=""),
+        bucket="briefing",
+        max_calls=5,
+        window_seconds=3600,
+    ):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded — try again later")
+
     tickers_list = await get_watchlist(user_id)
     if not tickers_list:
         raise HTTPException(status_code=400, detail="Watchlist is empty")
