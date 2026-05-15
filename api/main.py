@@ -66,6 +66,7 @@ app.add_middleware(
         "X-Tavily-Api-Key",
         "X-Model-Id",
         "X-User-Id",
+        "X-Clerk-Session-Token",
     ],
 )
 

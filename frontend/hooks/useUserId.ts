@@ -1,52 +1,65 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useAuth } from "@clerk/nextjs";
+import { useEffect } from "react";
 
-const STORAGE_KEY = "analyst_agent_user_id";
+// Cached Clerk user ID under a separate key. The old `analyst_agent_user_id`
+// UUID key is intentionally left untouched — Phase 1.5 migrates it.
+const CACHE_KEY = "clerk_user_id";
 
-// Optional stable dev user ID. When set (e.g. in .env.local), every
-// request uses this ID instead of the per-browser localStorage UUID —
-// so clearing storage or switching browsers doesn't fragment local data.
-// Never set this in production builds.
+// Optional stable dev override. When set, every request uses this ID,
+// bypassing Clerk entirely. Never set in production.
 const DEV_USER_ID = process.env.NEXT_PUBLIC_DEV_USER_ID;
 
-/**
- * Get or create a stable anonymous user ID from localStorage.
- *
- * This is a plain function (not a hook) so it can be called from
- * non-component contexts like api.ts fetch helpers. It reads
- * synchronously from localStorage — safe in any client-side code,
- * but must not be called during SSR.
- */
-export function getUserId(): string {
-  if (DEV_USER_ID) return DEV_USER_ID;
-  try {
-    const existing = localStorage.getItem(STORAGE_KEY);
-    if (existing) return existing;
+let cachedUserId = "";
 
-    const id = crypto.randomUUID();
-    localStorage.setItem(STORAGE_KEY, id);
-    return id;
+function setCachedUserId(id: string) {
+  cachedUserId = id;
+  try {
+    localStorage.setItem(CACHE_KEY, id);
   } catch {
-    // Fallback for environments where localStorage is unavailable
-    // (e.g., SSR or restrictive privacy settings). Generate a
-    // per-session ID that won't persist across page loads.
-    return crypto.randomUUID();
+    // ignore — localStorage may be unavailable
   }
 }
 
 /**
- * React hook wrapper around getUserId(). Returns the user ID and
- * a loaded flag (false during SSR, true after hydration).
+ * Sync read of the current user ID for non-component contexts (e.g. fetch
+ * helpers in lib/api.ts). Returns "" if Clerk hasn't loaded yet on this
+ * client. Prefer useUserId() inside components.
+ */
+export function getUserId(): string {
+  if (DEV_USER_ID) return DEV_USER_ID;
+  if (cachedUserId) return cachedUserId;
+  try {
+    const stored = localStorage.getItem(CACHE_KEY);
+    if (stored) {
+      cachedUserId = stored;
+      return stored;
+    }
+  } catch {
+    // ignore
+  }
+  return "";
+}
+
+/**
+ * React hook returning the current Clerk user ID and a loaded flag.
+ * Writes the ID to module cache + localStorage so getUserId() can read it
+ * synchronously from non-component code.
  */
 export function useUserId() {
-  const [userId, setUserId] = useState("");
-  const [loaded, setLoaded] = useState(false);
+  const { userId, isLoaded } = useAuth();
 
   useEffect(() => {
-    setUserId(getUserId());
-    setLoaded(true);
-  }, []);
+    if (DEV_USER_ID) {
+      setCachedUserId(DEV_USER_ID);
+      return;
+    }
+    if (isLoaded && userId) {
+      setCachedUserId(userId);
+    }
+  }, [isLoaded, userId]);
 
-  return { userId, loaded };
+  const effectiveId = DEV_USER_ID ?? userId ?? "";
+  return { userId: effectiveId, loaded: isLoaded };
 }

@@ -34,9 +34,32 @@ function userIdHeader(): Record<string, string> {
   return { "X-User-Id": getUserId() };
 }
 
+/**
+ * Read a Clerk session JWT, if a Clerk session exists.
+ * Returns null when Clerk hasn't loaded yet or the user is signed out.
+ * In dev/self-host with Clerk disabled, the backend ignores the missing token.
+ */
+export async function getClerkToken(): Promise<string | null> {
+  if (typeof window === "undefined") return null;
+  const clerk = (window as unknown as { Clerk?: { session?: { getToken: () => Promise<string | null> } } }).Clerk;
+  try {
+    const token = (await clerk?.session?.getToken()) ?? null;
+    return token;
+  } catch {
+    return null;
+  }
+}
+
+async function authHeaders(): Promise<Record<string, string>> {
+  const headers: Record<string, string> = { ...userIdHeader() };
+  const token = await getClerkToken();
+  if (token) headers["X-Clerk-Session-Token"] = token;
+  return headers;
+}
+
 async function get<T>(path: string, headers?: Record<string, string>): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { ...userIdHeader(), ...headers },
+    headers: { ...(await authHeaders()), ...headers },
   });
   if (!res.ok) throw new Error(`API error ${res.status}: ${path}`);
   return res.json() as Promise<T>;
@@ -49,7 +72,7 @@ async function post<T>(
 ): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...userIdHeader(), ...headers },
+    headers: { "Content-Type": "application/json", ...(await authHeaders()), ...headers },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`API error ${res.status}: ${path}`);
@@ -59,7 +82,7 @@ async function post<T>(
 async function del<T>(path: string, headers?: Record<string, string>): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "DELETE",
-    headers: { ...userIdHeader(), ...headers },
+    headers: { ...(await authHeaders()), ...headers },
   });
   if (!res.ok) throw new Error(`API error ${res.status}: ${path}`);
   return res.json() as Promise<T>;
@@ -110,7 +133,7 @@ export const api = {
       let res: Response;
       try {
         res = await fetch(`${API_BASE}/api/company/${ticker}/filings/stream`, {
-          headers: { ...userIdHeader(), ...keyHeaders(keys) },
+          headers: { ...(await authHeaders()), ...keyHeaders(keys) },
           signal: controller.signal,
         });
       } catch (err) {

@@ -19,6 +19,27 @@ from dotenv import load_dotenv
 # This runs at import time (before any fixtures) so all fixtures see the vars.
 load_dotenv(Path(__file__).parent.parent / ".env")
 
+# Clerk verification (added in Phase 2 of Clerk integration) is enabled when
+# CLERK_SECRET_KEY is set in .env for the dev server. Tests should run with
+# Clerk disabled by default so legacy integration tests (TestClient + plain
+# X-User-Id headers) keep passing. Individual tests opt back in via the
+# `clerk_env` fixture in test_dependencies.py.
+os.environ.pop("CLERK_SECRET_KEY", None)
+os.environ.pop("DISABLE_AUTH", None)
+
+
+@pytest.fixture(autouse=True)
+def _scrub_clerk_env(monkeypatch):
+    """Ensure Clerk stays disabled per-test even if api.main re-loads .env.
+
+    `load_dotenv` defaults to override=False, but it re-populates vars we
+    popped at conftest import time. monkeypatch removes them for the test
+    duration and restores them after.
+    """
+    monkeypatch.delenv("CLERK_SECRET_KEY", raising=False)
+    monkeypatch.delenv("DISABLE_AUTH", raising=False)
+    yield
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------

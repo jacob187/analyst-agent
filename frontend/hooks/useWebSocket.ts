@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { WS_BASE, API_BASE } from "@/lib/constants";
+import { getClerkToken } from "@/lib/api";
 import { getUserId } from "@/hooks/useUserId";
 import type { ApiKeys, StreamingMessage, WsMessage } from "@/types";
 
@@ -40,12 +41,14 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
     const ws = new WebSocket(`${WS_BASE}/ws/chat/${ticker}`);
     wsRef.current = ws;
 
-    ws.onopen = () => {
+    ws.onopen = async () => {
       const k = keysRef.current;
+      const clerkToken = await getClerkToken();
       ws.send(
         JSON.stringify({
           type: "auth",
           user_id: getUserId(),
+          clerk_session_token: clerkToken || undefined,
           google_api_key: k.google_api_key || undefined,
           openai_api_key: k.openai_api_key || undefined,
           anthropic_api_key: k.anthropic_api_key || undefined,
@@ -67,10 +70,14 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
             setActiveSessionId(data.session_id);
             // If resuming, fetch and display prior messages
             if (data.resumed) {
-              fetch(
-                `${API_BASE}/sessions/${data.session_id}/messages?ticker=${ticker}`,
-                { headers: { "X-User-Id": getUserId() } }
-              )
+              getClerkToken().then((tok) => {
+                const headers: Record<string, string> = { "X-User-Id": getUserId() };
+                if (tok) headers["X-Clerk-Session-Token"] = tok;
+                return fetch(
+                  `${API_BASE}/sessions/${data.session_id}/messages?ticker=${ticker}`,
+                  { headers }
+                );
+              })
                 .then((r) => r.json())
                 .then((body: { messages: Array<{ role: "user" | "assistant"; content: string }> }) => {
                   setMessages(

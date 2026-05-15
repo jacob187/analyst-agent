@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { BarChart2, Menu } from "lucide-react";
+import { UserButton } from "@clerk/nextjs";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import {
@@ -65,6 +66,11 @@ export function Navbar() {
               Settings
             </Button>
           </Link>
+          <div className="hidden md:flex items-center">
+            <UserButton
+              appearance={{ elements: { avatarBox: "h-8 w-8" } }}
+            />
+          </div>
 
           {/* Mobile hamburger */}
           <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
@@ -105,6 +111,12 @@ export function Navbar() {
                 >
                   Settings
                 </Link>
+                <div className="mt-4 flex items-center gap-2 px-3">
+                  <UserButton
+                    appearance={{ elements: { avatarBox: "h-8 w-8" } }}
+                  />
+                  <span className="text-sm text-muted-foreground">Account</span>
+                </div>
               </nav>
             </SheetContent>
           </Sheet>

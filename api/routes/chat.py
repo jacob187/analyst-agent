@@ -13,7 +13,7 @@ from api.db import (
 from api.memory import (
     estimate_tokens, compress_history, build_context_from_session,
 )
-from api.dependencies import resolve_ws_keys
+from api.dependencies import resolve_ws_keys, verify_ws_identity
 from api.rate_limit import check_rate_limit
 from api.validators import TICKER_RE
 from agents.model_registry import get_model, get_default_model, get_token_threshold
@@ -57,6 +57,12 @@ async def chat(websocket: WebSocket, ticker: str):
             return
 
         keys = resolve_ws_keys(auth_message)
+
+        ok, reason = verify_ws_identity(keys.user_id, auth_message)
+        if not ok:
+            await websocket.send_json({"type": "error", "message": reason or "Unauthorized"})
+            await websocket.close(code=1008)
+            return
 
         if not keys.user_id:
             await websocket.send_json({

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Bricolage_Grotesque, DM_Sans } from "next/font/google";
+import { ClerkProvider, Show, RedirectToSignIn } from "@clerk/nextjs";
 import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Navbar } from "@/components/layout/Navbar";
@@ -31,23 +32,30 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html
-      lang="en"
-      className={`${bricolage.variable} ${dmSans.variable}`}
-      suppressHydrationWarning
-    >
-      <body className="flex min-h-screen flex-col antialiased">
-        <ThemeProvider
-          attribute="class"
-          defaultTheme="dark"
-          enableSystem
-          disableTransitionOnChange
-        >
-          <Navbar />
-          <main className="flex-1">{children}</main>
-          <Footer />
-        </ThemeProvider>
-      </body>
-    </html>
+    <ClerkProvider>
+      <html
+        lang="en"
+        className={`${bricolage.variable} ${dmSans.variable}`}
+        suppressHydrationWarning
+      >
+        <body className="flex min-h-screen flex-col antialiased">
+          <ThemeProvider
+            attribute="class"
+            defaultTheme="dark"
+            enableSystem
+            disableTransitionOnChange
+          >
+            <Show when="signed-in">
+              <Navbar />
+              <main className="flex-1">{children}</main>
+              <Footer />
+            </Show>
+            <Show when="signed-out">
+              <RedirectToSignIn />
+            </Show>
+          </ThemeProvider>
+        </body>
+      </html>
+    </ClerkProvider>
   );
 }
