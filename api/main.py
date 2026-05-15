@@ -33,6 +33,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+from api.clerk_auth import is_auth_disabled, is_clerk_enabled
 from api.db import init_db, close_db
 from api.routes.health import router as health_router
 from api.routes.sessions import router as sessions_router
@@ -42,9 +43,40 @@ from api.routes.watchlist import router as watchlist_router
 from api.routes.models import router as models_router
 from api.routes.company import router as company_router
 
+logger = logging.getLogger(__name__)
+
+_PROD_ENV_VALUES = ("production", "prod")
+
+
+def check_production_auth_config() -> None:
+    """Refuse to start in production when Clerk auth is disabled or unconfigured.
+
+    Without this guard, `X-User-Id` is trusted as-is — full IDOR on
+    sessions/watchlist/briefings. The `ANALYST_ALLOW_DISABLED_AUTH=1` escape
+    hatch exists for emergency self-host operations.
+    """
+    env = (os.getenv("ENV") or "").strip().lower()
+    logger.info("Startup env check: ENV=%r", env)
+    if env not in _PROD_ENV_VALUES:
+        return
+    if (os.getenv("ANALYST_ALLOW_DISABLED_AUTH") or "").lower() in ("1", "true", "yes"):
+        logger.warning("ANALYST_ALLOW_DISABLED_AUTH set — skipping production auth guard")
+        return
+    if is_auth_disabled():
+        raise RuntimeError(
+            "Refusing to start: ENV=production with DISABLE_AUTH=true. "
+            "Unset DISABLE_AUTH, or set ANALYST_ALLOW_DISABLED_AUTH=1 to override."
+        )
+    if not is_clerk_enabled():
+        raise RuntimeError(
+            "Refusing to start: ENV=production but CLERK_SECRET_KEY is not set. "
+            "Configure Clerk, or set ANALYST_ALLOW_DISABLED_AUTH=1 to override."
+        )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    check_production_auth_config()
     await init_db()
     yield
     await close_db()
