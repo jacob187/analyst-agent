@@ -26,6 +26,8 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
 
   // Profile — fetched client-side so it doesn't block the initial page render
   const [profile, setProfile] = useState<CompanyProfileResponse | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileNonce, setProfileNonce] = useState(0);
 
   // Chart
   const [chartData, setChartData] = useState<ChartResponse | null>(null);
@@ -52,8 +54,36 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
   keysRef.current = keys;
 
   useEffect(() => {
-    api.profile(ticker).then(setProfile).catch(() => null);
-  }, [ticker]);
+    let cancelled = false;
+    setProfileError(null);
+    setProfile(null);
+
+    const timeout = setTimeout(() => {
+      if (!cancelled && profile === null) {
+        setProfileError("Profile is taking longer than expected. The data source may be slow.");
+      }
+    }, 15000);
+
+    api
+      .profile(ticker)
+      .then((p) => {
+        if (cancelled) return;
+        setProfile(p);
+        setProfileError(null);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        const msg = err instanceof Error ? err.message : "Failed to load profile.";
+        setProfileError(msg);
+      })
+      .finally(() => clearTimeout(timeout));
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ticker, profileNonce]);
 
   const loadFilings = useCallback(() => {
     if (filingsLoadedRef.current) return;
@@ -212,7 +242,12 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
         </TabsList>
 
         <TabsContent value="overview" className="mt-4">
-          <OverviewTab data={profile} loading={profile === null} />
+          <OverviewTab
+            data={profile}
+            loading={profile === null && !profileError}
+            error={profileError}
+            onRetry={() => setProfileNonce((n) => n + 1)}
+          />
         </TabsContent>
 
         <TabsContent value="filings" className="mt-4">

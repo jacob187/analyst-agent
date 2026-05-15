@@ -1,6 +1,7 @@
-import { Globe, Users, TrendingUp, TrendingDown } from "lucide-react";
+import { Globe, Users, TrendingUp, TrendingDown, AlertTriangle } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatCurrency, formatPercent } from "@/lib/utils";
 import type { CompanyProfileResponse, Pattern } from "@/types";
@@ -8,6 +9,17 @@ import type { CompanyProfileResponse, Pattern } from "@/types";
 interface OverviewTabProps {
   data: CompanyProfileResponse | null;
   loading: boolean;
+  error?: string | null;
+  onRetry?: () => void;
+}
+
+function formatFutureDate(date: string | null | undefined): string | undefined {
+  if (!date) return undefined;
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime())) return undefined;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return parsed >= today ? date : undefined;
 }
 
 function MetricRow({
@@ -52,7 +64,21 @@ function PatternBadge({ pattern }: { pattern: Pattern }) {
   );
 }
 
-export function OverviewTab({ data, loading }: OverviewTabProps) {
+export function OverviewTab({ data, loading, error, onRetry }: OverviewTabProps) {
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-destructive/30 bg-destructive/5 py-12 text-center">
+        <AlertTriangle className="h-8 w-8 text-destructive" />
+        <p className="max-w-md text-sm text-muted-foreground">{error}</p>
+        {onRetry && (
+          <Button variant="outline" size="sm" onClick={onRetry}>
+            Retry
+          </Button>
+        )}
+      </div>
+    );
+  }
+
   if (loading) {
     return (
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -135,7 +161,7 @@ export function OverviewTab({ data, loading }: OverviewTabProps) {
             <MetricRow label="Price/Book" value={metrics?.price_to_book?.toFixed(2)} />
             <MetricRow label="Beta" value={metrics?.beta?.toFixed(2)} />
             <MetricRow label="Dividend Yield" value={formatPercent(metrics?.dividend_yield)} />
-            <MetricRow label="Next Earnings" value={earnings?.earnings_date ?? undefined} />
+            <MetricRow label="Next Earnings" value={formatFutureDate(earnings?.earnings_date)} />
           </CardContent>
         </Card>
 
