@@ -1,5 +1,6 @@
 """Query planner for decomposing complex financial analysis queries into executable steps."""
 
+import os
 from typing import List, Literal
 from pydantic import BaseModel, Field
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -10,16 +11,24 @@ from agents.prompts import (
     TOOL_CAPABILITIES,
 )
 
+# Hard caps on planner output. Prevent a single adversarial WS chat query from
+# producing an unbounded plan that fans out unlimited LLM-tool calls (the
+# WS chat path bypasses the REST rate limiter — it counts messages, not LLM
+# calls). Env-overridable for power users.
+MAX_PLAN_STEPS = int(os.getenv("MAX_PLAN_STEPS", "15"))
+
 
 class AnalysisStep(BaseModel):
     """A single step in an analysis plan."""
 
     id: int = Field(description="Step number")
-    action: str = Field(description="What to do in this step")
-    tool: str = Field(description="Which tool to use")
-    rationale: str = Field(description="Why this step is needed")
+    action: str = Field(description="What to do in this step", max_length=500)
+    tool: str = Field(description="Which tool to use", max_length=100)
+    rationale: str = Field(description="Why this step is needed", max_length=500)
     depends_on: List[int] = Field(
-        default_factory=list, description="IDs of steps this depends on"
+        default_factory=list,
+        description="IDs of steps this depends on",
+        max_length=20,
     )
 
 
@@ -29,25 +38,34 @@ class QueryClassification(BaseModel):
     complexity: Literal["simple", "moderate", "complex", "unclear"] = Field(
         description="Query complexity level. Use 'unclear' for gibberish, random characters, or messages that are not a coherent question about the company."
     )
-    reasoning: str = Field(description="Brief explanation of why this complexity level")
-    estimated_tools: int = Field(description="Estimated number of tools needed")
+    reasoning: str = Field(
+        description="Brief explanation of why this complexity level",
+        max_length=1000,
+    )
+    estimated_tools: int = Field(
+        description="Estimated number of tools needed", ge=0, le=20
+    )
 
 
 class QueryPlan(BaseModel):
     """A complete plan for answering a financial analysis query."""
 
     query_type: str = Field(
-        description="Type of query: simple, moderate, or complex"
+        description="Type of query: simple, moderate, or complex",
+        max_length=50,
     )
     requires_planning: bool = Field(
         description="Whether this query needs multi-step planning"
     )
     steps: List[AnalysisStep] = Field(
-        default_factory=list, description="Ordered steps to execute"
+        default_factory=list,
+        description="Ordered steps to execute",
+        max_length=MAX_PLAN_STEPS,
     )
     synthesis_approach: str = Field(
         default="",
         description="How to combine results from multiple steps",
+        max_length=2000,
     )
 
 

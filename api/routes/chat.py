@@ -16,6 +16,7 @@ from api.memory import (
 from api.dependencies import resolve_ws_keys, verify_ws_identity
 from api.rate_limit import check_rate_limit
 from api.validators import TICKER_RE
+from agents.graph.analyst_graph import LLMTimeoutError
 from agents.model_registry import get_model, get_default_model, get_token_threshold
 from agents.llm_factory import create_llm_pair
 
@@ -207,6 +208,12 @@ async def chat(websocket: WebSocket, ticker: str):
                                 full_response = event["message"]
                     except WebSocketDisconnect:
                         return
+                    except LLMTimeoutError as e:
+                        logger.warning("LLM timeout for %s: %s", ticker, e)
+                        await _safe_send(websocket, {
+                            "type": "error",
+                            "message": "The model took too long to respond. Please try a simpler query or try again.",
+                        })
                     except Exception as e:
                         logger.error("Error processing query for %s: %s", ticker, e, exc_info=True)
                         await _safe_send(websocket, {

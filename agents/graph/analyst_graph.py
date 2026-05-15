@@ -11,7 +11,10 @@ Streaming:
 - invoke() remains unchanged for backward compatibility
 """
 
+import asyncio
 import json
+import logging
+import os
 from typing import Dict, Any, TypedDict, Annotated, Optional, List, Literal, Generator, Union
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
@@ -33,6 +36,43 @@ from agents.planner import (
     AnalysisStep,
     create_planner,
 )
+
+logger = logging.getLogger(__name__)
+
+# Wall-clock ceiling per LLM call. Gemini 3 with thinking enabled can hang
+# indefinitely on adversarial prompts; without a timeout the WS session pins
+# an agent in memory and the user sees nothing. Env-overridable.
+LLM_CALL_TIMEOUT = float(os.getenv("LLM_CALL_TIMEOUT_SECONDS", "120"))
+
+# Cap on conversation history passed to the ReAct agent. Bounds per-turn token
+# cost; without this, every prior message is re-sent to the LLM each turn so
+# multi-turn sessions compound their input tokens. The current user message is
+# always preserved (it's the last in `messages`).
+MESSAGES_HISTORY_LIMIT = int(os.getenv("MESSAGES_HISTORY_LIMIT", "30"))
+
+
+def _truncate_messages(messages: List[BaseMessage], limit: int = MESSAGES_HISTORY_LIMIT) -> List[BaseMessage]:
+    """Return at most `limit` most-recent messages without mutating the input."""
+    if len(messages) <= limit:
+        return messages
+    return messages[-limit:]
+
+
+class LLMTimeoutError(RuntimeError):
+    """Raised when an LLM call exceeds `LLM_CALL_TIMEOUT`."""
+
+    pass
+
+
+async def _run_with_timeout(coro, *, label: str):
+    """Wrap an LLM coroutine in `asyncio.wait_for` and surface timeouts as
+    a typed error the streaming layer can render as `{"type": "error", ...}`.
+    """
+    try:
+        return await asyncio.wait_for(coro, timeout=LLM_CALL_TIMEOUT)
+    except asyncio.TimeoutError as e:
+        logger.warning("LLM call timed out: label=%s timeout=%ss", label, LLM_CALL_TIMEOUT)
+        raise LLMTimeoutError(f"LLM call '{label}' timed out after {LLM_CALL_TIMEOUT}s") from e
 
 
 class StepResult(TypedDict):
@@ -181,7 +221,7 @@ UNCLEAR_QUERY_RESPONSE = (
 def create_router_node(planner: QueryPlanner):
     """Create router node that classifies query complexity."""
 
-    def router(state: AnalysisState) -> AnalysisState:
+    async def router(state: AnalysisState) -> AnalysisState:
         query = _get_latest_query(state["messages"])
 
         if not query:
@@ -189,8 +229,10 @@ def create_router_node(planner: QueryPlanner):
             state["classification"] = None
             return state
 
-        # Classify the query
-        classification = planner.classify_query(query)
+        classification = await _run_with_timeout(
+            asyncio.to_thread(planner.classify_query, query),
+            label="classify_query",
+        )
         state["classification"] = classification
 
         # Unclear queries get a clarification response — no tools invoked
@@ -213,12 +255,17 @@ def create_router_node(planner: QueryPlanner):
 def create_react_node(react_agent: Any):
     """Create node that runs the ReAct agent for simple queries."""
 
-    def react_node(state: AnalysisState) -> AnalysisState:
-        result = react_agent.invoke({"messages": state["messages"]})
+    async def react_node(state: AnalysisState) -> AnalysisState:
+        # Truncate history before passing to the LLM so multi-turn sessions
+        # don't compound input-token cost.
+        bounded_messages = _truncate_messages(state["messages"])
+
+        result = await _run_with_timeout(
+            react_agent.ainvoke({"messages": bounded_messages}),
+            label="react_agent",
+        )
 
         if result and "messages" in result:
-            # extract_text handles the case where Gemini 3 returns
-            # content as a list of blocks instead of a plain string
             response = extract_text(result["messages"][-1].content)
         else:
             response = str(result)
@@ -232,10 +279,13 @@ def create_react_node(react_agent: Any):
 def create_planner_node(planner: QueryPlanner):
     """Create node that generates an execution plan for complex queries."""
 
-    def planner_node(state: AnalysisState) -> AnalysisState:
+    async def planner_node(state: AnalysisState) -> AnalysisState:
         query = _get_latest_query(state["messages"])
 
-        plan = planner.create_plan(query)
+        plan = await _run_with_timeout(
+            asyncio.to_thread(planner.create_plan, query),
+            label="create_plan",
+        )
         state["plan"] = plan
         state["step_results"] = {}
 
@@ -474,18 +524,22 @@ def create_synthesizer_node(llm: BaseChatModel, ticker: str):
             pass
 
         if writer:
-            # Streaming path: emit tokens/thinking as they arrive.
-            # astream() is the async equivalent — avoids blocking the event loop
-            # for the duration of synthesis (which can be 10-30s with thinking enabled).
-            full_response = ""
-            async for chunk in llm.astream(prompt):
-                full_response += _process_streaming_chunk(chunk, writer)
-            state["final_response"] = full_response
+            # Streaming path: emit tokens/thinking as they arrive. The entire
+            # stream has a single deadline — total synthesis time can't exceed
+            # LLM_CALL_TIMEOUT even with thinking enabled.
+            async def _stream() -> str:
+                full = ""
+                async for chunk in llm.astream(prompt):
+                    full += _process_streaming_chunk(chunk, writer)
+                return full
+
+            state["final_response"] = await _run_with_timeout(
+                _stream(), label="synthesizer_stream"
+            )
         else:
-            # Non-streaming fallback: ainvoke and return complete response.
-            # extract_text handles the case where include_thoughts=True
-            # causes response.content to be a list of blocks instead of a string.
-            response = await llm.ainvoke(prompt)
+            response = await _run_with_timeout(
+                llm.ainvoke(prompt), label="synthesizer_invoke"
+            )
             state["final_response"] = extract_text(response.content)
 
         return state
