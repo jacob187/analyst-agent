@@ -174,14 +174,27 @@ class YahooFinanceDataRetrieval:
 
             result: Dict[str, Any] = {}
 
-            # Earnings date — may be a Timestamp, list of Timestamps, or string
+            # Earnings date — may be a date, Timestamp, list of either, or string.
+            # yfinance often returns a range (e.g. [past, future]) for unconfirmed
+            # earnings windows; pick the earliest date that is today or later.
+            from datetime import date, datetime
             earnings_date = cal.get("Earnings Date")
-            if isinstance(earnings_date, list) and earnings_date:
-                earnings_date = earnings_date[0]
-            if isinstance(earnings_date, pd.Timestamp):
-                result["earnings_date"] = earnings_date.strftime("%Y-%m-%d")
-            elif earnings_date is not None:
-                result["earnings_date"] = str(earnings_date)
+            today = date.today()
+
+            def _as_date(v):
+                if isinstance(v, pd.Timestamp):
+                    return v.date()
+                if isinstance(v, datetime):
+                    return v.date()
+                if isinstance(v, date):
+                    return v
+                return None
+
+            candidates = earnings_date if isinstance(earnings_date, list) else [earnings_date]
+            dates = [d for d in (_as_date(c) for c in candidates) if d is not None]
+            future = [d for d in dates if d >= today]
+            if future:
+                result["earnings_date"] = min(future).strftime("%Y-%m-%d")
 
             for src_key, dst_key in [
                 ("Earnings Average", "earnings_average"),
