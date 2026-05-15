@@ -1,7 +1,9 @@
 """WebSocket chat endpoint — real-time agent interaction."""
 
 import asyncio
+import json
 import logging
+import os
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from langchain_core.messages import HumanMessage, AIMessage
@@ -24,17 +26,37 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-
-async def _safe_send(websocket: WebSocket, data: dict) -> bool:
-    """Send JSON, returning False if the connection is already closed."""
-    try:
-        await websocket.send_json(data)
-        return True
-    except (WebSocketDisconnect, RuntimeError):
-        return False
-
+# WS hardening knobs — env-overridable so prod can tune and tests can run fast.
+# These are read at call time via module attribute lookup so monkeypatch works.
+WS_AUTH_TIMEOUT_SECONDS = float(os.getenv("WS_AUTH_TIMEOUT_SECONDS", "30"))
+WS_AUTH_MAX_BYTES = int(os.getenv("WS_AUTH_MAX_BYTES", "16384"))
+WS_IDLE_TIMEOUT_SECONDS = float(os.getenv("WS_IDLE_TIMEOUT_SECONDS", "300"))
+WS_SEND_TIMEOUT_SECONDS = float(os.getenv("WS_SEND_TIMEOUT_SECONDS", "10"))
 
 MAX_QUERY_LENGTH = 4000
+
+
+async def _safe_send(websocket: WebSocket, data: dict) -> bool:
+    """Send JSON with a send timeout; return False if the peer is gone or slow.
+
+    A hanging `send_json` would otherwise pin the agent task on a slow consumer
+    (full TCP buffer, dead connection that hasn't been reaped yet).
+    """
+    try:
+        await asyncio.wait_for(
+            websocket.send_json(data),
+            timeout=WS_SEND_TIMEOUT_SECONDS,
+        )
+        return True
+    except asyncio.TimeoutError:
+        logger.warning("WS send timed out after %ss — closing slow consumer", WS_SEND_TIMEOUT_SECONDS)
+        try:
+            await websocket.close(code=1008)
+        except Exception:
+            pass
+        return False
+    except (WebSocketDisconnect, RuntimeError):
+        return False
 
 
 @router.websocket("/ws/chat/{ticker}")
@@ -47,7 +69,32 @@ async def chat(websocket: WebSocket, ticker: str):
         return
 
     try:
-        auth_message = await websocket.receive_json()
+        # Size + time-bounded auth frame read. Plain `receive_json()` has no
+        # ceiling — a client can stall indefinitely or push megabytes of JSON.
+        try:
+            raw_auth = await asyncio.wait_for(
+                websocket.receive_text(),
+                timeout=WS_AUTH_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            await websocket.close(code=1008)
+            return
+
+        if len(raw_auth) > WS_AUTH_MAX_BYTES:
+            await websocket.close(code=1008)
+            return
+
+        try:
+            auth_message = json.loads(raw_auth)
+        except (json.JSONDecodeError, ValueError):
+            await websocket.send_json({"type": "error", "message": "Invalid auth payload"})
+            await websocket.close(code=1008)
+            return
+
+        if not isinstance(auth_message, dict):
+            await websocket.send_json({"type": "error", "message": "Auth payload must be an object"})
+            await websocket.close(code=1008)
+            return
 
         if auth_message.get("type") != "auth":
             await websocket.send_json({
@@ -167,7 +214,21 @@ async def chat(websocket: WebSocket, ticker: str):
         client_ip = websocket.client.host if websocket.client else "unknown"
         while True:
             try:
-                message = await websocket.receive_json()
+                # Reap idle sessions — clients that disappear without sending FIN
+                # would otherwise keep an agent + LLM client + history in memory
+                # for the lifetime of the process.
+                try:
+                    message = await asyncio.wait_for(
+                        websocket.receive_json(),
+                        timeout=WS_IDLE_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.info("Idle WS session closed after %ss (%s)", WS_IDLE_TIMEOUT_SECONDS, ticker)
+                    try:
+                        await websocket.close(code=1001)  # going away
+                    except Exception:
+                        pass
+                    break
 
                 if message.get("type") == "query":
                     if not check_rate_limit(client_ip):
