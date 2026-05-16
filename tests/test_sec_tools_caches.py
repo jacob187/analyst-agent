@@ -1,14 +1,15 @@
 """Tests for bounded module-level caches in the tool modules.
 
 Verifies that `_shared_retrievers`, `_shared_processors`, `_processed_cache`
-(sec_tools), `_research_cache` (research_tools), and `_shared_stock_retrievers`
-(stock_tools) are size-capped via `cachetools` so unique-key rotation cannot
-grow process memory without bound.
+(sec_tools), `_research_cache` (research_tools), and `_retriever_cache`
+(indicator_window — shared between chart and stock tools) are size-capped via
+`cachetools` so unique-key rotation cannot grow process memory without bound.
 """
 
 from cachetools import LRUCache, TTLCache
 
-from agents.tools import research_tools, sec_tools, stock_tools
+from agents.tools import research_tools, sec_tools
+from agents.technical_workflow import indicator_window
 
 
 class TestSecToolCachesBounded:
@@ -78,13 +79,16 @@ class TestResearchCacheBounded:
 
 
 class TestStockRetrieverCacheBounded:
-    def setup_method(self):
-        stock_tools._shared_stock_retrievers.clear()
+    """Retriever cache lives in indicator_window now — shared between chart
+    route and LLM tools so there's a single yfinance.Ticker lifecycle per symbol."""
 
-    def test_shared_stock_retrievers_bounded_at_128(self):
+    def setup_method(self):
+        indicator_window._retriever_cache.clear()
+
+    def test_retriever_cache_bounded_at_128(self):
         for i in range(1000):
-            stock_tools._shared_stock_retrievers[f"T{i}"] = object()
-        assert len(stock_tools._shared_stock_retrievers) <= 128
+            indicator_window._retriever_cache[f"T{i}"] = object()
+        assert len(indicator_window._retriever_cache) <= 128
 
     def test_cache_is_cachetools_type(self):
-        assert isinstance(stock_tools._shared_stock_retrievers, LRUCache)
+        assert isinstance(indicator_window._retriever_cache, LRUCache)

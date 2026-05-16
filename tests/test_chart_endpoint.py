@@ -17,6 +17,16 @@ def client():
     return TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _clear_retriever_cache():
+    """Clear the indicator-window retriever cache so mocks don't leak across tests."""
+    from agents.technical_workflow import indicator_window
+
+    indicator_window._retriever_cache.clear()
+    yield
+    indicator_window._retriever_cache.clear()
+
+
 @pytest.fixture
 def mock_yfinance_data():
     """Build a realistic OHLCV DataFrame that YahooFinanceDataRetrieval would return."""
@@ -42,7 +52,7 @@ def mock_yfinance_data():
 def mock_retriever(mock_yfinance_data):
     """Patch YahooFinanceDataRetrieval at its source module."""
     with patch(
-        "agents.technical_workflow.get_stock_data.YahooFinanceDataRetrieval"
+        "agents.technical_workflow.indicator_window.YahooFinanceDataRetrieval"
     ) as MockClass:
         instance = MagicMock()
         instance.get_historical_prices.return_value = mock_yfinance_data
@@ -146,7 +156,7 @@ class TestChartEndpointErrors:
         assert resp.status_code == 422
 
     def test_no_data_returns_404(self, client):
-        with patch("agents.technical_workflow.get_stock_data.YahooFinanceDataRetrieval") as MockClass:
+        with patch("agents.technical_workflow.indicator_window.YahooFinanceDataRetrieval") as MockClass:
             instance = MagicMock()
             instance.get_historical_prices.return_value = None
             MockClass.return_value = instance
@@ -155,7 +165,7 @@ class TestChartEndpointErrors:
             assert "No data" in resp.json()["detail"]
 
     def test_empty_dataframe_returns_404(self, client):
-        with patch("agents.technical_workflow.get_stock_data.YahooFinanceDataRetrieval") as MockClass:
+        with patch("agents.technical_workflow.indicator_window.YahooFinanceDataRetrieval") as MockClass:
             instance = MagicMock()
             instance.get_historical_prices.return_value = pd.DataFrame()
             MockClass.return_value = instance

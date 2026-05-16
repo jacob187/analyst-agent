@@ -31,14 +31,24 @@ class ChartPeriod(str, Enum):
     one_year = "1y"
 
 
-# Map our period values to yfinance (period, interval) pairs.
-# Short timeframes use intraday intervals for more useful candle density.
-_PERIOD_MAP: dict[str, tuple[str, str]] = {
-    "1w": ("5d", "15m"),     # ~130 candles (15-min bars)
-    "1mo": ("1mo", "1h"),    # ~140 candles (hourly bars)
-    "3mo": ("3mo", "1h"),    # ~130 candles (hourly bars)
-    "6mo": ("6mo", "1d"),    # ~126 candles (daily bars)
-    "1y": ("1y", "1d"),      # ~252 candles (daily bars)
+# Bar interval per user-facing display period. The fetch period (with
+# MA200 pre-roll) is resolved inside `fetch_indicator_window`.
+_INTERVAL_FOR_PERIOD: dict[str, str] = {
+    "1w":  "15m",
+    "1mo": "1h",
+    "3mo": "1h",
+    "6mo": "1d",
+    "1y":  "1d",
+}
+
+# Map UI period values to the indicator-window display_period vocabulary.
+# "1w" → "5d" because yfinance uses "5d" for a week of trading data.
+_DISPLAY_PERIOD: dict[str, str] = {
+    "1w":  "5d",
+    "1mo": "1mo",
+    "3mo": "3mo",
+    "6mo": "6mo",
+    "1y":  "1y",
 }
 
 # All available chart indicators
@@ -53,32 +63,36 @@ _CACHE_TTL = 60  # seconds
 def _fetch_chart_payload(ticker: str, period_value: str) -> Optional[dict]:
     """Fetch + compute the full chart payload synchronously.
 
-    Consolidates the blocking yfinance + indicator + pattern work into a single
-    function so route handlers can offload it via a single `asyncio.to_thread`
-    call rather than five thread hops. Returns None when no historical data is
-    available so the caller can raise HTTP 404 cleanly.
+    Delegates indicator-aware fetching (MA200 pre-roll, display trimming) to
+    `agents.technical_workflow.indicator_window`. Returns None when no historical
+    data is available so the caller can raise HTTP 404 cleanly.
     """
-    from agents.technical_workflow.get_stock_data import YahooFinanceDataRetrieval
+    from agents.technical_workflow.indicator_window import fetch_indicator_window
     from agents.technical_workflow.process_technical_indicators import TechnicalIndicators
 
-    retriever = YahooFinanceDataRetrieval(ticker)
-    yf_period, yf_interval = _PERIOD_MAP[period_value]
-    df = retriever.get_historical_prices(period=yf_period, interval=yf_interval)
+    interval = _INTERVAL_FOR_PERIOD[period_value]
+    display_period = _DISPLAY_PERIOD[period_value]
 
-    if df is None or df.empty:
+    window = fetch_indicator_window(ticker, display_period, interval)
+    if window is None:
         return None
 
-    intraday = yf_interval != "1d"
-    candles = _format_candles(df, intraday=intraday)
+    intraday = interval != "1d"
 
+    # Compute indicators on the full pre-roll window, but format only the
+    # display window in the output series.
     ti = TechnicalIndicators(ticker)
-    all_indicators = ti.calculate_chart_indicators(df, intraday=intraday)
+    all_indicators = ti.calculate_chart_indicators(
+        window.full, intraday=intraday, display_index=window.display.index,
+    )
+
+    candles = _format_candles(window.display, intraday=intraday)
 
     patterns: list[dict] = []
     try:
         from agents.technical_workflow.pattern_recognition import PatternRecognitionEngine
         engine = PatternRecognitionEngine()
-        raw_patterns = engine.detect_all_patterns(df)
+        raw_patterns = engine.detect_all_patterns(window.display)
         for p in raw_patterns:
             pattern_entry: dict = {
                 "type": p.get("type", ""),
@@ -92,7 +106,8 @@ def _fetch_chart_payload(ticker: str, period_value: str) -> Optional[dict]:
     except Exception:
         pass  # Patterns are supplementary
 
-    quote = retriever.get_live_price()
+    from agents.technical_workflow.indicator_window import get_retriever
+    quote = get_retriever(ticker).get_live_price()
 
     return {
         "candles": candles,

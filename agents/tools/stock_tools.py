@@ -5,23 +5,12 @@ technical indicators (RSI, MACD, Bollinger Bands, pattern recognition, etc.).
 They are ticker-bound but do not require an LLM or SEC header.
 """
 
-from cachetools import LRUCache
 from langchain_core.tools import Tool
 
-from agents.technical_workflow.get_stock_data import YahooFinanceDataRetrieval
-
-
-# Bounded per-ticker cache so all stock tools share a single retriever instance.
-# LRU eviction caps memory; evicting a Ticker still leaves yfinance's internal
-# HTTP cache live for as long as the existing instance is referenced.
-_shared_stock_retrievers: LRUCache = LRUCache(maxsize=128)
-
-
-def _get_shared_stock_retriever(ticker: str) -> YahooFinanceDataRetrieval:
-    """Get or create a shared Yahoo Finance data retriever for the ticker."""
-    if ticker not in _shared_stock_retrievers:
-        _shared_stock_retrievers[ticker] = YahooFinanceDataRetrieval(ticker)
-    return _shared_stock_retrievers[ticker]
+from agents.technical_workflow.indicator_window import (
+    fetch_indicator_window,
+    get_retriever as _get_shared_stock_retriever,
+)
 
 
 def _tool_stock_price_history(ticker: str, period: str = "1mo") -> str:
@@ -59,16 +48,17 @@ def _tool_technical_analysis(ticker: str) -> str:
     try:
         from agents.technical_workflow.process_technical_indicators import TechnicalIndicators
 
-        retriever = _get_shared_stock_retriever(ticker)
-        hist = retriever.get_historical_prices(period="1y")
-        if hist is None or hist.empty:
+        # Fetch with MA200 pre-roll so the "current" MA200 reported below is
+        # the real 200-day MA, not a stub computed on the first 200 of 252 bars.
+        window = fetch_indicator_window(ticker, "1y", "1d")
+        if window is None:
             return f"No historical price data available for {ticker}"
 
         tech = TechnicalIndicators(ticker)
-        indicators = tech.calculate_all_indicators(hist)
+        indicators = tech.calculate_all_indicators(window.full)
 
         # Fetch a fresh live price (separate from the cached Ticker instance)
-        live = retriever.get_live_price()
+        live = _get_shared_stock_retriever(ticker).get_live_price()
         current_price = live.get("price")
 
         lines = [f"Technical Analysis for {ticker}:"]
@@ -247,13 +237,13 @@ def _tool_advanced_technical_analysis(ticker: str) -> str:
     try:
         from agents.technical_workflow.process_technical_indicators import TechnicalIndicators
 
-        retriever = _get_shared_stock_retriever(ticker)
-        hist = retriever.get_historical_prices(period="1y")
-        if hist is None or hist.empty:
+        # Use indicator-aware fetch so MA200/MACD pre-roll is sufficient.
+        window = fetch_indicator_window(ticker, "1y", "1d")
+        if window is None:
             return f"No historical price data available for {ticker}"
 
         tech = TechnicalIndicators(ticker)
-        indicators = tech.calculate_all_indicators(hist)
+        indicators = tech.calculate_all_indicators(window.full)
 
         lines = [f"Advanced Technical Analysis for {ticker}:"]
         lines.append("=" * 55)

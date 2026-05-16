@@ -47,13 +47,21 @@ class TechnicalIndicators:
         return result
 
     def calculate_chart_indicators(
-        self, df: Optional[pd.DataFrame], intraday: bool = False
+        self,
+        df: Optional[pd.DataFrame],
+        intraday: bool = False,
+        display_index: Optional[pd.DatetimeIndex] = None,
     ) -> Dict[str, Any]:
         """Calculate indicators and return full time series for chart rendering.
 
         Args:
-            df: OHLCV DataFrame.
+            df: OHLCV DataFrame. May include pre-roll bars for long-window
+                indicators like MA200; pass `display_index` to format only
+                a subset of timestamps in the output.
             intraday: If True, use unix timestamps instead of date strings.
+            display_index: If provided, only timestamps in this index appear
+                in the returned series. Indicator math still runs on `df` so
+                MA200, MACD, etc. are valid across the entire `display_index`.
 
         Returns dict with keys like 'ma20', 'rsi', 'macd', 'bollinger' —
         each containing a list of {time, value} dicts ready for Lightweight Charts.
@@ -63,31 +71,40 @@ class TechnicalIndicators:
 
         self._intraday = intraday
         raw = self._calculate_all_raw(df)
-        index = df.index
+        # Compute on full df but format only the display window if requested.
+        index = display_index if display_index is not None else df.index
         result = {}
 
-        # Moving averages
+        # Moving averages — slice each series to the format index.
         ma_series = raw["moving_averages"]["series"]
         for key, label in [("MA_5", "ma5"), ("MA_10", "ma10"), ("MA_20", "ma20"),
                            ("MA_50", "ma50"), ("MA_200", "ma200")]:
             if key in ma_series:
-                result[label] = self._series_to_chart_format(ma_series[key], index)
+                result[label] = self._series_to_chart_format(
+                    ma_series[key].reindex(index), index
+                )
 
         # RSI
         result["rsi"] = self._series_to_chart_format(
-            raw["rsi"]["series"], index
+            raw["rsi"]["series"].reindex(index), index
         )
 
         # MACD — three series merged into one list of dicts
         macd_s = raw["macd"]["series"]
         result["macd"] = self._macd_to_chart_format(
-            macd_s["macd_line"], macd_s["signal_line"], macd_s["histogram"], index
+            macd_s["macd_line"].reindex(index),
+            macd_s["signal_line"].reindex(index),
+            macd_s["histogram"].reindex(index),
+            index,
         )
 
         # Bollinger Bands — three bands merged into one list of dicts
         bb_s = raw["bollinger_bands"]["series"]
         result["bollinger"] = self._bollinger_to_chart_format(
-            bb_s["upper"], bb_s["middle"], bb_s["lower"], index
+            bb_s["upper"].reindex(index),
+            bb_s["middle"].reindex(index),
+            bb_s["lower"].reindex(index),
+            index,
         )
 
         return result
