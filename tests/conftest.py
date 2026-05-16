@@ -28,6 +28,20 @@ os.environ.pop("CLERK_SECRET_KEY", None)
 os.environ.pop("DISABLE_AUTH", None)
 
 
+# edgar.set_identity is a process-global setting in edgartools and is normally
+# configured once at app startup from api/main.py:lifespan. Pytest doesn't run
+# that lifespan for unit tests that import SECDataRetrieval directly, so do it
+# here at conftest import time. Uses SEC_HEADER if set (real eval runs), falls
+# back to the same dev placeholder api/main.py uses.
+def _bootstrap_sec_identity() -> None:
+    from edgar import set_identity
+    header = (os.environ.get("SEC_HEADER") or "").strip() or "Analyst Agent dev@localhost"
+    set_identity(header)
+
+
+_bootstrap_sec_identity()
+
+
 @pytest.fixture(autouse=True)
 def _scrub_clerk_env(monkeypatch):
     """Ensure Clerk stays disabled per-test even if api.main re-loads .env.
@@ -154,25 +168,13 @@ def planner(llm):
 
 
 @pytest.fixture(scope="session")
-def sec_header():
-    """SEC EDGAR identity header from .env.
-
-    Skips tests that depend on SEC API if not set.
-    """
-    header = os.environ.get("SEC_HEADER", "")
-    if not header:
-        pytest.skip("SEC_HEADER not set — skipping SEC-dependent test")
-    return header
-
-
-@pytest.fixture(scope="session")
-def tools(llm, sec_header):
+def tools(llm):
     """List of Tool objects for AAPL (SEC + stock + market)."""
     from agents.tools.sec_tools import create_sec_tools
     from agents.tools.stock_tools import create_stock_tools
     from agents.tools.market_tools import create_market_tools
 
-    tool_list, _ = create_sec_tools(DEFAULT_TICKER, llm, sec_header)
+    tool_list, _ = create_sec_tools(DEFAULT_TICKER, llm)
     tool_list.extend(create_stock_tools(DEFAULT_TICKER))
     tool_list.extend(create_market_tools())
     return tool_list
@@ -196,11 +198,11 @@ def tools_dict(tools):
 
 
 @pytest.fixture(scope="session")
-def agent(llm, sec_header):
+def agent(llm):
     """Full PlanningAgent for AAPL."""
     from agents.graph.analyst_graph import create_planning_agent
 
-    return create_planning_agent(ticker=DEFAULT_TICKER, llm=llm, sec_header=sec_header)
+    return create_planning_agent(ticker=DEFAULT_TICKER, llm=llm)
 
 
 # ---------------------------------------------------------------------------

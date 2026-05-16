@@ -109,7 +109,7 @@ async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
         # Wrap in wait_for so a stuck LLM call surfaces as 504 instead of pinning
         # the worker thread + connection.
         result = await asyncio.wait_for(
-            asyncio.to_thread(service.generate, tickers),
+            asyncio.to_thread(service.generate, tickers, user_id, model_id),
             timeout=BRIEFING_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:

@@ -122,14 +122,6 @@ async def chat(websocket: WebSocket, ticker: str):
 
         user_id = keys.user_id
 
-        if not keys.sec_header:
-            await websocket.send_json({
-                "type": "error",
-                "message": "sec_header is required"
-            })
-            await websocket.close()
-            return
-
         # Resolve model from auth message → registry default
         model_id = keys.model_id or get_default_model().id
         model = get_model(model_id)
@@ -190,7 +182,6 @@ async def chat(websocket: WebSocket, ticker: str):
                 ticker, llm,
                 tavily_api_key=keys.tavily_api_key,
                 synthesizer_llm=synthesizer_llm,
-                sec_header=keys.sec_header,
                 user_id=user_id,
             )
 

@@ -45,9 +45,9 @@ def mock_llm():
 @pytest.fixture(autouse=True)
 def reset_cache():
     """Clear the module-level briefing cache between tests."""
-    briefing_mod._briefing_cache = None
+    briefing_mod._briefing_cache.clear()
     yield
-    briefing_mod._briefing_cache = None
+    briefing_mod._briefing_cache.clear()
 
 
 @pytest.fixture
@@ -236,8 +236,8 @@ class TestCaching:
             with patch.object(service, "_get_market_regime", return_value={"error": "skip"}):
                 with patch.object(service, "_gather_news", return_value={"AAPL": {"summary": "news", "url": None}}):
                     with patch.object(service, "_synthesize", return_value=sample_result):
-                        service.generate(["AAPL"])
-                        result = service.generate(["AAPL"])
+                        service.generate(["AAPL"], user_id="u1", model_id="m1")
+                        result = service.generate(["AAPL"], user_id="u1", model_id="m1")
                         # _synthesize should only be called once (second call hits cache)
                         assert service._synthesize.call_count == 1
                         assert isinstance(result, BriefingResult)
@@ -249,6 +249,32 @@ class TestCaching:
             with patch.object(service, "_get_market_regime", return_value={"error": "skip"}):
                 with patch.object(service, "_gather_news", return_value={"X": {"summary": "news", "url": None}}):
                     with patch.object(service, "_synthesize", return_value=sample_result):
-                        service.generate(["AAPL"])
-                        service.generate(["MSFT"])
+                        service.generate(["AAPL"], user_id="u1", model_id="m1")
+                        service.generate(["MSFT"], user_id="u1", model_id="m1")
+                        assert service._synthesize.call_count == 2
+
+    def test_cache_isolated_per_user(self, service, mock_llm):
+        """Two users with identical watchlists must NOT share a cached briefing.
+
+        Locks the cross-user leak fix: news data is fetched per-call and varies
+        over time, so reusing one user's briefing for another would leak content.
+        """
+        sample_result = BriefingResult(analysis=SAMPLE_ANALYSIS, thinking="")
+        with patch.object(service, "_gather_ticker_data", return_value=[{"ticker": "AAPL", "price": 180}]):
+            with patch.object(service, "_get_market_regime", return_value={"error": "skip"}):
+                with patch.object(service, "_gather_news", return_value={"AAPL": {"summary": "news", "url": None}}):
+                    with patch.object(service, "_synthesize", return_value=sample_result):
+                        service.generate(["AAPL"], user_id="user_a", model_id="m1")
+                        service.generate(["AAPL"], user_id="user_b", model_id="m1")
+                        assert service._synthesize.call_count == 2
+
+    def test_cache_isolated_per_model(self, service, mock_llm):
+        """Same user + tickers but different model must re-run the LLM."""
+        sample_result = BriefingResult(analysis=SAMPLE_ANALYSIS, thinking="")
+        with patch.object(service, "_gather_ticker_data", return_value=[{"ticker": "AAPL", "price": 180}]):
+            with patch.object(service, "_get_market_regime", return_value={"error": "skip"}):
+                with patch.object(service, "_gather_news", return_value={"AAPL": {"summary": "news", "url": None}}):
+                    with patch.object(service, "_synthesize", return_value=sample_result):
+                        service.generate(["AAPL"], user_id="user_a", model_id="gemini-3-pro")
+                        service.generate(["AAPL"], user_id="user_a", model_id="gpt-4.1")
                         assert service._synthesize.call_count == 2

@@ -108,7 +108,6 @@ class ApiKeys:
     google_api_key: str | None
     openai_api_key: str | None
     anthropic_api_key: str | None
-    sec_header: str | None
     tavily_api_key: str | None
     model_id: str | None
     user_id: str | None = None
@@ -124,12 +123,6 @@ class ApiKeys:
         if not self.google_api_key:
             raise ValueError("Google API key required")
         return self.google_api_key
-
-    def require_sec(self) -> str:
-        """Return sec_header or raise ValueError if missing."""
-        if not self.sec_header:
-            raise ValueError("SEC header required")
-        return self.sec_header
 
     def get_provider_key(self, provider: str) -> str | None:
         """Return the API key for a provider, or None if not set."""
@@ -151,7 +144,6 @@ async def get_api_keys(
     x_google_api_key: str | None = Header(None),
     x_openai_api_key: str | None = Header(None),
     x_anthropic_api_key: str | None = Header(None),
-    x_sec_header: str | None = Header(None),
     x_tavily_api_key: str | None = Header(None),
     x_model_id: str | None = Header(None),
     x_user_id: str | None = Header(None),
@@ -164,7 +156,6 @@ async def get_api_keys(
         google_api_key=x_google_api_key or os.getenv("GOOGLE_API_KEY"),
         openai_api_key=x_openai_api_key or os.getenv("OPENAI_API_KEY"),
         anthropic_api_key=x_anthropic_api_key or os.getenv("ANTHROPIC_API_KEY"),
-        sec_header=x_sec_header or os.getenv("SEC_HEADER"),
         tavily_api_key=x_tavily_api_key or os.getenv("TAVILY_API_KEY"),
         model_id=x_model_id or os.getenv("DEFAULT_MODEL_ID"),
         user_id=user_id,
@@ -185,7 +176,6 @@ def resolve_ws_keys(auth_message: dict) -> ApiKeys:
         google_api_key=auth_message.get("google_api_key") or os.getenv("GOOGLE_API_KEY"),
         openai_api_key=auth_message.get("openai_api_key") or os.getenv("OPENAI_API_KEY"),
         anthropic_api_key=auth_message.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY"),
-        sec_header=auth_message.get("sec_header") or os.getenv("SEC_HEADER"),
         tavily_api_key=auth_message.get("tavily_api_key") or os.getenv("TAVILY_API_KEY"),
         model_id=auth_message.get("model_id") or os.getenv("DEFAULT_MODEL_ID"),
         user_id=_validate_user_id(auth_message.get("user_id")),

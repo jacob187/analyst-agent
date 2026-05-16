@@ -33,6 +33,8 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+from edgar import set_identity
+
 from api.clerk_auth import is_auth_disabled, is_clerk_enabled
 from api.db import init_db, close_db
 from api.routes.health import router as health_router
@@ -46,6 +48,7 @@ from api.routes.company import router as company_router
 logger = logging.getLogger(__name__)
 
 _PROD_ENV_VALUES = ("production", "prod")
+_DEFAULT_SEC_HEADER = "Analyst Agent dev@localhost"
 
 
 def check_production_auth_config() -> None:
@@ -74,9 +77,46 @@ def check_production_auth_config() -> None:
         )
 
 
+def check_production_sec_config() -> None:
+    """Refuse to start in production when SEC_HEADER is unset.
+
+    edgartools requires a contact identity on every SEC EDGAR request; the
+    default placeholder is fine for local dev but will get the app rate-limited
+    or banned in production. Shares the ANALYST_ALLOW_DISABLED_AUTH escape
+    hatch with the auth guard — one knob to bypass all prod safety checks.
+    """
+    env = (os.getenv("ENV") or "").strip().lower()
+    if env not in _PROD_ENV_VALUES:
+        return
+    if (os.getenv("ANALYST_ALLOW_DISABLED_AUTH") or "").lower() in ("1", "true", "yes"):
+        logger.warning("ANALYST_ALLOW_DISABLED_AUTH set — skipping production SEC_HEADER guard")
+        return
+    header = (os.getenv("SEC_HEADER") or "").strip()
+    if not header or header == _DEFAULT_SEC_HEADER:
+        raise RuntimeError(
+            "Refusing to start: ENV=production but SEC_HEADER is unset or default. "
+            "Set SEC_HEADER='Your Name your@email.com' (SEC EDGAR requires a real "
+            "contact identity), or set ANALYST_ALLOW_DISABLED_AUTH=1 to override."
+        )
+
+
+def set_sec_identity() -> None:
+    """Configure edgartools' process-global identity exactly once at startup.
+
+    Per-instance set_identity calls in SECDataRetrieval race last-writer-wins
+    under concurrent users (edgartools stores identity globally). Calling it
+    once here removes the race entirely.
+    """
+    header = (os.getenv("SEC_HEADER") or "").strip() or _DEFAULT_SEC_HEADER
+    set_identity(header)
+    logger.info("SEC EDGAR identity set: %s", header)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     check_production_auth_config()
+    check_production_sec_config()
+    set_sec_identity()
     await init_db()
     yield
     await close_db()
@@ -94,7 +134,6 @@ app.add_middleware(
         "X-Google-Api-Key",
         "X-Openai-Api-Key",
         "X-Anthropic-Api-Key",
-        "X-Sec-Header",
         "X-Tavily-Api-Key",
         "X-Model-Id",
         "X-User-Id",

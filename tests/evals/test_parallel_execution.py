@@ -348,7 +348,7 @@ class TestParallelAllSummaries:
 
         from agents.tools.sec_tools import _tool_all_summaries
 
-        result = _tool_all_summaries("TEST", None, "")
+        result = _tool_all_summaries("TEST", None)
 
         assert "=== RISK ANALYSIS ===" in result
         assert "=== MANAGEMENT OUTLOOK ===" in result
@@ -359,7 +359,7 @@ class TestParallelAllSummaries:
 
     def test_runs_concurrently(self, mocker):
         """Three slow mocked summaries should complete in ~1x delay, not ~3x."""
-        def slow_summary(ticker, llm, sec_header=""):
+        def slow_summary(ticker, llm):
             time.sleep(0.2)
             return "summary"
 
@@ -370,7 +370,7 @@ class TestParallelAllSummaries:
         from agents.tools.sec_tools import _tool_all_summaries
 
         start = time.monotonic()
-        result = _tool_all_summaries("TEST", None, "")
+        result = _tool_all_summaries("TEST", None)
         elapsed = time.monotonic() - start
 
         assert "summary" in result

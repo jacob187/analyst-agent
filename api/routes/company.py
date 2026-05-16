@@ -289,7 +289,7 @@ def _build_edgar_url(cik: str, accession: str) -> str:
     return f"https://www.sec.gov/Archives/edgar/data/{cik}/{cleaned}/"
 
 
-def _fetch_filing_data(ticker: str, sec_header: str) -> dict[str, Any]:
+def _fetch_filing_data(ticker: str) -> dict[str, Any]:
     """Synchronous SEC data fetching — runs in a thread pool.
 
     Returns raw filing data (metadata, section text) without LLM analysis.
@@ -304,7 +304,7 @@ def _fetch_filing_data(ticker: str, sec_header: str) -> dict[str, Any]:
     """
     from agents.sec_workflow.get_SEC_data import SECDataRetrieval
 
-    retriever = SECDataRetrieval(ticker, sec_header)
+    retriever = SECDataRetrieval(ticker)
     result: dict[str, Any] = {"ticker": ticker}
 
     # --- 10-K (or 20-F for foreign filers) ---
@@ -523,18 +523,10 @@ async def get_company_filings(
             detail=f"{model.provider.replace('_', ' ').title()} API key required for filing analysis",
         )
 
-    # Resolve SEC header
-    sec_header = keys.sec_header
-    if not sec_header:
-        raise HTTPException(
-            status_code=400,
-            detail="SEC header required (set X-Sec-Header or SEC_HEADER env var)",
-        )
-
     # Step 1: Fetch raw filing data from EDGAR (no LLM, ~1-3s)
     logger.info("[%s] Fetching raw filings from EDGAR...", ticker)
     t0 = time.monotonic()
-    filing_data = await asyncio.to_thread(_fetch_filing_data, ticker, sec_header)
+    filing_data = await asyncio.to_thread(_fetch_filing_data, ticker)
     logger.info("[%s] EDGAR fetch complete (%.1fs)", ticker, time.monotonic() - t0)
 
     # Step 2: For each filing section, check DB cache then run LLM if needed
@@ -676,13 +668,6 @@ async def stream_company_filings(
             detail=f"{model.provider.replace('_', ' ').title()} API key required for filing analysis",
         )
 
-    sec_header = keys.sec_header
-    if not sec_header:
-        raise HTTPException(
-            status_code=400,
-            detail="SEC header required (set X-Sec-Header or SEC_HEADER env var)",
-        )
-
     # Per-IP concurrency guard — prevents a single client from opening
     # many concurrent streams and exhausting the thread pool or API credits.
     client_ip = request.client.host if request.client else "unknown"
@@ -711,7 +696,7 @@ async def stream_company_filings(
             yield _sse({"type": "progress", "step": "edgar_fetch", "status": "fetching"})
             try:
                 t0 = time.monotonic()
-                filing_data = await asyncio.to_thread(_fetch_filing_data, ticker, sec_header)
+                filing_data = await asyncio.to_thread(_fetch_filing_data, ticker)
                 logger.info("[%s] EDGAR fetch complete (%.1fs)", ticker, time.monotonic() - t0)
                 yield _sse({
                     "type": "progress",

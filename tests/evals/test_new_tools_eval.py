@@ -25,8 +25,9 @@ Each tool is evaluated at two levels:
 Session-scoped output fixtures
 -------------------------------
 Each tool is invoked once per test session via a session-scoped fixture that
-depends on `tools_dict` (which depends on `sec_header`).  If either API key
-is missing, the fixture auto-skips and every dependent test is skipped.
+depends on `tools_dict` (which depends on the `llm` fixture and SEC EDGAR
+configured via the SEC_HEADER env var at process startup).  If the LLM API
+key is missing, the fixture auto-skips and every dependent test is skipped.
 The edgartools in-process cache ensures the EDGAR filing is only fetched once
 even if multiple test classes use the same underlying data.
 """

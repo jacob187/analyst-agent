@@ -1,4 +1,4 @@
-from edgar import Company, CompanyNotFoundError, set_identity
+from edgar import Company, CompanyNotFoundError
 import json
 from typing import Literal, Optional, Dict, Any
 from datetime import datetime
@@ -65,8 +65,10 @@ class FilingMetadata:
 
 
 class SECDataRetrieval:
-    def __init__(self, ticker: str, sec_header: str):
-        set_identity(sec_header)
+    def __init__(self, ticker: str):
+        # edgar.set_identity is called once at process startup from api/main.py
+        # because it sets a process-global identity in edgartools. Per-instance
+        # calls race last-writer-wins under concurrent users.
         self.ticker = ticker
         try:
             self.company = Company(ticker)

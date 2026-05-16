@@ -217,7 +217,7 @@ class TestFilingsEndpointSuccess:
     def test_returns_200_with_all_sections(self, client, mock_filings_deps):
         resp = client.get(
             "/api/company/AAPL/filings",
-            headers={"X-Google-Api-Key": "test-key", "X-Sec-Header": "test@test.com", "X-User-Id": "user_testfilings"},
+            headers={"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"},
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -229,7 +229,7 @@ class TestFilingsEndpointSuccess:
     def test_tenk_has_all_analysis_types(self, client, mock_filings_deps):
         data = client.get(
             "/api/company/AAPL/filings",
-            headers={"X-Google-Api-Key": "test-key", "X-Sec-Header": "test@test.com", "X-User-Id": "user_testfilings"},
+            headers={"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"},
         ).json()
         tenk = data["tenk"]
         assert "metadata" in tenk
@@ -241,7 +241,7 @@ class TestFilingsEndpointSuccess:
     def test_earnings_section_when_present(self, client, mock_filings_deps):
         data = client.get(
             "/api/company/AAPL/filings",
-            headers={"X-Google-Api-Key": "test-key", "X-Sec-Header": "test@test.com", "X-User-Id": "user_testfilings"},
+            headers={"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"},
         ).json()
         eightk = data["eightk"]
         assert eightk["kind"] == "earnings"
@@ -251,7 +251,7 @@ class TestFilingsEndpointSuccess:
     def test_edgar_url_construction(self, client, mock_filings_deps):
         data = client.get(
             "/api/company/AAPL/filings",
-            headers={"X-Google-Api-Key": "test-key", "X-Sec-Header": "test@test.com", "X-User-Id": "user_testfilings"},
+            headers={"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"},
         ).json()
         edgar_url = data["tenk"]["metadata"]["edgar_url"]
         assert "sec.gov/Archives/edgar/data/320193/" in edgar_url
@@ -267,7 +267,7 @@ class TestFilingsCaching:
         """On cache miss, LLM analysis should run and result saved to DB."""
         client.get(
             "/api/company/AAPL/filings",
-            headers={"X-Google-Api-Key": "test-key", "X-Sec-Header": "test@test.com", "X-User-Id": "user_testfilings"},
+            headers={"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"},
         )
         # save_filing_analysis should have been called for each analysis type
         save_calls = mock_filings_deps["save_cache"].call_args_list
@@ -286,7 +286,7 @@ class TestFilingsCaching:
         }
         resp = client.get(
             "/api/company/AAPL/filings",
-            headers={"X-Google-Api-Key": "test-key", "X-Sec-Header": "test@test.com", "X-User-Id": "user_testfilings"},
+            headers={"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"},
         )
         assert resp.status_code == 200
         # Processor should not be called since everything is cached
@@ -307,7 +307,7 @@ class TestFilings8K:
         }
         data = client.get(
             "/api/company/AAPL/filings",
-            headers={"X-Google-Api-Key": "test-key", "X-Sec-Header": "test@test.com", "X-User-Id": "user_testfilings"},
+            headers={"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"},
         ).json()
         assert data["eightk"]["kind"] == "none"
         assert "reason" in data["eightk"]
@@ -327,7 +327,7 @@ class TestFilings8K:
         }
         data = client.get(
             "/api/company/AAPL/filings",
-            headers={"X-Google-Api-Key": "test-key", "X-Sec-Header": "test@test.com", "X-User-Id": "user_testfilings"},
+            headers={"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"},
         ).json()
         assert data["eightk"]["kind"] == "event"
         assert data["eightk"]["analysis"]["event_type"] == "Leadership Change"
@@ -347,20 +347,10 @@ class TestFilingsEndpointErrors:
             with patch("api.dependencies.os.getenv", return_value=None):
                 resp = client.get(
                     "/api/company/AAPL/filings",
-                    headers={"X-Sec-Header": "test@test.com", "X-User-Id": "user_testfilings"},
+                    headers={"X-User-Id": "user_testfilings"},
                 )
                 assert resp.status_code == 400
                 assert "API key required" in resp.json()["detail"]
-
-    def test_missing_sec_header_returns_400(self, client, mock_filings_deps):
-        with patch.dict("os.environ", {}, clear=True):
-            with patch("api.dependencies.os.getenv", return_value=None):
-                resp = client.get(
-                    "/api/company/AAPL/filings",
-                    headers={"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"},
-                )
-                assert resp.status_code == 400
-                assert "SEC header" in resp.json()["detail"]
 
     def test_invalid_ticker_returns_422(self, client):
         resp = client.get("/api/company/INVALID!!!/filings")
@@ -370,7 +360,7 @@ class TestFilingsEndpointErrors:
         """Filings analysis requires sign-in even when Clerk is disabled."""
         resp = client.get(
             "/api/company/AAPL/filings",
-            headers={"X-Google-Api-Key": "test-key", "X-Sec-Header": "test@test.com"},
+            headers={"X-Google-Api-Key": "test-key"},
         )
         assert resp.status_code == 401
         assert "sign in" in resp.json()["detail"].lower()
@@ -382,7 +372,7 @@ class TestFilingsEndpointErrors:
 class TestFilingsRateLimit:
     def test_filings_rate_limited_after_10_calls(self, client, mock_filings_deps):
         """11th request from the same caller within an hour returns 429."""
-        headers = {"X-Google-Api-Key": "test-key", "X-Sec-Header": "test@test.com", "X-User-Id": "user_testfilings"}
+        headers = {"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"}
         for _ in range(10):
             resp = client.get("/api/company/AAPL/filings", headers=headers)
             assert resp.status_code == 200
@@ -401,7 +391,7 @@ class TestFilingsPartialData:
         mock_filings_deps["sec"].get_twentyf_filing.side_effect = ValueError("No 20-F")
         data = client.get(
             "/api/company/NEWIPO/filings",
-            headers={"X-Google-Api-Key": "test-key", "X-Sec-Header": "test@test.com", "X-User-Id": "user_testfilings"},
+            headers={"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"},
         ).json()
         assert "tenk" not in data
         # 10-Q and earnings should still be present

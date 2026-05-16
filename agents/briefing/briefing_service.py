@@ -4,10 +4,10 @@ Uses PydanticOutputParser for structured, deterministic output (same pattern
 as SECDocumentProcessor in sec_llm_models.py).
 """
 
-import time
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
+from cachetools import TTLCache
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -110,8 +110,10 @@ class BriefingResult:
 # Cache
 # ---------------------------------------------------------------------------
 
-_briefing_cache: tuple | None = None
-_BRIEFING_CACHE_TTL = 900  # 15 minutes
+# Keyed on (user_id, model_id, sorted_tickers). News data is fetched per-call
+# and varies over time, so two users with the same watchlist must NOT share
+# a cached briefing — that was the cross-user leak this cache replaces.
+_briefing_cache: TTLCache = TTLCache(maxsize=64, ttl=900)
 
 
 # ---------------------------------------------------------------------------
@@ -130,24 +132,19 @@ class BriefingService:
         self.tavily_api_key = tavily_api_key
         self.parser = PydanticOutputParser(pydantic_object=DailyBriefingAnalysis)
 
-    def generate(self, tickers: list[str]) -> BriefingResult:
+    def generate(self, tickers: list[str], user_id: str, model_id: str) -> BriefingResult:
         """Build briefing for the given tickers.
 
         Returns a BriefingResult containing the structured analysis and
         the LLM's chain-of-thought reasoning.
 
-        Uses a 15-minute in-memory cache keyed on the sorted ticker list.
+        Cache key is (user_id, model_id, sorted_tickers); two users with
+        identical watchlists never share a generated briefing.
         """
-        global _briefing_cache
-        now = time.monotonic()
-        cache_key = tuple(sorted(tickers))
-
-        if (
-            _briefing_cache is not None
-            and _briefing_cache[0] == cache_key
-            and (now - _briefing_cache[1]) < _BRIEFING_CACHE_TTL
-        ):
-            return _briefing_cache[2]
+        cache_key = (user_id, model_id, tuple(sorted(tickers)))
+        cached = _briefing_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
         ticker_data = self._gather_ticker_data(tickers)
         regime_data = self._get_market_regime()
@@ -155,7 +152,7 @@ class BriefingService:
 
         result = self._synthesize(ticker_data, regime_data, news_data)
 
-        _briefing_cache = (cache_key, now, result)
+        _briefing_cache[cache_key] = result
         return result
 
     # --- Data gathering ---------------------------------------------------

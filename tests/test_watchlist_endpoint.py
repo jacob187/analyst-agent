@@ -115,7 +115,7 @@ class TestBriefingTimeout:
             def __init__(self, llm, tavily_api_key=None):
                 pass
 
-            def generate(self, tickers):
+            def generate(self, tickers, user_id, model_id):
                 time.sleep(0.5)  # > timeout, < test budget
                 return None
 
@@ -148,7 +148,7 @@ class TestBriefingTimeout:
             def __init__(self, llm, tavily_api_key=None):
                 pass
 
-            def generate(self, tickers):
+            def generate(self, tickers, user_id, model_id):
                 # Mimic the BriefingResult shape minimally for the persist path.
                 analysis = MagicMock()
                 analysis.model_dump_json.return_value = "{}"

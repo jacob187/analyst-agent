@@ -14,7 +14,6 @@ from api.routes import company as company_module
 
 
 _TICKER = "AAPL"
-_SEC_HEADER = "test@test.com"
 
 _EIGHTK_META = {
     "form": "8-K",
@@ -88,7 +87,7 @@ def _run_fetch(retriever: _FakeRetriever) -> dict[str, Any]:
         "agents.sec_workflow.get_SEC_data.SECDataRetrieval",
         return_value=retriever,
     ):
-        return company_module._fetch_filing_data(_TICKER, _SEC_HEADER)
+        return company_module._fetch_filing_data(_TICKER)
 
 
 # ── Branch 1: earnings 8-K ─────────────────────────────────────────────────

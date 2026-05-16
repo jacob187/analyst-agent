@@ -51,7 +51,7 @@ class TestEnvKeys:
     @pytest.mark.eval_unit
     def test_response_shape(self):
         body = client.get("/env-keys").json()
-        assert {"google", "openai", "anthropic", "sec_header", "tavily"} <= body.keys()
+        assert {"google", "openai", "anthropic", "tavily"} <= body.keys()
 
     @pytest.mark.eval_unit
     def test_all_values_are_booleans(self):

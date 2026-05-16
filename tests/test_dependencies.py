@@ -59,14 +59,12 @@ class TestGetApiKeys:
             x_google_api_key="g",
             x_openai_api_key="o",
             x_anthropic_api_key="a",
-            x_sec_header="sec",
             x_tavily_api_key="tav",
             x_model_id="gemini-3-flash-preview",
         )
         assert result.google_api_key == "g"
         assert result.openai_api_key == "o"
         assert result.anthropic_api_key == "a"
-        assert result.sec_header == "sec"
         assert result.tavily_api_key == "tav"
         assert result.model_id == "gemini-3-flash-preview"
 
@@ -84,7 +82,6 @@ class TestResolveWsKeys:
             "google_api_key": "g",
             "openai_api_key": "o",
             "anthropic_api_key": "a",
-            "sec_header": "sec",
             "tavily_api_key": "tav",
             "model_id": "gpt-4.1-mini",
         }
@@ -92,7 +89,6 @@ class TestResolveWsKeys:
         assert result.google_api_key == "g"
         assert result.openai_api_key == "o"
         assert result.anthropic_api_key == "a"
-        assert result.sec_header == "sec"
         assert result.tavily_api_key == "tav"
         assert result.model_id == "gpt-4.1-mini"
 
@@ -116,7 +112,6 @@ class TestApiKeysGetProviderKey:
             google_api_key="k",
             openai_api_key=None,
             anthropic_api_key=None,
-            sec_header=None,
             tavily_api_key=None,
             model_id=None,
         )
@@ -128,7 +123,6 @@ class TestApiKeysGetProviderKey:
             google_api_key=None,
             openai_api_key="k",
             anthropic_api_key=None,
-            sec_header=None,
             tavily_api_key=None,
             model_id=None,
         )
@@ -140,7 +134,6 @@ class TestApiKeysGetProviderKey:
             google_api_key=None,
             openai_api_key=None,
             anthropic_api_key="k",
-            sec_header=None,
             tavily_api_key=None,
             model_id=None,
         )
@@ -152,7 +145,6 @@ class TestApiKeysGetProviderKey:
             google_api_key="g",
             openai_api_key=None,
             anthropic_api_key=None,
-            sec_header=None,
             tavily_api_key=None,
             model_id=None,
         )
@@ -216,7 +208,7 @@ class TestRequireUserId:
     def test_returns_id_when_present(self):
         keys = ApiKeys(
             google_api_key=None, openai_api_key=None, anthropic_api_key=None,
-            sec_header=None, tavily_api_key=None, model_id=None,
+            tavily_api_key=None, model_id=None,
             user_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         )
         assert keys.require_user_id() == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -225,7 +217,7 @@ class TestRequireUserId:
     def test_raises_when_missing(self):
         keys = ApiKeys(
             google_api_key=None, openai_api_key=None, anthropic_api_key=None,
-            sec_header=None, tavily_api_key=None, model_id=None,
+            tavily_api_key=None, model_id=None,
             user_id=None,
         )
         with pytest.raises(ValueError):

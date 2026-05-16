@@ -171,13 +171,13 @@ def _get_latest_query(messages: List[BaseMessage]) -> str:
     return ""
 
 
-def _create_tools(ticker: str, llm: BaseChatModel, tavily_api_key: Optional[str] = None, sec_header: str = "", user_id: str | None = None):
+def _create_tools(ticker: str, llm: BaseChatModel, tavily_api_key: Optional[str] = None, user_id: str | None = None):
     """Create all available tools for the ticker."""
     from agents.tools.sec_tools import create_sec_tools
     from agents.tools.stock_tools import create_stock_tools
     from agents.tools.market_tools import create_market_tools
 
-    tools, _ = create_sec_tools(ticker, llm, sec_header)
+    tools, _ = create_sec_tools(ticker, llm)
     tools.extend(create_stock_tools(ticker))
     tools.extend(create_market_tools())
 
@@ -582,7 +582,6 @@ def create_planning_workflow(
     ticker: str,
     tavily_api_key: Optional[str] = None,
     synthesizer_llm: Optional[BaseChatModel] = None,
-    sec_header: str = "",
     user_id: str | None = None,
 ) -> StateGraph:
     """
@@ -601,10 +600,9 @@ def create_planning_workflow(
         synthesizer_llm: Optional separate LLM for the synthesizer node.
              This can have thinking enabled since it doesn't call tools.
              Falls back to `llm` if not provided.
-        sec_header: SEC EDGAR identity header for this session
     """
     # Create tools and planner
-    tools = _create_tools(ticker, llm, tavily_api_key, sec_header, user_id=user_id)
+    tools = _create_tools(ticker, llm, tavily_api_key, user_id=user_id)
     tools_dict = _build_tools_dict(tools)
     has_research = tavily_api_key is not None
 
@@ -874,7 +872,6 @@ def create_planning_agent(
     llm: BaseChatModel,
     tavily_api_key: Optional[str] = None,
     synthesizer_llm: Optional[BaseChatModel] = None,
-    sec_header: str = "",
     user_id: str | None = None,
 ) -> PlanningAgent:
     """
@@ -887,13 +884,12 @@ def create_planning_agent(
         synthesizer_llm: Optional thinking-enabled LLM for synthesis only.
              Gemini's thought signatures conflict with tool calls, so thinking
              must be isolated to the synthesizer which doesn't call tools.
-        sec_header: SEC EDGAR identity header for this session
         user_id: Anonymous user ID for scoping briefing queries
 
     Returns:
         PlanningAgent instance with invoke() and stream_sync() methods
     """
-    workflow = create_planning_workflow(llm, ticker, tavily_api_key, synthesizer_llm, sec_header, user_id=user_id)
+    workflow = create_planning_workflow(llm, ticker, tavily_api_key, synthesizer_llm, user_id=user_id)
     return PlanningAgent(workflow, ticker)
 
 
@@ -907,7 +903,6 @@ def create_sec_qa_agent(
     llm: BaseChatModel,
     tavily_api_key: Optional[str] = None,
     synthesizer_llm: Optional[BaseChatModel] = None,
-    sec_header: str = "",
     user_id: str | None = None,
 ) -> PlanningAgent:
     """
@@ -916,4 +911,4 @@ def create_sec_qa_agent(
     This maintains backward compatibility with existing code while
     providing the new planning functionality.
     """
-    return create_planning_agent(ticker, llm, tavily_api_key, synthesizer_llm, sec_header, user_id=user_id)
+    return create_planning_agent(ticker, llm, tavily_api_key, synthesizer_llm, user_id=user_id)
