@@ -37,7 +37,7 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
   const [chartData, setChartData] = useState<ChartResponse | null>(null);
   const [chartLoading, setChartLoading] = useState(false);
   const [period, setPeriod] = useState<Period>("1Y");
-  const [indicators, setIndicators] = useState<Set<Indicator>>(new Set(["MA", "RSI"]));
+  const [indicators, setIndicators] = useState<Set<Indicator>>(new Set());
 
   // Filings — lazy-loaded on tab activation via SSE stream
   const [filingsData, setFilingsData] = useState<FilingsResponse | null>(null);
