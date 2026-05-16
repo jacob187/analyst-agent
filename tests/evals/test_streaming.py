@@ -17,6 +17,14 @@ import pytest
 from unittest.mock import MagicMock, patch
 from dataclasses import dataclass
 
+
+def _async_iter(items):
+    """Wrap a list as an async iterator for mocking `workflow.astream()`."""
+    async def _gen():
+        for item in items:
+            yield item
+    return _gen()
+
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.tools import Tool
 
@@ -185,13 +193,14 @@ class TestStreamSync:
     @pytest.mark.eval_unit
     def test_simple_query_yields_node_and_response(self):
         """A simple query should yield router + react_agent node events and a response."""
-        # Mock workflow.stream to return updates for a simple path:
-        # router → react_agent
-        mock_workflow = MagicMock()
-        mock_workflow.stream.return_value = [
+        # Mock workflow.astream — stream_sync drives the async surface internally
+        # because the worker node became `async def` as part of Phase 2 hardening.
+        items = [
             ("updates", {"router": {"query_complexity": "simple"}}),
             ("updates", {"react_agent": {"final_response": "AAPL is at $185"}}),
         ]
+        mock_workflow = MagicMock()
+        mock_workflow.astream.side_effect = lambda *a, **kw: _async_iter(items)
 
         agent = PlanningAgent(mock_workflow, "AAPL")
         events = list(agent.stream_sync({"messages": [HumanMessage(content="price?")]}))
@@ -216,14 +225,15 @@ class TestStreamSync:
         """
         plan = _make_plan(2)
 
-        mock_workflow = MagicMock()
-        mock_workflow.stream.return_value = [
+        items = [
             ("updates", {"router": {"query_complexity": "complex"}}),
             ("updates", {"planner": {"plan": plan}}),
             ("updates", {"worker": {"step_results": {1: {"tool": "tool_1", "raw": "r1", "data": {}, "filing_ref": None, "error": None}}}}),
             ("updates", {"worker": {"step_results": {2: {"tool": "tool_2", "raw": "r2", "data": {}, "filing_ref": None, "error": None}}}}),
             ("updates", {"synthesizer": {"final_response": "Combined analysis..."}}),
         ]
+        mock_workflow = MagicMock()
+        mock_workflow.astream.side_effect = lambda *a, **kw: _async_iter(items)
 
         agent = PlanningAgent(mock_workflow, "AAPL")
         events = list(agent.stream_sync({"messages": [HumanMessage(content="analyze risks")]}))
@@ -240,13 +250,14 @@ class TestStreamSync:
     @pytest.mark.eval_unit
     def test_custom_events_passed_through(self):
         """Custom events from get_stream_writer (thinking/tokens) should be yielded as-is."""
-        mock_workflow = MagicMock()
-        mock_workflow.stream.return_value = [
+        items = [
             ("updates", {"router": {"query_complexity": "simple"}}),
             ("custom", {"type": "thinking", "message": "Let me think..."}),
             ("custom", {"type": "token", "message": "Apple"}),
             ("updates", {"react_agent": {"final_response": "Apple analysis"}}),
         ]
+        mock_workflow = MagicMock()
+        mock_workflow.astream.side_effect = lambda *a, **kw: _async_iter(items)
 
         agent = PlanningAgent(mock_workflow, "AAPL")
         events = list(agent.stream_sync({"messages": [HumanMessage(content="analyze")]}))
@@ -262,11 +273,12 @@ class TestStreamSync:
     @pytest.mark.eval_unit
     def test_node_messages_are_descriptive(self):
         """Node events should include human-readable status messages."""
-        mock_workflow = MagicMock()
-        mock_workflow.stream.return_value = [
+        items = [
             ("updates", {"router": {"query_complexity": "simple"}}),
             ("updates", {"react_agent": {"final_response": "done"}}),
         ]
+        mock_workflow = MagicMock()
+        mock_workflow.astream.side_effect = lambda *a, **kw: _async_iter(items)
 
         agent = PlanningAgent(mock_workflow, "AAPL")
         events = list(agent.stream_sync({"messages": [HumanMessage(content="test")]}))

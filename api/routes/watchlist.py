@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import logging
+import os
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,8 +16,14 @@ from api.dependencies import ApiKeys, get_api_keys
 from api.rate_limit import check_rest_rate_limit, rate_limit_key
 
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
+logger = logging.getLogger("analyst.watchlist")
 
 _TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,10}$")
+
+# Hard ceiling for the full briefing generation (LLM + yfinance fan-out).
+# A stuck LLM call would otherwise hold the worker thread, the user's HTTP
+# connection, and the model client indefinitely. Env-overridable.
+BRIEFING_TIMEOUT_SECONDS = float(os.getenv("BRIEFING_TIMEOUT_SECONDS", "120"))
 
 
 @router.get("")
@@ -98,7 +106,19 @@ async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
     try:
         # BriefingService.generate is sync (yfinance + LLM); offload so it doesn't
         # block other requests' progress on the asyncio loop during the ~10-30s call.
-        result = await asyncio.to_thread(service.generate, tickers)
+        # Wrap in wait_for so a stuck LLM call surfaces as 504 instead of pinning
+        # the worker thread + connection.
+        result = await asyncio.wait_for(
+            asyncio.to_thread(service.generate, tickers),
+            timeout=BRIEFING_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Briefing timed out after %ss (tickers=%d)",
+            BRIEFING_TIMEOUT_SECONDS,
+            len(tickers),
+        )
+        raise HTTPException(status_code=504, detail="Briefing generation timed out")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Briefing generation failed: {e}")
 

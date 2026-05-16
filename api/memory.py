@@ -27,6 +27,38 @@ def estimate_tokens(messages: list) -> int:
     return sum(len(str(m.content)) for m in messages) // 4
 
 
+def estimate_tokens_incremental(
+    history: list, prev_chars: int, prev_len: int
+) -> tuple[int, int, int]:
+    """Add only new messages to a running token tally.
+
+    Returns ``(tokens, chars, new_len)``:
+      - ``tokens`` is the same approximation as ``estimate_tokens(history)``.
+      - ``chars`` is the running character total to thread back into the next
+        call (tokens are derived as ``chars // 4``; per-message ``// 4``
+        accumulation drifts due to truncation, so we track chars).
+      - ``new_len`` is ``len(history)`` after this call.
+
+    Callers persist ``(chars, new_len)`` between turns so each subsequent
+    call walks only the tail (``history[prev_len:]``). This turns the
+    per-turn cost from O(N) to O(new) and the cumulative session cost from
+    O(N²) to O(N).
+
+    Pure function — no global state. Callers MUST reset to ``(0, 0)`` when
+    ``compress_history`` (or any other call) replaces ``history`` with a
+    shorter list, because the previous tally no longer corresponds to a
+    prefix of the new list. The function defensively re-baselines if
+    ``prev_len > len(history)`` so a forgotten reset still returns a
+    correct (but expensive) answer.
+    """
+    if prev_len > len(history):
+        total_chars = sum(len(str(m.content)) for m in history)
+        return total_chars // 4, total_chars, len(history)
+    added_chars = sum(len(str(m.content)) for m in history[prev_len:])
+    chars = prev_chars + added_chars
+    return chars // 4, chars, len(history)
+
+
 async def compress_history(
     session_id: str,
     conversation_history: list,

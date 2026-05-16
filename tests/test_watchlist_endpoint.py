@@ -1,7 +1,10 @@
 """Tests for watchlist REST endpoints."""
 
-from unittest.mock import AsyncMock, patch
+import time
+from unittest.mock import AsyncMock, MagicMock, patch
+
 from fastapi.testclient import TestClient
+
 from api.main import app
 
 
@@ -89,6 +92,93 @@ class TestBriefingEndpoint:
         mock_wl.return_value = [{"ticker": "AAPL", "added_at": "2026-01-01"}]
         resp = client.get("/watchlist/briefing", headers=HEADERS)
         assert resp.status_code == 400
+
+
+class TestBriefingTimeout:
+    @patch("api.routes.watchlist.get_watchlist", new_callable=AsyncMock)
+    def test_briefing_timeout_returns_504(self, mock_wl, monkeypatch):
+        """A stuck BriefingService.generate must surface as HTTP 504.
+
+        Note: `asyncio.to_thread` wraps `time.sleep` in a thread Python cannot
+        cancel, so the route's `wait_for` returns promptly to the user but the
+        thread keeps running until its sleep ends. The TestClient (sync, via
+        anyio portal) blocks until that thread drains, so wall-clock elapsed
+        here will match the stub sleep duration. The user-visible 504 still
+        fires at the timeout boundary — verified by the WARNING log line.
+        """
+        mock_wl.return_value = [{"ticker": "AAPL", "added_at": "2026-01-01"}]
+
+        # Compress timeout below the stub sleep so the wait_for path fires.
+        monkeypatch.setattr("api.routes.watchlist.BRIEFING_TIMEOUT_SECONDS", 0.1)
+
+        class _SlowService:
+            def __init__(self, llm, tavily_api_key=None):
+                pass
+
+            def generate(self, tickers):
+                time.sleep(0.5)  # > timeout, < test budget
+                return None
+
+        fake_service_module = MagicMock()
+        fake_service_module.BriefingService = _SlowService
+
+        fake_llm_factory = MagicMock()
+        fake_llm_factory.create_llm = MagicMock(return_value=object())
+        fake_llm_factory.ThinkingConfig = MagicMock()
+
+        import sys
+        monkeypatch.setitem(sys.modules, "agents.briefing.briefing_service", fake_service_module)
+        monkeypatch.setitem(sys.modules, "agents.llm_factory", fake_llm_factory)
+
+        resp = client.get(
+            "/watchlist/briefing",
+            headers={**HEADERS, "X-Google-Api-Key": "test"},
+        )
+
+        assert resp.status_code == 504
+        assert "timed out" in resp.json()["detail"].lower()
+
+    @patch("api.routes.watchlist.get_watchlist", new_callable=AsyncMock)
+    def test_briefing_success_under_timeout(self, mock_wl, monkeypatch):
+        """Fast-returning generate should NOT be 504-ed."""
+        mock_wl.return_value = [{"ticker": "AAPL", "added_at": "2026-01-01"}]
+        monkeypatch.setattr("api.routes.watchlist.BRIEFING_TIMEOUT_SECONDS", 2.0)
+
+        class _FastService:
+            def __init__(self, llm, tavily_api_key=None):
+                pass
+
+            def generate(self, tickers):
+                # Mimic the BriefingResult shape minimally for the persist path.
+                analysis = MagicMock()
+                analysis.model_dump_json.return_value = "{}"
+                analysis.market_regime = "neutral"
+                analysis.market_positioning = "balanced"
+                analysis.alerts = []
+                analysis.tickers = []
+                result = MagicMock()
+                result.analysis = analysis
+                result.thinking = None
+                return result
+
+        fake_service_module = MagicMock()
+        fake_service_module.BriefingService = _FastService
+
+        fake_llm_factory = MagicMock()
+        fake_llm_factory.create_llm = MagicMock(return_value=object())
+        fake_llm_factory.ThinkingConfig = MagicMock()
+
+        import sys
+        monkeypatch.setitem(sys.modules, "agents.briefing.briefing_service", fake_service_module)
+        monkeypatch.setitem(sys.modules, "agents.llm_factory", fake_llm_factory)
+
+        # Also patch save_briefing so the success path doesn't touch DB.
+        with patch("api.routes.watchlist.save_briefing", new_callable=AsyncMock):
+            resp = client.get(
+                "/watchlist/briefing",
+                headers={**HEADERS, "X-Google-Api-Key": "test"},
+            )
+        assert resp.status_code == 200
 
 
 class TestBriefingRateLimit:

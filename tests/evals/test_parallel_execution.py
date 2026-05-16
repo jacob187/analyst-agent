@@ -138,13 +138,18 @@ class TestDispatchSteps:
 
 @pytest.mark.eval_unit
 class TestWorkerNode:
-    """The worker runs a single step and returns {step_results: {id: StepResult}}."""
+    """The worker runs a single step and returns {step_results: {id: StepResult}}.
 
-    def test_returns_step_result_for_prose_tool(self):
+    The worker is `async def` and uses `tool.ainvoke(...)`. LangChain auto-bridges
+    sync tools (`func=`) to a thread pool, so the same Tool wrappers work
+    unchanged — only the dispatch surface is async now.
+    """
+
+    async def test_returns_step_result_for_prose_tool(self):
         tools_dict = {"tool_a": _as_tool("tool_a", lambda q="": "result_a")}
         worker = create_worker_node(tools_dict)
 
-        delta = worker({"step": _make_step(1, "tool_a")})
+        delta = await worker({"step": _make_step(1, "tool_a")})
 
         assert "step_results" in delta
         assert set(delta["step_results"].keys()) == {1}
@@ -155,7 +160,7 @@ class TestWorkerNode:
         assert result["filing_ref"] is None
         assert result["error"] is None
 
-    def test_parses_json_tool_output(self):
+    async def test_parses_json_tool_output(self):
         payload = (
             '{"filing_metadata": {"accession_number": "0000320193-25-000001",'
             ' "form_type": "8-K", "filing_date": "2025-04-01"},'
@@ -164,7 +169,7 @@ class TestWorkerNode:
         tools_dict = {"json_tool": _as_tool("json_tool", lambda q="": payload)}
         worker = create_worker_node(tools_dict)
 
-        delta = worker({"step": _make_step(7, "json_tool")})
+        delta = await worker({"step": _make_step(7, "json_tool")})
         result = delta["step_results"][7]
 
         assert result["data"]["event_type"] == "earnings_release"
@@ -172,30 +177,30 @@ class TestWorkerNode:
         assert result["raw"] == payload
         assert result["error"] is None
 
-    def test_handles_non_json_tool_output(self):
+    async def test_handles_non_json_tool_output(self):
         """Prose-returning tools land in raw with empty data."""
         tools_dict = {"tool_a": _as_tool("tool_a", lambda q="": "AAPL is at $185")}
         worker = create_worker_node(tools_dict)
 
-        result = worker({"step": _make_step(1, "tool_a")})["step_results"][1]
+        result = (await worker({"step": _make_step(1, "tool_a")}))["step_results"][1]
         assert result["raw"] == "AAPL is at $185"
         assert result["data"] == {}
         assert result["error"] is None
 
-    def test_handles_tool_exception(self):
+    async def test_handles_tool_exception(self):
         def boom(query=""):
             raise RuntimeError("boom")
 
         tools_dict = {"tool_a": _as_tool("tool_a", boom)}
         worker = create_worker_node(tools_dict)
 
-        result = worker({"step": _make_step(1, "tool_a")})["step_results"][1]
+        result = (await worker({"step": _make_step(1, "tool_a")}))["step_results"][1]
         assert "[ERROR: boom]" in result["raw"]
         assert result["error"] == "boom"
 
-    def test_missing_tool_returns_error_step_result(self):
+    async def test_missing_tool_returns_error_step_result(self):
         worker = create_worker_node({})
-        result = worker({"step": _make_step(1, "ghost_tool")})["step_results"][1]
+        result = (await worker({"step": _make_step(1, "ghost_tool")}))["step_results"][1]
         assert "[ERROR" in result["raw"]
         assert result["error"] == "Tool 'ghost_tool' not found"
 
@@ -226,7 +231,7 @@ class TestSendFanOutEndToEnd:
         graph.add_edge("worker", END)
         return graph.compile()
 
-    def test_workers_run_in_parallel(self):
+    async def test_workers_run_in_parallel(self):
         """Three Send-fanned workers should complete in ~1x delay, not ~3x."""
         tools_dict = {
             "tool_a": _slow_tool("tool_a", 0.2),
@@ -239,13 +244,13 @@ class TestSendFanOutEndToEnd:
         compiled = self._compile_minimal_graph(tools_dict)
 
         start = time.monotonic()
-        final = compiled.invoke(_make_state(plan))
+        final = await compiled.ainvoke(_make_state(plan))
         elapsed = time.monotonic() - start
 
         assert set(final["step_results"].keys()) == {1, 2, 3}
         assert elapsed < 0.5, f"Took {elapsed:.2f}s — workers likely ran sequentially"
 
-    def test_reducer_unions_concurrent_writes(self):
+    async def test_reducer_unions_concurrent_writes(self):
         """All workers' step_results land in state via the merge reducer."""
         tools_dict = {
             "tool_a": _as_tool("tool_a", lambda q="": "ra"),
@@ -254,7 +259,7 @@ class TestSendFanOutEndToEnd:
         plan = _make_plan([_make_step(1, "tool_a"), _make_step(2, "tool_b")])
         compiled = self._compile_minimal_graph(tools_dict)
 
-        final = compiled.invoke(_make_state(plan))
+        final = await compiled.ainvoke(_make_state(plan))
 
         assert final["step_results"][1]["raw"] == "ra"
         assert final["step_results"][2]["raw"] == "rb"

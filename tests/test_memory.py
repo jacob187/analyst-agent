@@ -19,6 +19,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 from api.memory import (
     estimate_tokens,
+    estimate_tokens_incremental,
     build_context_from_session,
     compress_history,
     RECENT_MESSAGES_TO_KEEP,
@@ -65,6 +66,65 @@ class TestEstimateTokens:
         # Each message is 4000 chars ≈ 1000 tokens; 50 messages ≈ 50K tokens
         msgs = [HumanMessage(content="X" * 4000) for _ in range(50)]
         assert estimate_tokens(msgs) > TOKEN_THRESHOLD
+
+
+# ---------------------------------------------------------------------------
+# estimate_tokens_incremental
+# ---------------------------------------------------------------------------
+
+@pytest.mark.eval_unit
+class TestEstimateTokensIncremental:
+    """The incremental variant must agree with the full-walk version while
+    only iterating over the new tail."""
+
+    def test_first_call_from_empty_state_matches_full(self):
+        history = [HumanMessage(content="A" * 400), AIMessage(content="B" * 800)]
+        tokens, chars, new_len = estimate_tokens_incremental(history, 0, 0)
+        assert tokens == estimate_tokens(history)
+        assert chars == 400 + 800
+        assert new_len == 2
+
+    def test_incremental_only_walks_new_messages(self):
+        prefix = [HumanMessage(content="X" * 100) for _ in range(30)]
+        prefix_chars = 30 * 100
+        extended = prefix + [HumanMessage(content="Y" * 100) for _ in range(5)]
+
+        tokens, chars, new_len = estimate_tokens_incremental(
+            extended, prefix_chars, 30
+        )
+        # Total chars = 35 * 100 = 3500 → tokens = 875
+        assert chars == 35 * 100
+        assert tokens == 35 * 100 // 4
+        assert new_len == 35
+        # Agrees with the full walk exactly (no truncation drift).
+        assert tokens == estimate_tokens(extended)
+
+    def test_repeated_calls_converge_to_full_total(self):
+        history: list = []
+        chars, counted = 0, 0
+        for i in range(50):
+            history.append(HumanMessage(content=f"turn {i} " + "Z" * 30))
+            tokens, chars, counted = estimate_tokens_incremental(
+                history, chars, counted
+            )
+            assert tokens == estimate_tokens(history)
+            assert counted == len(history)
+
+    def test_reset_after_history_shrinks(self):
+        """If history is shorter than prev_len (e.g. after compression), the
+        function must re-baseline rather than returning a corrupt tally."""
+        compressed = [HumanMessage(content="[CONVERSATION SUMMARY]\n...")] + [
+            HumanMessage(content="recent") for _ in range(3)
+        ]
+        tokens, chars, counted = estimate_tokens_incremental(compressed, 9_999, 100)
+        assert tokens == estimate_tokens(compressed)
+        assert counted == len(compressed)
+
+    def test_empty_history_returns_zero(self):
+        tokens, chars, counted = estimate_tokens_incremental([], 0, 0)
+        assert tokens == 0
+        assert chars == 0
+        assert counted == 0
 
 
 # ---------------------------------------------------------------------------

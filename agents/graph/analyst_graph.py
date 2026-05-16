@@ -331,12 +331,19 @@ def create_worker_node(tools_dict: Dict[str, Any]):
     tool referenced by that step. It returns `{"step_results": {step_id: ...}}`,
     which `merge_step_results` unions into the parent state.
 
+    Async dispatch: the worker is `async def` and calls `tool.ainvoke(...)`.
+    LangChain `Tool` auto-bridges sync `func=` callables to a thread pool, so
+    purely-sync tools (SEC, stock, market, briefing) keep working unchanged.
+    Tools that register an async `coroutine=` — currently `deep_research` —
+    run on the event loop and stop pinning a worker thread during their poll
+    loop.
+
     Tracing context (LangChain run ids) is propagated automatically by
     LangGraph's runtime across Send invocations — no manual `contextvars`
     handling needed, unlike the previous ThreadPoolExecutor implementation.
     """
 
-    def worker(payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def worker(payload: Dict[str, Any]) -> Dict[str, Any]:
         step: AnalysisStep = payload["step"]
 
         if step.tool not in tools_dict:
@@ -344,7 +351,7 @@ def create_worker_node(tools_dict: Dict[str, Any]):
             result = _build_step_result(step.tool, f"[ERROR: {msg}]", error=msg)
         else:
             try:
-                raw = str(tools_dict[step.tool].invoke(""))
+                raw = str(await tools_dict[step.tool].ainvoke(""))
                 result = _build_step_result(step.tool, raw)
             except Exception as e:
                 msg = str(e)
@@ -741,7 +748,14 @@ class PlanningAgent:
         """
         Yield streaming events as the graph executes.
 
-        Uses workflow.stream() with two stream modes:
+        Uses workflow.astream() driven by an internal event loop so the sync
+        generator surface can dispatch async nodes (the worker became async
+        as part of Phase 2 hardening so the Tavily polling tool no longer
+        pins a thread pool slot for 60s). Events are drained eagerly then
+        yielded — real-time streaming semantics are preserved by the async
+        `stream()` method below, which is what production uses.
+
+        Stream modes:
         - "updates": emitted after each node completes → we yield node/tool events
         - "custom": emitted by get_stream_writer() inside nodes → thinking/token events
 
@@ -755,12 +769,29 @@ class PlanningAgent:
         messages = inputs.get("messages", [])
         initial_state = self._build_initial_state(messages)
 
+        # Drive the async stream one step at a time on a private event loop so
+        # we preserve real-time emission (downstream UX depends on tool events
+        # arriving as workers complete, not in a single batch). asyncio.run
+        # would drain the generator before yielding anything.
+        loop = asyncio.new_event_loop()
+
+        def _step_chunks():
+            async_iter = self.workflow.astream(
+                initial_state, stream_mode=["updates", "custom"]
+            ).__aiter__()
+            try:
+                while True:
+                    try:
+                        yield loop.run_until_complete(async_iter.__anext__())
+                    except StopAsyncIteration:
+                        return
+            finally:
+                loop.close()
+
         # Track the plan so worker-update deltas can be mapped back to step metadata
         current_plan: Optional[QueryPlan] = None
 
-        for mode, chunk in self.workflow.stream(
-            initial_state, stream_mode=["updates", "custom"]
-        ):
+        for mode, chunk in _step_chunks():
             if mode == "custom":
                 # Events from get_stream_writer() (thinking, tokens)
                 yield chunk

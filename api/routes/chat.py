@@ -13,7 +13,7 @@ from api.db import (
     save_message, get_session_messages,
 )
 from api.memory import (
-    estimate_tokens, compress_history, build_context_from_session,
+    estimate_tokens_incremental, compress_history, build_context_from_session,
 )
 from api.dependencies import resolve_ws_keys, verify_ws_identity
 from api.rate_limit import check_rate_limit
@@ -211,6 +211,12 @@ async def chat(websocket: WebSocket, ticker: str):
 
         # Chat loop
         token_threshold = get_token_threshold(model_id)
+        # Incremental token tally — avoids re-walking the full history each turn.
+        # estimate_tokens_incremental walks only new messages instead of all,
+        # turning the cumulative session cost O(N²) → O(N). `chars_so_far` is
+        # the running character total threaded between turns; tokens are
+        # derived inside the helper.
+        chars_so_far, messages_counted = 0, 0
         client_ip = websocket.client.host if websocket.client else "unknown"
         while True:
             try:
@@ -288,10 +294,19 @@ async def chat(websocket: WebSocket, ticker: str):
                             save_message(session_id, "assistant", full_response)
                         )
 
-                        if estimate_tokens(conversation_history) > token_threshold:
+                        tokens_so_far, chars_so_far, messages_counted = (
+                            estimate_tokens_incremental(
+                                conversation_history, chars_so_far, messages_counted
+                            )
+                        )
+
+                        if tokens_so_far > token_threshold:
                             conversation_history = await compress_history(
                                 session_id, conversation_history, llm
                             )
+                            # Compression replaces history with a shorter list.
+                            # Reset the running tally so the next turn re-baselines.
+                            chars_so_far, messages_counted = 0, 0
 
             except WebSocketDisconnect:
                 break

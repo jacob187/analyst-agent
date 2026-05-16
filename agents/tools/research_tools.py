@@ -1,7 +1,7 @@
 """Tavily research tools for deep web research on companies and financial topics."""
 
+import asyncio
 import hashlib
-import time
 
 from cachetools import TTLCache
 from langchain_core.tools import Tool
@@ -10,6 +10,10 @@ from tavily import TavilyClient
 
 # Bounded research cache: 15-min TTL matches briefing-cache convention.
 _research_cache: TTLCache = TTLCache(maxsize=256, ttl=900)
+
+# Tavily deep-research polling configuration.
+_RESEARCH_POLL_INTERVAL_SECONDS = 2.0
+_RESEARCH_MAX_POLLS = 30
 
 
 def _get_cache_key(ticker: str, query: str) -> str:
@@ -74,18 +78,36 @@ def _tool_tavily_search(
         return f"Failed to perform web search: {e}"
 
 
-def _tool_tavily_research(
+def _format_research_result(ticker: str, topic: str, result: dict) -> str:
+    content = result.get("content", "")
+    sources = result.get("sources", [])
+
+    output_lines = [f"Deep Research Report: {ticker} - {topic}", "=" * 60, "", content]
+
+    if sources:
+        output_lines.extend(["", "Sources:", "-" * 40])
+        for i, source in enumerate(sources[:10], 1):
+            output_lines.append(f"{i}. {source.get('title', 'No title')}")
+            output_lines.append(f"   {source.get('url', '')}")
+
+    return "\n".join(output_lines)
+
+
+async def _tool_tavily_research_async(
     ticker: str,
     topic: str,
     tavily_api_key: str,
 ) -> str:
-    """
-    Perform deep research on a company topic using Tavily's Research API.
+    """Async variant of `_tool_tavily_research`.
 
-    Args:
-        ticker: Company ticker symbol
-        topic: Research topic
-        tavily_api_key: Tavily API key
+    The Tavily research endpoint returns a request_id immediately and then
+    requires the caller to poll until status=="completed" (or "failed"). The
+    sync version slept the worker thread for up to 60s; this version releases
+    the thread between polls so the asyncio thread pool stays free for other
+    tools (charts, briefing, SEC analysis).
+
+    HTTP calls themselves stay sync via `asyncio.to_thread` since the Tavily
+    SDK does not expose async methods.
     """
     cache_key = _get_cache_key(ticker, topic)
 
@@ -97,42 +119,41 @@ def _tool_tavily_research(
         client = TavilyClient(api_key=tavily_api_key)
         research_query = f"Comprehensive analysis of {ticker}: {topic}"
 
-        response = client.research(input=research_query)
+        response = await asyncio.to_thread(client.research, input=research_query)
         request_id = response.get("request_id")
 
         if not request_id:
             return "Failed to initiate deep research: no request_id returned"
 
-        # Poll for completion
-        for _ in range(30):
-            result = client.get_research(request_id)
+        for _ in range(_RESEARCH_MAX_POLLS):
+            result = await asyncio.to_thread(client.get_research, request_id)
             status = result.get("status", "")
 
             if status == "completed":
-                content = result.get("content", "")
+                result_text = _format_research_result(ticker, topic, result)
                 sources = result.get("sources", [])
-
-                output_lines = [f"Deep Research Report: {ticker} - {topic}", "=" * 60, "", content]
-
-                if sources:
-                    output_lines.extend(["", "Sources:", "-" * 40])
-                    for i, source in enumerate(sources[:10], 1):
-                        output_lines.append(f"{i}. {source.get('title', 'No title')}")
-                        output_lines.append(f"   {source.get('url', '')}")
-
-                result_text = "\n".join(output_lines)
                 _research_cache[cache_key] = {"content": result_text, "sources": len(sources)}
                 return result_text
 
             if status == "failed":
                 return f"Deep research failed: {result.get('error', 'Unknown error')}"
 
-            time.sleep(2)
+            await asyncio.sleep(_RESEARCH_POLL_INTERVAL_SECONDS)
 
         return "Deep research timed out. Please try again."
 
     except Exception as e:
         return f"Failed to perform deep research: {e}"
+
+
+def _tool_tavily_research(
+    ticker: str,
+    topic: str,
+    tavily_api_key: str,
+) -> str:
+    """Sync fallback for legacy callers (`Tool.invoke`). Inside the LangGraph
+    worker the async coroutine is always preferred via `Tool.ainvoke`."""
+    return asyncio.run(_tool_tavily_research_async(ticker, topic, tavily_api_key))
 
 
 def _tool_company_news(ticker: str, tavily_api_key: str) -> str:
@@ -319,6 +340,7 @@ def create_research_tools(ticker: str, tavily_api_key: str) -> list[Tool]:
                 "Input should be the research topic."
             ),
             func=lambda topic: _tool_tavily_research(ticker, topic, tavily_api_key),
+            coroutine=lambda topic: _tool_tavily_research_async(ticker, topic, tavily_api_key),
         ),
         Tool.from_function(
             name="get_company_news",

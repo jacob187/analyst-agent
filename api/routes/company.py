@@ -15,8 +15,7 @@ import logging
 import time
 from typing import Any
 
-from collections import defaultdict
-
+from cachetools import TTLCache
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -31,16 +30,46 @@ router = APIRouter(prefix="/api/company")
 # Server-side cache: {ticker: (monotonic_timestamp, payload)}
 # Values are JSON-round-tripped dicts to guarantee serializability.
 _profile_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-_profile_locks: dict[str, asyncio.Lock] = {}
 _PROFILE_CACHE_TTL = 300  # 5 minutes
+
+# Bounded per-ticker lock store. TTL-based eviction prevents unbounded growth
+# under ticker rotation — once a ticker hasn't been requested for the TTL
+# window, its lock is dropped from the cache. Any in-flight request that
+# already pulled the Lock onto its stack keeps the object alive; eviction
+# only means the *next* unrelated request for the same ticker creates a fresh
+# lock. Safe because the lock is a per-ticker dedup gate, not a global mutex.
+_profile_locks: TTLCache = TTLCache(maxsize=4096, ttl=600)
 
 # Per-IP concurrency limiter for SSE streams.
 # Each stream holds up to 6 LLM calls — capping concurrent streams per IP
 # prevents a single client from exhausting the thread pool or burning API credits.
 _MAX_CONCURRENT_STREAMS = 2
-_stream_semaphores: dict[str, asyncio.Semaphore] = defaultdict(
-    lambda: asyncio.Semaphore(_MAX_CONCURRENT_STREAMS)
-)
+
+# Bounded per-IP semaphore store. Same eviction semantics as `_profile_locks`.
+# Replaces the prior `defaultdict(lambda: Semaphore(...))` which grew without
+# bound — every novel IP added a Semaphore that was never reclaimed.
+_stream_semaphores: TTLCache = TTLCache(maxsize=4096, ttl=600)
+
+
+def _get_stream_semaphore(client_ip: str) -> asyncio.Semaphore:
+    """Return the per-IP stream semaphore, creating one on first sight.
+
+    Wraps the TTLCache lookup so callers don't repeat the get-or-create dance.
+    """
+    sem = _stream_semaphores.get(client_ip)
+    if sem is None:
+        sem = asyncio.Semaphore(_MAX_CONCURRENT_STREAMS)
+        _stream_semaphores[client_ip] = sem
+    return sem
+
+
+def _get_profile_lock(ticker: str) -> asyncio.Lock:
+    """Return the per-ticker profile lock, creating one on first sight."""
+    lock = _profile_locks.get(ticker)
+    if lock is None:
+        lock = asyncio.Lock()
+        _profile_locks[ticker] = lock
+    return lock
 
 
 def _safe(fn, default):
@@ -161,7 +190,7 @@ async def get_company_profile(ticker: str, keys: ApiKeys = Depends(get_api_keys)
     ticker = ticker.upper()
 
     # Per-ticker lock prevents duplicate in-flight fetches for the same ticker.
-    lock = _profile_locks.setdefault(ticker, asyncio.Lock())
+    lock = _get_profile_lock(ticker)
     async with lock:
         # Check server-side cache (inside lock to avoid thundering herd)
         now = time.monotonic()
@@ -657,7 +686,7 @@ async def stream_company_filings(
     # Per-IP concurrency guard — prevents a single client from opening
     # many concurrent streams and exhausting the thread pool or API credits.
     client_ip = request.client.host if request.client else "unknown"
-    semaphore = _stream_semaphores[client_ip]
+    semaphore = _get_stream_semaphore(client_ip)
     if semaphore.locked():
         raise HTTPException(
             status_code=429,
