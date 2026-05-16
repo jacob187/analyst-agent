@@ -107,7 +107,12 @@ def _format_candles(df: pd.DataFrame, intraday: bool = False) -> list[dict]:
 
     For daily data, uses "YYYY-MM-DD" strings (Lightweight Charts date format).
     For intraday data, uses Unix timestamps (Lightweight Charts UTCTimestamp).
+
+    Drops rows with NaN in any OHLC column — those candles are unrenderable
+    and would also break JSON serialization (NaN is not valid JSON).
     """
+    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+
     if intraday:
         # Convert timezone-aware datetimes to UTC unix timestamps
         times = (df.index.astype("int64") // 10**9).tolist()
@@ -120,7 +125,7 @@ def _format_candles(df: pd.DataFrame, intraday: bool = False) -> list[dict]:
         "high": df["High"].round(2),
         "low": df["Low"].round(2),
         "close": df["Close"].round(2),
-        "volume": df["Volume"].astype(int),
+        "volume": df["Volume"].fillna(0).astype(int),
     })
     return candle_df.to_dict("records")
 
