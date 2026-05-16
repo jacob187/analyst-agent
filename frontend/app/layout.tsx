@@ -6,6 +6,10 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { Navbar } from "@/components/layout/Navbar";
 import { Footer } from "@/components/layout/Footer";
 
+// Skips loading Clerk entirely when set — for self-hosters who don't want to
+// create a Clerk account. Pair with `DISABLE_AUTH=true` on the backend.
+const authDisabled = process.env.NEXT_PUBLIC_DISABLE_AUTH === "true";
+
 const bricolage = Bricolage_Grotesque({
   variable: "--font-bricolage",
   subsets: ["latin"],
@@ -31,26 +35,26 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  return (
-    <ClerkProvider afterSignOutUrl="/">
-      <html
-        lang="en"
-        className={`${bricolage.variable} ${dmSans.variable}`}
-        suppressHydrationWarning
-      >
-        <body className="flex min-h-screen flex-col antialiased">
-          <ThemeProvider
-            attribute="class"
-            defaultTheme="dark"
-            enableSystem
-            disableTransitionOnChange
-          >
-            <Navbar />
-            <main className="flex-1">{children}</main>
-            <Footer />
-          </ThemeProvider>
-        </body>
-      </html>
-    </ClerkProvider>
+  const shell = (
+    <html
+      lang="en"
+      className={`${bricolage.variable} ${dmSans.variable}`}
+      suppressHydrationWarning
+    >
+      <body className="flex min-h-screen flex-col antialiased">
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="dark"
+          enableSystem
+          disableTransitionOnChange
+        >
+          <Navbar />
+          <main className="flex-1">{children}</main>
+          <Footer />
+        </ThemeProvider>
+      </body>
+    </html>
   );
+
+  return authDisabled ? shell : <ClerkProvider afterSignOutUrl="/">{shell}</ClerkProvider>;
 }

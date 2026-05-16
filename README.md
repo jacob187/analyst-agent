@@ -169,6 +169,20 @@ The backend loads `.env` at startup and uses these as fallbacks when no key is p
 
 > **Note:** `.env` is gitignored — your keys will never be committed.
 
+### Running Without Clerk (self-host / no account needed)
+
+The hosted demo uses [Clerk](https://clerk.com) for authentication. **For local development you don't need a Clerk account** — set these two flags and the app runs as a single anonymous user with no sign-in flow:
+
+```bash
+# .env (backend) — skips JWT verification
+DISABLE_AUTH=true
+
+# frontend/.env.local — skips ClerkProvider entirely
+NEXT_PUBLIC_DISABLE_AUTH=true
+```
+
+With both set, `<Show>`/`<UserButton>`/`<SignInButton>` become no-ops, the middleware lets every route through, and per-user data (watchlist, sessions) is keyed on a stable local-dev user id.
+
 ## API Documentation
 
 Interactive API docs are available at `http://localhost:8000/docs` when running locally.

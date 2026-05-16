@@ -10,7 +10,7 @@ import { FilingsTab } from "./FilingsTab";
 import { StockChart } from "@/components/chart/StockChart";
 import { ChartControls } from "@/components/chart/ChartControls";
 import { ChatWindow } from "@/components/chat/ChatWindow";
-import { Show, SignInButton, useAuth } from "@clerk/nextjs";
+import { Show, SignInButton, useAuth } from "@/lib/auth";
 import { Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";

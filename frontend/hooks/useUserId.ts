@@ -1,7 +1,8 @@
 "use client";
 
-import { useAuth } from "@clerk/nextjs";
 import { useEffect } from "react";
+
+import { LOCAL_DEV_USER_ID, authDisabled, useAuth } from "@/lib/auth";
 
 // Cached Clerk user ID under a separate key. The old `analyst_agent_user_id`
 // UUID key is intentionally left untouched — Phase 1.5 migrates it.
@@ -9,7 +10,9 @@ const CACHE_KEY = "clerk_user_id";
 
 // Optional stable dev override. When set, every request uses this ID,
 // bypassing Clerk entirely. Never set in production.
-const DEV_USER_ID = process.env.NEXT_PUBLIC_DEV_USER_ID;
+// `NEXT_PUBLIC_DISABLE_AUTH=true` implies `LOCAL_DEV_USER_ID` automatically.
+const DEV_USER_ID = process.env.NEXT_PUBLIC_DEV_USER_ID
+  ?? (authDisabled ? LOCAL_DEV_USER_ID : undefined);
 
 let cachedUserId = "";
 
