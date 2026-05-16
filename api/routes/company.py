@@ -465,6 +465,11 @@ async def get_company_filings(
     if not TICKER_RE.match(ticker.upper()):
         raise HTTPException(status_code=422, detail="Invalid ticker symbol")
 
+    try:
+        keys.require_user_id()
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Sign in required to load filing analysis")
+
     client_ip = request.client.host if request.client else "unknown"
     if not check_rest_rate_limit(
         rate_limit_key(keys.user_id, client_ip),
@@ -622,6 +627,11 @@ async def stream_company_filings(
     """
     if not TICKER_RE.match(ticker.upper()):
         raise HTTPException(status_code=422, detail="Invalid ticker symbol")
+
+    try:
+        keys.require_user_id()
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Sign in required to load filing analysis")
 
     ticker = ticker.upper()
 

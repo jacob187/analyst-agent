@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { BarChart2, Menu } from "lucide-react";
-import { UserButton } from "@clerk/nextjs";
+import { Show, SignInButton, UserButton } from "@clerk/nextjs";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,12 +16,18 @@ import {
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 
-const NAV_LINKS = [
+// Links shown to everyone (signed-out + signed-in).
+const PUBLIC_LINKS = [
   { href: "/", label: "Analyze" },
+  { href: "/about", label: "About" },
+];
+
+// Signed-in-only links. Each lands on a protected route, so we don't show
+// them to signed-out visitors — clicking would just bounce them to /sign-in.
+const AUTH_LINKS = [
   { href: "/watchlist", label: "Watchlist" },
   { href: "/companies", label: "Companies" },
   { href: "/history", label: "History" },
-  { href: "/about", label: "About" },
 ];
 
 export function Navbar() {
@@ -43,7 +49,7 @@ export function Navbar() {
 
         {/* Desktop nav */}
         <nav className="hidden items-center gap-1 md:flex">
-          {NAV_LINKS.map((link) => (
+          {PUBLIC_LINKS.map((link) => (
             <Link
               key={link.href}
               href={link.href}
@@ -57,20 +63,45 @@ export function Navbar() {
               {link.label}
             </Link>
           ))}
+          <Show when="signed-in">
+            {AUTH_LINKS.map((link) => (
+              <Link
+                key={link.href}
+                href={link.href}
+                className={cn(
+                  "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+                  pathname === link.href
+                    ? "bg-primary/10 text-primary"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                )}
+              >
+                {link.label}
+              </Link>
+            ))}
+          </Show>
         </nav>
 
         <div className="flex items-center gap-2">
           <ThemeToggle />
-          <Link href="/settings" className="hidden md:block">
-            <Button size="sm" className="rounded-full font-medium">
-              Settings
-            </Button>
-          </Link>
-          <div className="hidden md:flex items-center">
-            <UserButton
-              appearance={{ elements: { avatarBox: "h-8 w-8" } }}
-            />
-          </div>
+          <Show when="signed-in">
+            <Link href="/settings" className="hidden md:block">
+              <Button size="sm" className="rounded-full font-medium">
+                Settings
+              </Button>
+            </Link>
+            <div className="hidden md:flex items-center">
+              <UserButton
+                appearance={{ elements: { avatarBox: "h-8 w-8" } }}
+              />
+            </div>
+          </Show>
+          <Show when="signed-out">
+            <SignInButton mode="modal">
+              <Button size="sm" className="hidden md:inline-flex rounded-full font-medium">
+                Sign in
+              </Button>
+            </SignInButton>
+          </Show>
 
           {/* Mobile hamburger */}
           <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
@@ -89,7 +120,7 @@ export function Navbar() {
                 </SheetTitle>
               </SheetHeader>
               <nav className="mt-6 flex flex-col gap-1">
-                {NAV_LINKS.map((link) => (
+                {PUBLIC_LINKS.map((link) => (
                   <Link
                     key={link.href}
                     href={link.href}
@@ -104,19 +135,49 @@ export function Navbar() {
                     {link.label}
                   </Link>
                 ))}
-                <Link
-                  href="/settings"
-                  onClick={() => setMobileOpen(false)}
-                  className="mt-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
-                >
-                  Settings
-                </Link>
-                <div className="mt-4 flex items-center gap-2 px-3">
-                  <UserButton
-                    appearance={{ elements: { avatarBox: "h-8 w-8" } }}
-                  />
-                  <span className="text-sm text-muted-foreground">Account</span>
-                </div>
+                <Show when="signed-in">
+                  {AUTH_LINKS.map((link) => (
+                    <Link
+                      key={link.href}
+                      href={link.href}
+                      onClick={() => setMobileOpen(false)}
+                      className={cn(
+                        "rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                        pathname === link.href
+                          ? "bg-primary/10 text-primary"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                      )}
+                    >
+                      {link.label}
+                    </Link>
+                  ))}
+                </Show>
+                <Show when="signed-in">
+                  <Link
+                    href="/settings"
+                    onClick={() => setMobileOpen(false)}
+                    className="mt-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+                  >
+                    Settings
+                  </Link>
+                  <div className="mt-4 flex items-center gap-2 px-3">
+                    <UserButton
+                      appearance={{ elements: { avatarBox: "h-8 w-8" } }}
+                    />
+                    <span className="text-sm text-muted-foreground">Account</span>
+                  </div>
+                </Show>
+                <Show when="signed-out">
+                  <SignInButton mode="modal">
+                    <Button
+                      size="sm"
+                      className="mt-4 mx-3 rounded-full font-medium"
+                      onClick={() => setMobileOpen(false)}
+                    >
+                      Sign in
+                    </Button>
+                  </SignInButton>
+                </Show>
               </nav>
             </SheetContent>
           </Sheet>

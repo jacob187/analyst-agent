@@ -1,12 +1,10 @@
 import type { Metadata } from "next";
 import { Bricolage_Grotesque, DM_Sans } from "next/font/google";
-import { ClerkProvider, Show, RedirectToSignIn } from "@clerk/nextjs";
+import { ClerkProvider } from "@clerk/nextjs";
 import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Navbar } from "@/components/layout/Navbar";
 import { Footer } from "@/components/layout/Footer";
-
-const disableAuth = process.env.NEXT_PUBLIC_DISABLE_AUTH === "true";
 
 const bricolage = Bricolage_Grotesque({
   variable: "--font-bricolage",
@@ -34,7 +32,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <ClerkProvider>
+    <ClerkProvider afterSignOutUrl="/">
       <html
         lang="en"
         className={`${bricolage.variable} ${dmSans.variable}`}
@@ -47,24 +45,9 @@ export default function RootLayout({
             enableSystem
             disableTransitionOnChange
           >
-            {disableAuth ? (
-              <>
-                <Navbar />
-                <main className="flex-1">{children}</main>
-                <Footer />
-              </>
-            ) : (
-              <>
-                <Show when="signed-in">
-                  <Navbar />
-                  <main className="flex-1">{children}</main>
-                  <Footer />
-                </Show>
-                <Show when="signed-out">
-                  <RedirectToSignIn />
-                </Show>
-              </>
-            )}
+            <Navbar />
+            <main className="flex-1">{children}</main>
+            <Footer />
           </ThemeProvider>
         </body>
       </html>

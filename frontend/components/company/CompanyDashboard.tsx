@@ -10,6 +10,9 @@ import { FilingsTab } from "./FilingsTab";
 import { StockChart } from "@/components/chart/StockChart";
 import { ChartControls } from "@/components/chart/ChartControls";
 import { ChatWindow } from "@/components/chat/ChatWindow";
+import { Show, SignInButton, useAuth } from "@clerk/nextjs";
+import { Lock } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { useApiKeys } from "@/hooks/useApiKeys";
 import { formatCurrency, formatPercent } from "@/lib/utils";
@@ -23,6 +26,7 @@ interface CompanyDashboardProps {
 
 export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardProps) {
   const { keys, loaded: keysLoaded, hasRequiredKeys } = useApiKeys();
+  const { isSignedIn } = useAuth();
 
   // Profile — fetched client-side so it doesn't block the initial page render
   const [profile, setProfile] = useState<CompanyProfileResponse | null>(null);
@@ -148,10 +152,10 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
   }, []);
 
   useEffect(() => {
-    if (activeTab === "filings" && keysLoaded && !filingsLoadedRef.current) {
+    if (activeTab === "filings" && keysLoaded && isSignedIn && !filingsLoadedRef.current) {
       loadFilings();
     }
-  }, [activeTab, keysLoaded, loadFilings]);
+  }, [activeTab, keysLoaded, isSignedIn, loadFilings]);
 
   const loadChart = useCallback(
     (p: Period) => {
@@ -251,7 +255,25 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
         </TabsContent>
 
         <TabsContent value="filings" className="mt-4">
-          <FilingsTab data={filingsData} loading={filingsLoading} progressSteps={filingsProgress} />
+          <Show when="signed-out">
+            <div className="flex flex-col items-center justify-center gap-4 rounded-xl border border-border/60 bg-card p-12 text-center">
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
+                <Lock className="h-5 w-5 text-primary" />
+              </div>
+              <p className="text-sm font-medium">Sign in to view filing analysis</p>
+              <p className="max-w-md text-xs text-muted-foreground">
+                LLM-analyzed 10-K, 10-Q, and 8-K summaries are saved to your account so you don&apos;t pay to re-analyze the same filing twice.
+              </p>
+              <SignInButton mode="modal">
+                <Button size="sm" className="rounded-full font-medium">
+                  Sign in to view filings
+                </Button>
+              </SignInButton>
+            </div>
+          </Show>
+          <Show when="signed-in">
+            <FilingsTab data={filingsData} loading={filingsLoading} progressSteps={filingsProgress} />
+          </Show>
         </TabsContent>
 
         <TabsContent value="chart" className="mt-4">
@@ -270,22 +292,40 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
               )}
             </div>
             <div className="h-[560px]">
-              {keysLoaded && !hasRequiredKeys() ? (
+              <Show when="signed-out">
                 <div className="flex h-full flex-col items-center justify-center gap-4 rounded-xl border border-border/60 bg-card p-8 text-center">
-                  <p className="text-sm font-medium">API keys required</p>
+                  <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
+                    <Lock className="h-5 w-5 text-primary" />
+                  </div>
+                  <p className="text-sm font-medium">Sign in to chat with the AI analyst</p>
                   <p className="text-xs text-muted-foreground">
-                    Configure a provider key and SEC EDGAR User-Agent to use the AI analyst.
+                    The overview and chart are free to browse. Chat sessions are saved to your account.
                   </p>
-                  <a
-                    href="/settings"
-                    className="rounded-lg bg-primary px-4 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90"
-                  >
-                    Go to Settings
-                  </a>
+                  <SignInButton mode="modal">
+                    <Button size="sm" className="rounded-full font-medium">
+                      Sign in to chat
+                    </Button>
+                  </SignInButton>
                 </div>
-              ) : (
-                <ChatWindow ticker={ticker} keys={keys} initialSessionId={sessionId} />
-              )}
+              </Show>
+              <Show when="signed-in">
+                {keysLoaded && !hasRequiredKeys() ? (
+                  <div className="flex h-full flex-col items-center justify-center gap-4 rounded-xl border border-border/60 bg-card p-8 text-center">
+                    <p className="text-sm font-medium">API keys required</p>
+                    <p className="text-xs text-muted-foreground">
+                      Configure a provider key and SEC EDGAR User-Agent to use the AI analyst.
+                    </p>
+                    <a
+                      href="/settings"
+                      className="rounded-lg bg-primary px-4 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+                    >
+                      Go to Settings
+                    </a>
+                  </div>
+                ) : (
+                  <ChatWindow ticker={ticker} keys={keys} initialSessionId={sessionId} />
+                )}
+              </Show>
             </div>
           </div>
         </TabsContent>
