@@ -25,7 +25,7 @@ Usage in a route:
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from fastapi import Header, HTTPException
 
@@ -111,6 +111,11 @@ class ApiKeys:
     tavily_api_key: str | None
     model_id: str | None
     user_id: str | None = None
+    # Per-provider key provenance — "user" if the resolved key came from a
+    # request header / WS auth message, "env" if it came from server env.
+    # Absent if the provider's key is None. Used by the LLM budget check
+    # to skip BYOK requests (operator only pays for env-keyed traffic).
+    key_sources: dict[str, str] = field(default_factory=dict)
 
     def require_user_id(self) -> str:
         """Return user_id or raise ValueError if missing/invalid."""
@@ -126,10 +131,10 @@ class ApiKeys:
 
     def get_provider_key(self, provider: str) -> str | None:
         """Return the API key for a provider, or None if not set."""
-        field = _PROVIDER_KEY_FIELDS.get(provider)
-        if field is None:
+        field_name = _PROVIDER_KEY_FIELDS.get(provider)
+        if field_name is None:
             return None
-        return getattr(self, field, None)
+        return getattr(self, field_name, None)
 
     def require_provider_key(self, provider: str) -> str:
         """Return the API key for a provider, or raise ValueError."""
@@ -138,6 +143,41 @@ class ApiKeys:
             provider_display = provider.replace("_", " ").title()
             raise ValueError(f"{provider_display} API key required")
         return key
+
+    def is_operator_paid(self, provider: str) -> bool:
+        """True iff the resolved provider key came from server env.
+
+        Used by the per-user LLM budget check to skip BYOK requests —
+        when a user supplies their own key in headers / WS auth, the
+        operator isn't paying so the budget doesn't apply.
+        """
+        return self.key_sources.get(provider) == "env"
+
+
+def _resolve_key(user_supplied: str | None, env_var: str) -> tuple[str | None, str | None]:
+    """Resolve a key with provenance. Returns (key, source) where source is
+    "user", "env", or None when no key is available."""
+    if user_supplied:
+        return user_supplied, "user"
+    env_value = os.getenv(env_var)
+    if env_value:
+        return env_value, "env"
+    return None, None
+
+
+def _build_key_sources(
+    google_source: str | None,
+    openai_source: str | None,
+    anthropic_source: str | None,
+) -> dict[str, str]:
+    sources: dict[str, str] = {}
+    if google_source:
+        sources["google_genai"] = google_source
+    if openai_source:
+        sources["openai"] = openai_source
+    if anthropic_source:
+        sources["anthropic"] = anthropic_source
+    return sources
 
 
 async def get_api_keys(
@@ -152,13 +192,18 @@ async def get_api_keys(
     """FastAPI dependency that resolves API keys from headers → env vars."""
     user_id = _validate_user_id(x_user_id)
     user_id = _verify_user_identity(user_id, x_clerk_session_token)
+    google_key, google_source = _resolve_key(x_google_api_key, "GOOGLE_API_KEY")
+    openai_key, openai_source = _resolve_key(x_openai_api_key, "OPENAI_API_KEY")
+    anthropic_key, anthropic_source = _resolve_key(x_anthropic_api_key, "ANTHROPIC_API_KEY")
+    tavily_key, _ = _resolve_key(x_tavily_api_key, "TAVILY_API_KEY")
     return ApiKeys(
-        google_api_key=x_google_api_key or os.getenv("GOOGLE_API_KEY"),
-        openai_api_key=x_openai_api_key or os.getenv("OPENAI_API_KEY"),
-        anthropic_api_key=x_anthropic_api_key or os.getenv("ANTHROPIC_API_KEY"),
-        tavily_api_key=x_tavily_api_key or os.getenv("TAVILY_API_KEY"),
+        google_api_key=google_key,
+        openai_api_key=openai_key,
+        anthropic_api_key=anthropic_key,
+        tavily_api_key=tavily_key,
         model_id=x_model_id or os.getenv("DEFAULT_MODEL_ID"),
         user_id=user_id,
+        key_sources=_build_key_sources(google_source, openai_source, anthropic_source),
     )
 
 
@@ -172,13 +217,18 @@ def resolve_ws_keys(auth_message: dict) -> ApiKeys:
     `verify_ws_identity` separately so it can send a structured error
     frame and close with policy-violation code.
     """
+    google_key, google_source = _resolve_key(auth_message.get("google_api_key"), "GOOGLE_API_KEY")
+    openai_key, openai_source = _resolve_key(auth_message.get("openai_api_key"), "OPENAI_API_KEY")
+    anthropic_key, anthropic_source = _resolve_key(auth_message.get("anthropic_api_key"), "ANTHROPIC_API_KEY")
+    tavily_key, _ = _resolve_key(auth_message.get("tavily_api_key"), "TAVILY_API_KEY")
     return ApiKeys(
-        google_api_key=auth_message.get("google_api_key") or os.getenv("GOOGLE_API_KEY"),
-        openai_api_key=auth_message.get("openai_api_key") or os.getenv("OPENAI_API_KEY"),
-        anthropic_api_key=auth_message.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY"),
-        tavily_api_key=auth_message.get("tavily_api_key") or os.getenv("TAVILY_API_KEY"),
+        google_api_key=google_key,
+        openai_api_key=openai_key,
+        anthropic_api_key=anthropic_key,
+        tavily_api_key=tavily_key,
         model_id=auth_message.get("model_id") or os.getenv("DEFAULT_MODEL_ID"),
         user_id=_validate_user_id(auth_message.get("user_id")),
+        key_sources=_build_key_sources(google_source, openai_source, anthropic_source),
     )
 
 
