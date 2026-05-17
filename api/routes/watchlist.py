@@ -103,13 +103,21 @@ async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
     service = BriefingService(llm, tavily_api_key=keys.tavily_api_key)
     tickers = [t["ticker"] for t in tickers_list]
 
+    # Fetch the user's most recent briefing (if any) so the service can
+    # compute a "since last briefing" diff. The new briefing hasn't been
+    # saved yet, so "most recent" == "previous."
+    prior = await get_recent_briefings(user_id=user_id, limit=1)
+    previous_briefing = prior[0] if prior else None
+
     try:
         # BriefingService.generate is sync (yfinance + LLM); offload so it doesn't
         # block other requests' progress on the asyncio loop during the ~10-30s call.
         # Wrap in wait_for so a stuck LLM call surfaces as 504 instead of pinning
         # the worker thread + connection.
         result = await asyncio.wait_for(
-            asyncio.to_thread(service.generate, tickers, user_id, model_id),
+            asyncio.to_thread(
+                service.generate, tickers, user_id, model_id, previous_briefing
+            ),
             timeout=BRIEFING_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:

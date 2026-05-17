@@ -1,4 +1,5 @@
 import aiosqlite
+import json
 import os
 import uuid
 from pathlib import Path
@@ -159,6 +160,7 @@ async def init_db():
             technical_signal TEXT NOT NULL,
             news_summary TEXT NOT NULL,
             news_url TEXT,
+            news_items_json TEXT,
             outlook TEXT NOT NULL,
             FOREIGN KEY (briefing_id) REFERENCES briefings(id),
             FOREIGN KEY (ticker) REFERENCES companies(ticker)
@@ -195,6 +197,15 @@ async def init_db():
     # Migration: add user_id to briefings for per-user isolation
     try:
         await db.execute("ALTER TABLE briefings ADD COLUMN user_id TEXT")
+        await db.commit()
+    except Exception:
+        pass  # Column already exists
+
+    # Migration: add news_items_json to briefing_tickers (multi-headline news).
+    # Old rows have NULL here and are reconstructed from the legacy
+    # news_summary/news_url columns at read time.
+    try:
+        await db.execute("ALTER TABLE briefing_tickers ADD COLUMN news_items_json TEXT")
         await db.commit()
     except Exception:
         pass  # Column already exists
@@ -661,8 +672,12 @@ async def save_briefing(raw_json: str, market_regime: str, market_positioning: s
         market_positioning: Positioning summary string
         alerts_json: JSON-serialized list of alert strings
         thinking: LLM chain-of-thought (may be empty)
-        tickers: List of dicts with keys: ticker, price, change_pct,
-                 technical_signal, news_summary, news_url, outlook
+        tickers: List of per-ticker dicts. Accepts either schema:
+                 - new: news_items (list of {headline, url, published_at})
+                 - legacy: news_summary (str) + optional news_url
+                 The legacy single-string columns are always populated from
+                 the first item so old readers (get_briefing_history,
+                 briefing_tools) keep working.
         user_id: Anonymous user ID (scopes briefing to a user)
     """
     briefing_id = str(uuid.uuid4())
@@ -681,19 +696,45 @@ async def save_briefing(raw_json: str, market_regime: str, market_positioning: s
     await db.executemany(
         "INSERT INTO briefing_tickers "
         "(id, briefing_id, ticker, price, change_pct, technical_signal, "
-        "news_summary, news_url, outlook) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            (
-                str(uuid.uuid4()), briefing_id, t["ticker"], t["price"],
-                t["change_pct"], t["technical_signal"], t["news_summary"],
-                t.get("news_url"), t["outlook"],
-            )
-            for t in tickers
-        ],
+        "news_summary, news_url, news_items_json, outlook) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [_briefing_ticker_row(briefing_id, t) for t in tickers],
     )
 
     await db.commit()
     return briefing_id
+
+
+def _briefing_ticker_row(briefing_id: str, t: dict) -> tuple:
+    """Build the parameter tuple for one briefing_tickers row.
+
+    Normalizes between the new news_items list and the legacy
+    news_summary/news_url pair so both writer styles round-trip cleanly.
+    """
+    news_items = t.get("news_items") or []
+    if news_items:
+        first = news_items[0] if isinstance(news_items[0], dict) else {}
+        legacy_summary = first.get("headline") or t.get("news_summary") or ""
+        legacy_url = first.get("url") or t.get("news_url")
+        items_json = json.dumps(news_items)
+    else:
+        legacy_summary = t.get("news_summary") or ""
+        legacy_url = t.get("news_url")
+        # Build a single-item list from the legacy fields so future reads
+        # always get a populated news_items even for tests using only the
+        # old schema.
+        if legacy_summary:
+            items_json = json.dumps([
+                {"headline": legacy_summary, "url": legacy_url, "published_at": None}
+            ])
+        else:
+            items_json = None
+
+    return (
+        str(uuid.uuid4()), briefing_id, t["ticker"], t["price"],
+        t["change_pct"], t["technical_signal"], legacy_summary,
+        legacy_url, items_json, t["outlook"],
+    )
 
 
 async def get_recent_briefings(user_id: str | None = None, limit: int = 10) -> list[dict]:
@@ -713,13 +754,15 @@ async def get_recent_briefings(user_id: str | None = None, limit: int = 10) -> l
         SELECT b.id, b.market_regime, b.market_positioning, b.alerts,
                b.thinking, b.created_at,
                bt.ticker, bt.price, bt.change_pct, bt.technical_signal,
-               bt.news_summary, bt.news_url, bt.outlook
+               bt.news_summary, bt.news_url, bt.news_items_json, bt.outlook
         FROM briefings b
         LEFT JOIN briefing_tickers bt ON bt.briefing_id = b.id
         WHERE b.id IN (
-            SELECT id FROM briefings WHERE user_id = ? ORDER BY created_at DESC LIMIT ?
+            SELECT id FROM briefings WHERE user_id = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT ?
         )
-        ORDER BY b.created_at DESC
+        ORDER BY b.created_at DESC, b.rowid DESC
         """,
         (user_id, limit),
     ) as cursor:
@@ -745,11 +788,33 @@ async def get_recent_briefings(user_id: str | None = None, limit: int = 10) -> l
                 "price": row["price"],
                 "change_pct": row["change_pct"],
                 "technical_signal": row["technical_signal"],
+                # Legacy single-string fields retained for old consumers.
                 "news_summary": row["news_summary"],
                 "news_url": row["news_url"],
+                # New multi-headline field. Falls back to a one-item list
+                # built from the legacy columns if news_items_json is NULL
+                # (rows written before the schema change).
+                "news_items": _decode_news_items(
+                    row["news_items_json"], row["news_summary"], row["news_url"]
+                ),
                 "outlook": row["outlook"],
             })
     return list(briefings.values())
+
+
+def _decode_news_items(items_json: str | None, legacy_summary: str | None,
+                      legacy_url: str | None) -> list[dict]:
+    """Decode the news_items_json column with a legacy-fields fallback."""
+    if items_json:
+        try:
+            decoded = json.loads(items_json)
+            if isinstance(decoded, list):
+                return decoded
+        except (json.JSONDecodeError, TypeError):
+            pass
+    if legacy_summary:
+        return [{"headline": legacy_summary, "url": legacy_url, "published_at": None}]
+    return []
 
 
 async def get_briefing_history(ticker: str, user_id: str, days: int = 30) -> list[dict]:

@@ -95,8 +95,9 @@ class TestBriefingEndpoint:
 
 
 class TestBriefingTimeout:
+    @patch("api.routes.watchlist.get_recent_briefings", new_callable=AsyncMock)
     @patch("api.routes.watchlist.get_watchlist", new_callable=AsyncMock)
-    def test_briefing_timeout_returns_504(self, mock_wl, monkeypatch):
+    def test_briefing_timeout_returns_504(self, mock_wl, mock_recent, monkeypatch):
         """A stuck BriefingService.generate must surface as HTTP 504.
 
         Note: `asyncio.to_thread` wraps `time.sleep` in a thread Python cannot
@@ -107,6 +108,7 @@ class TestBriefingTimeout:
         fires at the timeout boundary — verified by the WARNING log line.
         """
         mock_wl.return_value = [{"ticker": "AAPL", "added_at": "2026-01-01"}]
+        mock_recent.return_value = []  # no prior briefing to diff against
 
         # Compress timeout below the stub sleep so the wait_for path fires.
         monkeypatch.setattr("api.routes.watchlist.BRIEFING_TIMEOUT_SECONDS", 0.1)
@@ -115,7 +117,7 @@ class TestBriefingTimeout:
             def __init__(self, llm, tavily_api_key=None):
                 pass
 
-            def generate(self, tickers, user_id, model_id):
+            def generate(self, tickers, user_id, model_id, previous_briefing=None):
                 time.sleep(0.5)  # > timeout, < test budget
                 return None
 
@@ -138,17 +140,19 @@ class TestBriefingTimeout:
         assert resp.status_code == 504
         assert "timed out" in resp.json()["detail"].lower()
 
+    @patch("api.routes.watchlist.get_recent_briefings", new_callable=AsyncMock)
     @patch("api.routes.watchlist.get_watchlist", new_callable=AsyncMock)
-    def test_briefing_success_under_timeout(self, mock_wl, monkeypatch):
+    def test_briefing_success_under_timeout(self, mock_wl, mock_recent, monkeypatch):
         """Fast-returning generate should NOT be 504-ed."""
         mock_wl.return_value = [{"ticker": "AAPL", "added_at": "2026-01-01"}]
+        mock_recent.return_value = []
         monkeypatch.setattr("api.routes.watchlist.BRIEFING_TIMEOUT_SECONDS", 2.0)
 
         class _FastService:
             def __init__(self, llm, tavily_api_key=None):
                 pass
 
-            def generate(self, tickers, user_id, model_id):
+            def generate(self, tickers, user_id, model_id, previous_briefing=None):
                 # Mimic the BriefingResult shape minimally for the persist path.
                 analysis = MagicMock()
                 analysis.model_dump_json.return_value = "{}"

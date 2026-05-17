@@ -2,6 +2,10 @@
 
 import asyncio
 import hashlib
+from concurrent.futures import (
+    ThreadPoolExecutor, TimeoutError as FuturesTimeout,
+)
+from typing import Any, Optional
 
 from cachetools import TTLCache
 from langchain_core.tools import Tool
@@ -14,6 +18,30 @@ _research_cache: TTLCache = TTLCache(maxsize=256, ttl=900)
 # Tavily deep-research polling configuration.
 _RESEARCH_POLL_INTERVAL_SECONDS = 2.0
 _RESEARCH_MAX_POLLS = 30
+
+# Per-call wall-clock cap on TavilySearch.invoke(). langchain-tavily's
+# underlying requests.post() has no timeout argument, so we enforce one
+# externally via a Future. A hung Tavily request returns None to the
+# caller (treated as a soft failure) instead of blocking the tool for the
+# full ~75s OS-level socket timeout.
+_TAVILY_PER_CALL_TIMEOUT_SECONDS = 10
+
+
+def _invoke_with_timeout(search: Any, query: str, timeout_s: float) -> Optional[Any]:
+    """Run search.invoke({"query": query}) with an external wall-clock cap.
+
+    Returns the result, or None on timeout. The hung thread is detached
+    (not killed) so the agent step can finish on schedule.
+    """
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = pool.submit(search.invoke, {"query": query})
+        try:
+            return future.result(timeout=timeout_s)
+        except FuturesTimeout:
+            return None
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _get_cache_key(ticker: str, query: str) -> str:
@@ -165,16 +193,30 @@ def _tool_company_news(ticker: str, tavily_api_key: str) -> str:
         tavily_api_key: Tavily API key
     """
     try:
-        search = TavilySearch(
-            tavily_api_key=tavily_api_key,
-            max_results=7,
-            search_depth="advanced",
-            include_answer=True,
-            topic="news",
-        )
+        query = f"{ticker} stock latest news developments"
 
-        query = f"{ticker} stock latest news developments 2025"
-        result = search.invoke({"query": query})
+        # Freshness: day-first, fall back to week so quiet days still return
+        # something. Without time_range Tavily ranks purely by relevance and
+        # cheerfully returns week-old "top" articles.
+        # Each call is wrapped in _invoke_with_timeout so a hung Tavily
+        # endpoint can't pin the agent step.
+        result: dict | str | None = None
+        for time_range in ("day", "week"):
+            search = TavilySearch(
+                tavily_api_key=tavily_api_key,
+                max_results=7,
+                search_depth="advanced",
+                include_answer=True,
+                topic="news",
+                time_range=time_range,
+            )
+            result = _invoke_with_timeout(
+                search, query, _TAVILY_PER_CALL_TIMEOUT_SECONDS,
+            )
+            if isinstance(result, dict) and result.get("results"):
+                break
+        if result is None:
+            return f"News retrieval timed out for {ticker}."
 
         if isinstance(result, str):
             return result

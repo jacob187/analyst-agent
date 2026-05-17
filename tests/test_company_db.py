@@ -214,6 +214,48 @@ class TestBriefingPersistence:
         )
         assert await get_recent_briefings(user_id=None) == []
 
+    async def test_legacy_ticker_dict_round_trips_to_news_items(self, db):
+        """Legacy {news_summary, news_url} ticker dicts gain a one-item news_items list on read."""
+        await save_briefing(
+            raw_json="{}", market_regime="Bull", market_positioning="...",
+            alerts_json="[]", thinking=None, tickers=SAMPLE_TICKERS[:1],
+            user_id=USER_A,
+        )
+        recent = await get_recent_briefings(user_id=USER_A, limit=1)
+        ticker = recent[0]["tickers"][0]
+        # Legacy single-string fields still present for old consumers.
+        assert ticker["news_summary"] == "Apple Q2 earnings beat"
+        assert ticker["news_url"] == "https://example.com/aapl"
+        # New news_items is a single-item list built from the legacy fields.
+        assert ticker["news_items"] == [
+            {"headline": "Apple Q2 earnings beat", "url": "https://example.com/aapl", "published_at": None}
+        ]
+
+    async def test_news_items_list_round_trips(self, db):
+        """A ticker dict with the new news_items list survives a save/read cycle."""
+        tickers = [{
+            "ticker": "AAPL", "price": 180.50, "change_pct": -1.23,
+            "technical_signal": "RSI oversold",
+            "news_items": [
+                {"headline": "Apple beats Q2", "url": "https://example.com/1", "published_at": "2026-05-15"},
+                {"headline": "Cook keynote", "url": "https://example.com/2", "published_at": "2026-05-14"},
+            ],
+            "outlook": "mixed",
+        }]
+        await save_briefing(
+            raw_json="{}", market_regime="Bull", market_positioning="...",
+            alerts_json="[]", thinking=None, tickers=tickers,
+            user_id=USER_A,
+        )
+        recent = await get_recent_briefings(user_id=USER_A, limit=1)
+        ticker = recent[0]["tickers"][0]
+        assert len(ticker["news_items"]) == 2
+        assert ticker["news_items"][0]["headline"] == "Apple beats Q2"
+        assert ticker["news_items"][1]["published_at"] == "2026-05-14"
+        # Legacy fields synthesized from the first item for old consumers.
+        assert ticker["news_summary"] == "Apple beats Q2"
+        assert ticker["news_url"] == "https://example.com/1"
+
 
 # =========================================================================
 # Filings Cache
