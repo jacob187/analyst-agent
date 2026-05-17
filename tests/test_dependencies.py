@@ -427,3 +427,73 @@ class TestUserIdRegexClerkFormat:
     def test_user_prefix_with_hyphen_rejected(self):
         # Clerk IDs are alphanumeric only after the underscore.
         assert _validate_user_id("user_abc-def") is None
+
+
+class TestIsOperatorPaid:
+    """Provenance tracking on ApiKeys — the daily LLM budget only applies
+    when the provider key came from server env, not when the user supplied
+    their own via header / WS auth message.
+
+    These tests pass `None` explicitly for header args — FastAPI Header()
+    defaults are truthy sentinels when get_api_keys() is called outside
+    an HTTP request context.
+    """
+
+    @pytest.mark.eval_unit
+    async def test_env_only_key_is_operator_paid(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        keys = await get_api_keys(
+            x_google_api_key=None, x_openai_api_key=None,
+            x_anthropic_api_key=None, x_tavily_api_key=None,
+        )
+        assert keys.is_operator_paid("google_genai") is True
+
+    @pytest.mark.eval_unit
+    async def test_header_key_is_not_operator_paid(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        keys = await get_api_keys(
+            x_google_api_key="user-key", x_openai_api_key=None,
+            x_anthropic_api_key=None, x_tavily_api_key=None,
+        )
+        # Header wins; provenance says "user" so operator isn't paying.
+        assert keys.is_operator_paid("google_genai") is False
+        assert keys.google_api_key == "user-key"
+
+    @pytest.mark.eval_unit
+    async def test_no_key_is_not_operator_paid(self, monkeypatch):
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        keys = await get_api_keys(
+            x_google_api_key=None, x_openai_api_key=None,
+            x_anthropic_api_key=None, x_tavily_api_key=None,
+        )
+        assert keys.is_operator_paid("google_genai") is False
+        assert keys.google_api_key is None
+
+    @pytest.mark.eval_unit
+    async def test_per_provider_independent(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-google")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        keys = await get_api_keys(
+            x_google_api_key=None, x_openai_api_key="user-openai",
+            x_anthropic_api_key=None, x_tavily_api_key=None,
+        )
+        assert keys.is_operator_paid("google_genai") is True
+        assert keys.is_operator_paid("openai") is False
+
+    @pytest.mark.eval_unit
+    def test_ws_auth_message_keys_are_user_provenance(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        keys = resolve_ws_keys({"google_api_key": "ws-user-key"})
+        assert keys.is_operator_paid("google_genai") is False
+
+    @pytest.mark.eval_unit
+    def test_ws_env_fallback_is_operator_paid(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        keys = resolve_ws_keys({})
+        assert keys.is_operator_paid("google_genai") is True
+
+    @pytest.mark.eval_unit
+    def test_unknown_provider_returns_false(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        keys = resolve_ws_keys({})
+        assert keys.is_operator_paid("not_a_real_provider") is False

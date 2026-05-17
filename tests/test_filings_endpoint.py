@@ -396,3 +396,107 @@ class TestFilingsPartialData:
         assert "tenk" not in data
         # 10-Q and earnings should still be present
         assert "tenq" in data
+
+
+# ── Daily LLM budget (operator-paid only) ─────────────────────────────────
+
+
+class TestFilingsLLMBudget:
+    """The daily budget gate fires when the request's provider key comes from
+    server env (operator pays). BYOK requests bypass it."""
+
+    @pytest.fixture
+    def budget_db(self, tmp_path, monkeypatch):
+        import api.db as db_module
+        monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "budget.db")
+        monkeypatch.setattr(db_module, "_db", None)
+        # init_db is async, but TestClient drives the FastAPI app which has
+        # init_db in its lifespan. Force the connection open eagerly so
+        # increment_llm_usage finds the table on the very first call.
+        import asyncio as _asyncio
+        _asyncio.get_event_loop().run_until_complete(db_module.init_db())
+        yield
+        _asyncio.get_event_loop().run_until_complete(db_module.close_db())
+
+    def test_byok_bypasses_budget(self, client, mock_filings_deps, budget_db, monkeypatch):
+        """Header-supplied key (BYOK) is not charged against the operator's budget."""
+        from api import llm_concurrency
+        monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 1)
+        headers = {"X-Google-Api-Key": "user-key", "X-User-Id": "user_byoktest"}
+        # Five calls all succeed — the 1-call budget would have blocked all
+        # but the first if BYOK weren't bypassing.
+        for _ in range(5):
+            resp = client.get("/api/company/AAPL/filings", headers=headers)
+            assert resp.status_code == 200
+
+    def test_env_key_subject_to_budget(self, client, mock_filings_deps, budget_db, monkeypatch):
+        """When the key resolves from env (no header), the daily budget applies."""
+        from api import llm_concurrency
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 2)
+        headers = {"X-User-Id": "user_envbudget"}
+        # First two succeed; third crosses the limit and returns 429.
+        assert client.get("/api/company/AAPL/filings", headers=headers).status_code == 200
+        assert client.get("/api/company/AAPL/filings", headers=headers).status_code == 200
+        resp = client.get("/api/company/AAPL/filings", headers=headers)
+        assert resp.status_code == 429
+        assert "budget" in resp.json()["detail"].lower()
+
+
+# ── Process-wide LLM dispatch concurrency cap ────────────────────────────
+
+
+class TestFilingsConcurrencyCap:
+    async def test_filings_llm_concurrency_capped(self, mock_filings_deps, monkeypatch):
+        """Concurrent /filings requests must never exceed LLM_DISPATCH_CONCURRENCY
+        in-flight LLM dispatches process-wide.
+
+        Drives the app via httpx.AsyncClient (TestClient is sync) so we can
+        actually fire requests in parallel. Patches `_run_llm_analysis` with
+        a sleep stub that tracks max in-flight.
+        """
+        import asyncio as _asyncio
+        import threading
+        import time as _time
+
+        import httpx
+        from api import llm_concurrency
+        from api.routes import company as company_route
+
+        monkeypatch.setattr(llm_concurrency, "LLM_DISPATCH_CONCURRENCY", 3)
+        llm_concurrency._rebuild_semaphore()
+
+        in_flight = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def slow_analysis(ticker, analysis_type, raw_data, model_id, api_key):
+            nonlocal in_flight, peak
+            with lock:
+                in_flight += 1
+                peak = max(peak, in_flight)
+            _time.sleep(0.05)
+            with lock:
+                in_flight -= 1
+            return {"summary": "stub", "filing_metadata": {"accession": "x"}}
+
+        monkeypatch.setattr(company_route, "_run_llm_analysis", slow_analysis)
+
+        headers = {"X-Google-Api-Key": "test-key", "X-User-Id": "user_conccap"}
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            # Fire 5 concurrent requests against distinct tickers (each
+            # request also dispatches multiple sections internally; with
+            # cap=3 the peak must never exceed 3 anywhere).
+            await _asyncio.gather(*[
+                ac.get(f"/api/company/T{i}/filings", headers=headers)
+                for i in range(5)
+            ])
+
+        assert peak <= 3, f"observed peak {peak} > cap 3"
+        assert peak >= 2, f"test setup didn't actually exercise concurrency (peak={peak})"
+
+        # Restore the default semaphore size for the rest of the suite.
+        monkeypatch.undo()
+        llm_concurrency._rebuild_semaphore()
