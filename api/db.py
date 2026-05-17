@@ -2,6 +2,7 @@ import aiosqlite
 import json
 import os
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Configurable via env var for deployment (e.g., DB_PATH=/data/analyst.db on Fly/Koyeb).
@@ -263,6 +264,18 @@ async def init_db():
         SELECT user_id, ticker, added_at FROM watchlist
     """)
 
+    # Per-user daily LLM dispatch counter. Backs the operator-paid budget
+    # check in api/llm_concurrency.py. PK is (user_id, date) so each day
+    # rolls over naturally — no cron needed.
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS user_llm_usage (
+            user_id TEXT NOT NULL,
+            date TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, date)
+        )
+    """)
+
     await db.commit()
 
 _orphans_claimed = False
@@ -301,6 +314,48 @@ async def claim_orphaned_data(user_id: str) -> None:
         (user_id,),
     )
     await db.commit()
+
+
+def _today_utc() -> str:
+    """Today's date in UTC, ISO format. Wrapped so tests can monkeypatch."""
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+async def increment_llm_usage(user_id: str) -> int:
+    """Increment today's LLM dispatch count for user_id; return the new count.
+
+    Atomic via SQLite's `INSERT ... ON CONFLICT DO UPDATE` so concurrent
+    callers can't race on read-then-write.
+    """
+    today = _today_utc()
+    db = await get_db()
+    await db.execute(
+        """
+        INSERT INTO user_llm_usage (user_id, date, count)
+        VALUES (?, ?, 1)
+        ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1
+        """,
+        (user_id, today),
+    )
+    await db.commit()
+    async with db.execute(
+        "SELECT count FROM user_llm_usage WHERE user_id = ? AND date = ?",
+        (user_id, today),
+    ) as cursor:
+        row = await cursor.fetchone()
+        return row["count"] if row else 0
+
+
+async def get_llm_usage(user_id: str) -> int:
+    """Return today's LLM dispatch count for user_id, or 0 if none."""
+    today = _today_utc()
+    db = await get_db()
+    async with db.execute(
+        "SELECT count FROM user_llm_usage WHERE user_id = ? AND date = ?",
+        (user_id, today),
+    ) as cursor:
+        row = await cursor.fetchone()
+        return row["count"] if row else 0
 
 
 async def close_db():
