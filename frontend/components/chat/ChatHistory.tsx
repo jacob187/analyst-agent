@@ -21,7 +21,7 @@ export function ChatHistory() {
     if (!loaded) return;
     api
       .tickers()
-      .then(({ tickers }) => setTickers(tickers))
+      .then(({ tickers }) => setTickers(tickers.filter((t) => t.session_count > 0)))
       .catch(() => setTickers([]))
       .finally(() => setLoading(false));
   }, [loaded]);
