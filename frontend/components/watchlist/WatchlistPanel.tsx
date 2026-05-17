@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { marked } from "marked";
 import DOMPurify from "isomorphic-dompurify";
@@ -32,6 +32,22 @@ export function WatchlistPanel({ initialItems, initialQuotes }: WatchlistPanelPr
   const [briefing, setBriefing] = useState<string | null>(null);
   const [briefingLoading, setBriefingLoading] = useState(false);
   const [briefingOpen, setBriefingOpen] = useState(false);
+
+  // Re-sync on mount in case the RSC payload was served from the router cache
+  // and didn't reflect tickers added on another page (or in another tab).
+  useEffect(() => {
+    let cancelled = false;
+    api.watchlist().then(({ tickers }) => {
+      if (cancelled) return;
+      setItems(tickers);
+      if (tickers.length > 0) {
+        api.quotes(tickers.map((t) => t.ticker)).then(({ quotes: q }) => {
+          if (!cancelled) setQuotes(q);
+        }).catch(() => {});
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault();

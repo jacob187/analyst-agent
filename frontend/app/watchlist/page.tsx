@@ -2,6 +2,8 @@ import { WatchlistPanel } from "@/components/watchlist/WatchlistPanel";
 import { api } from "@/lib/api";
 import type { Quote } from "@/types";
 
+export const dynamic = "force-dynamic";
+
 export default async function WatchlistPage() {
   const { tickers } = await api.watchlist().catch(() => ({ tickers: [] }));
 
