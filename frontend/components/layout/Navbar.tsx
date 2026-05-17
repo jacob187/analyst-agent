@@ -16,11 +16,12 @@ import {
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 
-// Links shown to everyone (signed-out + signed-in).
-const PUBLIC_LINKS = [
-  { href: "/", label: "Analyze" },
-  { href: "/about", label: "About" },
-];
+// Always-visible link.
+const HOME_LINK = { href: "/", label: "Analyze" };
+
+// About sits next to Analyze for signed-out visitors, and moves to the end
+// of the nav once signed in.
+const ABOUT_LINK = { href: "/about", label: "About" };
 
 // Signed-in-only links. Each lands on a protected route, so we don't show
 // them to signed-out visitors — clicking would just bounce them to /sign-in.
@@ -49,36 +50,41 @@ export function Navbar() {
 
         {/* Desktop nav */}
         <nav className="hidden items-center gap-1 md:flex">
-          {PUBLIC_LINKS.map((link) => (
-            <Link
-              key={link.href}
-              href={link.href}
-              className={cn(
+          {(() => {
+            const linkClass = (href: string) =>
+              cn(
                 "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-                pathname === link.href
+                pathname === href
                   ? "bg-primary/10 text-primary"
                   : "text-muted-foreground hover:bg-muted hover:text-foreground"
-              )}
-            >
-              {link.label}
-            </Link>
-          ))}
-          <Show when="signed-in">
-            {AUTH_LINKS.map((link) => (
-              <Link
-                key={link.href}
-                href={link.href}
-                className={cn(
-                  "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-                  pathname === link.href
-                    ? "bg-primary/10 text-primary"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                )}
-              >
-                {link.label}
-              </Link>
-            ))}
-          </Show>
+              );
+            return (
+              <>
+                <Link href={HOME_LINK.href} className={linkClass(HOME_LINK.href)}>
+                  {HOME_LINK.label}
+                </Link>
+                <Show when="signed-out">
+                  <Link href={ABOUT_LINK.href} className={linkClass(ABOUT_LINK.href)}>
+                    {ABOUT_LINK.label}
+                  </Link>
+                </Show>
+                <Show when="signed-in">
+                  {AUTH_LINKS.map((link) => (
+                    <Link
+                      key={link.href}
+                      href={link.href}
+                      className={linkClass(link.href)}
+                    >
+                      {link.label}
+                    </Link>
+                  ))}
+                  <Link href={ABOUT_LINK.href} className={linkClass(ABOUT_LINK.href)}>
+                    {ABOUT_LINK.label}
+                  </Link>
+                </Show>
+              </>
+            );
+          })()}
         </nav>
 
         <div className="flex items-center gap-2">
@@ -120,38 +126,54 @@ export function Navbar() {
                 </SheetTitle>
               </SheetHeader>
               <nav className="mt-6 flex flex-col gap-1">
-                {PUBLIC_LINKS.map((link) => (
-                  <Link
-                    key={link.href}
-                    href={link.href}
-                    onClick={() => setMobileOpen(false)}
-                    className={cn(
+                {(() => {
+                  const mobileClass = (href: string) =>
+                    cn(
                       "rounded-md px-3 py-2 text-sm font-medium transition-colors",
-                      pathname === link.href
+                      pathname === href
                         ? "bg-primary/10 text-primary"
                         : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                    )}
-                  >
-                    {link.label}
-                  </Link>
-                ))}
-                <Show when="signed-in">
-                  {AUTH_LINKS.map((link) => (
-                    <Link
-                      key={link.href}
-                      href={link.href}
-                      onClick={() => setMobileOpen(false)}
-                      className={cn(
-                        "rounded-md px-3 py-2 text-sm font-medium transition-colors",
-                        pathname === link.href
-                          ? "bg-primary/10 text-primary"
-                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                      )}
-                    >
-                      {link.label}
-                    </Link>
-                  ))}
-                </Show>
+                    );
+                  return (
+                    <>
+                      <Link
+                        href={HOME_LINK.href}
+                        onClick={() => setMobileOpen(false)}
+                        className={mobileClass(HOME_LINK.href)}
+                      >
+                        {HOME_LINK.label}
+                      </Link>
+                      <Show when="signed-out">
+                        <Link
+                          href={ABOUT_LINK.href}
+                          onClick={() => setMobileOpen(false)}
+                          className={mobileClass(ABOUT_LINK.href)}
+                        >
+                          {ABOUT_LINK.label}
+                        </Link>
+                      </Show>
+                      <Show when="signed-in">
+                        {AUTH_LINKS.map((link) => (
+                          <Link
+                            key={link.href}
+                            href={link.href}
+                            onClick={() => setMobileOpen(false)}
+                            className={mobileClass(link.href)}
+                          >
+                            {link.label}
+                          </Link>
+                        ))}
+                        <Link
+                          href={ABOUT_LINK.href}
+                          onClick={() => setMobileOpen(false)}
+                          className={mobileClass(ABOUT_LINK.href)}
+                        >
+                          {ABOUT_LINK.label}
+                        </Link>
+                      </Show>
+                    </>
+                  );
+                })()}
                 <Show when="signed-in">
                   <Link
                     href="/settings"
