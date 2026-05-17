@@ -31,5 +31,6 @@ async def env_keys():
         "google": bool(os.getenv("GOOGLE_API_KEY")),
         "openai": bool(os.getenv("OPENAI_API_KEY")),
         "anthropic": bool(os.getenv("ANTHROPIC_API_KEY")),
+        "sec_header": bool(os.getenv("SEC_HEADER")),
         "tavily": bool(os.getenv("TAVILY_API_KEY")),
     }
