@@ -15,6 +15,7 @@ prompts:
       - get_raw_risk_factors: Raw risk factors text (most recent filing)
       - get_raw_management_discussion: Raw MD&A text (most recent filing)
       - get_raw_balance_sheets: Raw balance sheet data availability
+      - get_complete_10k_text: List of available 10-K sections retrievable as raw text
       - get_business_overview: Company business description, products, segments, markets (10-K Item 1)
       - get_cybersecurity_disclosure: Cybersecurity risk management and governance (10-K Item 1C)
       - get_legal_proceedings: Significant pending litigation and regulatory actions (10-K Item 3)
