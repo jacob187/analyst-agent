@@ -13,6 +13,12 @@ from api.db import (
     save_briefing, get_recent_briefings, get_briefing_history,
 )
 from api.dependencies import ApiKeys, get_api_keys
+from api.llm_concurrency import (
+    LLMBudgetExceeded,
+    LLMConcurrencyExceeded,
+    check_and_charge_budget,
+    llm_slot,
+)
 from api.rate_limit import check_rest_rate_limit, rate_limit_key
 
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
@@ -97,6 +103,14 @@ async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
         provider_display = model.provider.replace("_", " ").title()
         raise HTTPException(status_code=400, detail=f"{provider_display} API key required for {model.display_name}")
 
+    # Charge the daily budget only when the operator's env key is in use —
+    # BYOK requests spend the user's own provider quota.
+    if keys.is_operator_paid(model.provider):
+        try:
+            await check_and_charge_budget(user_id)
+        except LLMBudgetExceeded as e:
+            raise HTTPException(status_code=429, detail=str(e))
+
     thinking = ThinkingConfig(enabled=True, level="medium") if model.thinking_capable else None
     llm = create_llm(model.id, api_key, thinking=thinking)
 
@@ -113,13 +127,14 @@ async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
         # BriefingService.generate is sync (yfinance + LLM); offload so it doesn't
         # block other requests' progress on the asyncio loop during the ~10-30s call.
         # Wrap in wait_for so a stuck LLM call surfaces as 504 instead of pinning
-        # the worker thread + connection.
-        result = await asyncio.wait_for(
-            asyncio.to_thread(
-                service.generate, tickers, user_id, model_id, previous_briefing
-            ),
-            timeout=BRIEFING_TIMEOUT_SECONDS,
-        )
+        # the worker thread + connection. llm_slot bounds process-wide concurrency.
+        async with llm_slot():
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    service.generate, tickers, user_id, model_id, previous_briefing
+                ),
+                timeout=BRIEFING_TIMEOUT_SECONDS,
+            )
     except asyncio.TimeoutError:
         logger.warning(
             "Briefing timed out after %ss (tickers=%d)",
@@ -127,6 +142,8 @@ async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
             len(tickers),
         )
         raise HTTPException(status_code=504, detail="Briefing generation timed out")
+    except LLMConcurrencyExceeded:
+        raise HTTPException(status_code=503, detail="Server busy, retry shortly")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Briefing generation failed: {e}")
 

@@ -20,6 +20,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from api.dependencies import ApiKeys, get_api_keys
+from api.llm_concurrency import (
+    LLMBudgetExceeded,
+    check_and_charge_budget,
+    llm_slot,
+)
 from api.rate_limit import check_rest_rate_limit, rate_limit_key
 from api.validators import TICKER_RE
 
@@ -258,9 +263,10 @@ async def _stream_section(
     yield _sse({"type": "progress", "step": step, "status": "processing"})
     t0 = time.monotonic()
     try:
-        analysis = await asyncio.to_thread(
-            _run_llm_analysis, ticker, analysis_type, raw_data, model_id, api_key,
-        )
+        async with llm_slot():
+            analysis = await asyncio.to_thread(
+                _run_llm_analysis, ticker, analysis_type, raw_data, model_id, api_key,
+            )
         await save_filing_analysis(
             ticker, form_type, accession, analysis_type, json.dumps(analysis),
         )
@@ -523,6 +529,14 @@ async def get_company_filings(
             detail=f"{model.provider.replace('_', ' ').title()} API key required for filing analysis",
         )
 
+    # Charge the daily budget only when the operator's env key is in use —
+    # BYOK requests spend the user's own provider quota, not ours.
+    if keys.is_operator_paid(model.provider):
+        try:
+            await check_and_charge_budget(keys.user_id)
+        except LLMBudgetExceeded as e:
+            raise HTTPException(status_code=429, detail=str(e))
+
     # Step 1: Fetch raw filing data from EDGAR (no LLM, ~1-3s)
     logger.info("[%s] Fetching raw filings from EDGAR...", ticker)
     t0 = time.monotonic()
@@ -544,10 +558,11 @@ async def get_company_filings(
         logger.info("[%s] LLM CALL   %s/%s (accession: %s) — calling %s", ticker, form_type, analysis_type, accession, model.id)
         t_llm = time.monotonic()
         try:
-            analysis = await asyncio.to_thread(
-                _run_llm_analysis, ticker, analysis_type,
-                raw_data, model.id, api_key,
-            )
+            async with llm_slot():
+                analysis = await asyncio.to_thread(
+                    _run_llm_analysis, ticker, analysis_type,
+                    raw_data, model.id, api_key,
+                )
             await save_filing_analysis(
                 ticker, form_type, accession, analysis_type, json.dumps(analysis),
             )
@@ -686,6 +701,14 @@ async def stream_company_filings(
         window_seconds=3600,
     ):
         raise HTTPException(status_code=429, detail="Rate limit exceeded — try again later")
+
+    # Charge the daily budget only when the operator's env key is in use —
+    # BYOK requests spend the user's own provider quota.
+    if keys.is_operator_paid(model.provider):
+        try:
+            await check_and_charge_budget(keys.user_id)
+        except LLMBudgetExceeded as e:
+            raise HTTPException(status_code=429, detail=str(e))
 
     async def generate():
         # Acquire a concurrency slot for the duration of this stream.

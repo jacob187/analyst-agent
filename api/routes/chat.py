@@ -16,6 +16,11 @@ from api.memory import (
     estimate_tokens_incremental, compress_history, build_context_from_session,
 )
 from api.dependencies import resolve_ws_keys, verify_ws_identity
+from api.llm_concurrency import (
+    LLMBudgetExceeded,
+    LLMConcurrencyExceeded,
+    check_and_charge_budget,
+)
 from api.rate_limit import check_rate_limit
 from api.validators import TICKER_RE
 from agents.graph.analyst_graph import LLMTimeoutError
@@ -141,6 +146,11 @@ async def chat(websocket: WebSocket, ticker: str):
             await websocket.close()
             return
 
+        # If the operator's env key resolves the LLM (not BYOK), each user
+        # message draws against the per-user daily budget. The model is fixed
+        # for the session, so resolve once and reuse on every message.
+        operator_paid = keys.is_operator_paid(model.provider)
+
         # Resolve session (scoped to user)
         explicit_session_id = auth_message.get("session_id")
         if explicit_session_id:
@@ -235,6 +245,16 @@ async def chat(websocket: WebSocket, ticker: str):
                         })
                         continue
 
+                    if operator_paid:
+                        try:
+                            await check_and_charge_budget(user_id)
+                        except LLMBudgetExceeded:
+                            await _safe_send(websocket, {
+                                "type": "error",
+                                "message": "Daily LLM budget reached. Try again tomorrow or add your own API key in Settings.",
+                            })
+                            continue
+
                     user_query = message.get("message", "")
 
                     if len(user_query) > MAX_QUERY_LENGTH:
@@ -271,6 +291,12 @@ async def chat(websocket: WebSocket, ticker: str):
                         await _safe_send(websocket, {
                             "type": "error",
                             "message": "The model took too long to respond. Please try a simpler query or try again.",
+                        })
+                    except LLMConcurrencyExceeded:
+                        logger.warning("LLM dispatch pool saturated for %s", ticker)
+                        await _safe_send(websocket, {
+                            "type": "error",
+                            "message": "Server busy — please retry shortly.",
                         })
                     except Exception as e:
                         logger.error("Error processing query for %s: %s", ticker, e, exc_info=True)
