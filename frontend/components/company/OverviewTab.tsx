@@ -13,6 +13,17 @@ interface OverviewTabProps {
   onRetry?: () => void;
 }
 
+const PATTERN_DEFINITIONS: Record<string, string> = {
+  head_and_shoulders: "three peaks with a higher middle peak — bearish reversal signal",
+  inverse_head_and_shoulders: "three troughs with a lower middle trough — bullish reversal signal",
+  double_top: "two peaks at roughly the same price — bearish reversal",
+  double_bottom: "two troughs at roughly the same price — bullish reversal",
+  golden_cross: "50-day moving average crosses above the 200-day — bullish trend signal",
+  death_cross: "50-day moving average crosses below the 200-day — bearish trend signal",
+  bullish_divergence: "price prints a lower low while RSI prints a higher low — momentum turning up",
+  bearish_divergence: "price prints a higher high while RSI prints a lower high — momentum turning down",
+};
+
 function formatFutureDate(date: string | null | undefined): string | undefined {
   if (!date) return undefined;
   const parsed = new Date(date);
@@ -221,6 +232,31 @@ export function OverviewTab({ data, loading, error, onRetry }: OverviewTabProps)
               {patterns.slice(0, 6).map((p, i) => (
                 <PatternBadge key={i} pattern={p} />
               ))}
+              <p className="pt-2 text-xs text-muted-foreground">
+                Classical chart formations found in the recent price action, with
+                a confidence score derived from pattern geometry and volume
+                confirmation.
+              </p>
+              {(() => {
+                const shown = Array.from(
+                  new Set(patterns.slice(0, 6).map((p) => p.type))
+                ).filter((t) => PATTERN_DEFINITIONS[t]);
+                if (shown.length === 0) return null;
+                return (
+                  <dl className="space-y-1 text-xs">
+                    {shown.map((t) => (
+                      <div key={t} className="flex gap-2">
+                        <dt className="shrink-0 font-medium text-foreground">
+                          {t}
+                        </dt>
+                        <dd className="text-muted-foreground">
+                          — {PATTERN_DEFINITIONS[t]}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                );
+              })()}
             </CardContent>
           </Card>
         )}
