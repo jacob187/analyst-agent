@@ -36,6 +36,7 @@ from agents.planner import (
     AnalysisStep,
     create_planner,
 )
+from api.llm_concurrency import llm_slot
 
 logger = logging.getLogger(__name__)
 
@@ -65,14 +66,19 @@ class LLMTimeoutError(RuntimeError):
 
 
 async def _run_with_timeout(coro, *, label: str):
-    """Wrap an LLM coroutine in `asyncio.wait_for` and surface timeouts as
-    a typed error the streaming layer can render as `{"type": "error", ...}`.
+    """Wrap an LLM coroutine in a process-wide concurrency slot + timeout.
+
+    Acquires the LLM dispatch slot first (with its own short wait timeout)
+    so a saturated queue fails fast rather than burning the 120s LLM
+    timeout while idle. Surfaces timeouts as a typed error the streaming
+    layer renders as `{"type": "error", ...}`.
     """
-    try:
-        return await asyncio.wait_for(coro, timeout=LLM_CALL_TIMEOUT)
-    except asyncio.TimeoutError as e:
-        logger.warning("LLM call timed out: label=%s timeout=%ss", label, LLM_CALL_TIMEOUT)
-        raise LLMTimeoutError(f"LLM call '{label}' timed out after {LLM_CALL_TIMEOUT}s") from e
+    async with llm_slot():
+        try:
+            return await asyncio.wait_for(coro, timeout=LLM_CALL_TIMEOUT)
+        except asyncio.TimeoutError as e:
+            logger.warning("LLM call timed out: label=%s timeout=%ss", label, LLM_CALL_TIMEOUT)
+            raise LLMTimeoutError(f"LLM call '{label}' timed out after {LLM_CALL_TIMEOUT}s") from e
 
 
 class StepResult(TypedDict):
