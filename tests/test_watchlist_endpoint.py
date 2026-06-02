@@ -241,3 +241,39 @@ class TestBriefingHistory:
     def test_history_without_user_id_returns_422(self):
         resp = client.get("/watchlist/briefing/history")
         assert resp.status_code == 422
+
+
+class TestBriefingHistoryDaysValidation:
+    """`days` is range-bounded [1, 365] so unbounded inputs can't reach the DB."""
+
+    def test_days_zero_rejected(self):
+        resp = client.get("/watchlist/briefing/history/AAPL?days=0", headers=HEADERS)
+        assert resp.status_code == 422
+
+    def test_days_too_large_rejected(self):
+        resp = client.get(
+            "/watchlist/briefing/history/AAPL?days=999999", headers=HEADERS
+        )
+        assert resp.status_code == 422
+
+    def test_days_negative_rejected(self):
+        resp = client.get("/watchlist/briefing/history/AAPL?days=-1", headers=HEADERS)
+        assert resp.status_code == 422
+
+    @patch("api.routes.watchlist.get_briefing_history", new_callable=AsyncMock)
+    def test_days_one_accepted(self, mock_hist):
+        mock_hist.return_value = []
+        resp = client.get(
+            "/watchlist/briefing/history/AAPL?days=1", headers=HEADERS
+        )
+        assert resp.status_code == 200
+        mock_hist.assert_called_once_with("AAPL", USER_ID, days=1)
+
+    @patch("api.routes.watchlist.get_briefing_history", new_callable=AsyncMock)
+    def test_days_365_accepted(self, mock_hist):
+        mock_hist.return_value = []
+        resp = client.get(
+            "/watchlist/briefing/history/AAPL?days=365", headers=HEADERS
+        )
+        assert resp.status_code == 200
+        mock_hist.assert_called_once_with("AAPL", USER_ID, days=365)

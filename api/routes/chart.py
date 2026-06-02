@@ -11,12 +11,12 @@ Performance notes:
 
 import asyncio
 import re
-import time
 from enum import Enum
 from typing import Optional
 
 import pandas as pd
 import yfinance as yf
+from cachetools import TTLCache
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
@@ -54,10 +54,10 @@ _DISPLAY_PERIOD: dict[str, str] = {
 # All available chart indicators
 _ALL_INDICATORS = {"ma5", "ma10", "ma20", "ma50", "ma200", "rsi", "macd", "bollinger"}
 
-# Server-side cache: {(ticker, period): (monotonic_timestamp, full_payload)}
+# Server-side cache: (ticker, period) -> full_payload.
 # Stores candles + all indicators so different indicator requests share one fetch.
-_chart_cache: dict[tuple[str, str], tuple[float, dict]] = {}
-_CACHE_TTL = 60  # seconds
+# Bounded by cachetools to prevent unbounded growth under ticker rotation.
+_chart_cache: TTLCache = TTLCache(maxsize=256, ttl=60)
 
 
 def _fetch_chart_payload(ticker: str, period_value: str) -> Optional[dict]:
@@ -152,6 +152,7 @@ async def get_chart_data(
     indicators: Optional[str] = Query(
         default="ma20,ma50,ma200,rsi,macd,bollinger",
         description="Comma-separated indicator names",
+        max_length=200,
     ),
 ):
     """Return OHLCV candles and indicator time series for chart rendering."""
@@ -160,8 +161,13 @@ async def get_chart_data(
 
     ticker = ticker.upper()
 
-    # Parse requested indicators
-    requested = set(indicators.split(",")) if indicators else _ALL_INDICATORS
+    # Parse requested indicators. The Query() max_length is the boundary
+    # guard; the slice here defends against any future caller that bypasses
+    # FastAPI validation.
+    if indicators:
+        requested = set(indicators.split(",")[:20])
+    else:
+        requested = _ALL_INDICATORS
     invalid = requested - _ALL_INDICATORS
     if invalid:
         raise HTTPException(
@@ -172,19 +178,15 @@ async def get_chart_data(
     # Check server-side cache (keyed on ticker + period, not indicators —
     # we cache the full payload and filter afterward)
     cache_key = (ticker, period.value)
-    now = time.monotonic()
-    cached = _chart_cache.get(cache_key)
-
-    if cached and (now - cached[0]) < _CACHE_TTL:
-        full_data = cached[1]
-    else:
+    full_data = _chart_cache.get(cache_key)
+    if full_data is None:
         # Offload the entire blocking pipeline (yfinance fetch, indicators,
         # pattern detection, live quote) so the event loop stays responsive
         # during the ~500–800ms call.
         full_data = await asyncio.to_thread(_fetch_chart_payload, ticker, period.value)
         if full_data is None:
             raise HTTPException(status_code=404, detail=f"No data found for {ticker}")
-        _chart_cache[cache_key] = (now, full_data)
+        _chart_cache[cache_key] = full_data
 
     # Filter to only requested indicators (cheap dict comprehension)
     filtered_indicators = {
@@ -215,9 +217,8 @@ async def get_chart_data(
 
 _TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,10}$")
 
-# Batch quote cache: {frozenset(tickers): (monotonic_timestamp, quotes_dict)}
-_quotes_cache: dict[frozenset[str], tuple[float, dict[str, dict]]] = {}
-_QUOTES_CACHE_TTL = 30  # seconds — shorter than chart TTL since quotes are quick
+# Batch quote cache: frozenset(tickers) -> quotes_dict. Bounded by cachetools.
+_quotes_cache: TTLCache = TTLCache(maxsize=256, ttl=30)
 
 
 @router.post("/stock/quotes")
@@ -242,11 +243,10 @@ async def get_batch_quotes(data: dict):
 
     # Check cache
     cache_key = frozenset(tickers)
-    now = time.monotonic()
     cached = _quotes_cache.get(cache_key)
-    if cached and (now - cached[0]) < _QUOTES_CACHE_TTL:
+    if cached is not None:
         return JSONResponse(
-            content={"quotes": cached[1]},
+            content={"quotes": cached},
             headers={"Cache-Control": "public, max-age=30"},
         )
 
@@ -285,7 +285,7 @@ async def get_batch_quotes(data: dict):
             except (KeyError, IndexError):
                 continue  # Ticker not found in download results
 
-    _quotes_cache[cache_key] = (now, quotes)
+    _quotes_cache[cache_key] = quotes
 
     return JSONResponse(
         content={"quotes": quotes},

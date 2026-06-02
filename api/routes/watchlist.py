@@ -6,7 +6,7 @@ import logging
 import os
 import re
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from api.db import (
     get_watchlist, get_watchlist_enriched, add_to_watchlist, remove_from_watchlist,
@@ -180,7 +180,9 @@ async def briefing_history(keys: ApiKeys = Depends(get_api_keys)):
 
 @router.get("/briefing/history/{ticker}")
 async def briefing_history_by_ticker(
-    ticker: str, days: int = 30, keys: ApiKeys = Depends(get_api_keys)
+    ticker: str,
+    days: int = Query(30, ge=1, le=365),
+    keys: ApiKeys = Depends(get_api_keys),
 ):
     """Return briefing history for a specific ticker, scoped to the user."""
     user_id = keys.require_user_id()

@@ -176,3 +176,49 @@ class TestChartEndpointErrors:
         """Lowercase ticker should work and be uppercased internally."""
         resp = client.get("/stock/aapl/chart")
         assert resp.status_code == 200
+
+
+# ── Bounded caches (Phase 3 hardening) ─────────────────────────────────────
+
+
+class TestChartCacheBounded:
+    """The module-level chart caches must evict under unique-key rotation
+    so memory cannot grow unbounded. Mirrors tests/test_sec_tools_caches.py."""
+
+    def setup_method(self):
+        from api.routes.chart import _chart_cache, _quotes_cache
+        _chart_cache.clear()
+        _quotes_cache.clear()
+
+    def test_chart_cache_evicts_at_maxsize(self):
+        from cachetools import TTLCache
+        from api.routes import chart
+
+        assert isinstance(chart._chart_cache, TTLCache)
+        for i in range(1000):
+            chart._chart_cache[(f"T{i}", "1y")] = {"candles": []}
+        assert len(chart._chart_cache) <= 256
+
+    def test_quotes_cache_evicts_at_maxsize(self):
+        from cachetools import TTLCache
+        from api.routes import chart
+
+        assert isinstance(chart._quotes_cache, TTLCache)
+        for i in range(1000):
+            chart._quotes_cache[frozenset([f"T{i}"])] = {}
+        assert len(chart._quotes_cache) <= 256
+
+
+class TestChartIndicatorValidation:
+    """The `indicators` query param is bounded so a 1MB string can't reach
+    the parser. Defends against a cheap DoS that would otherwise allocate
+    a huge split list per request."""
+
+    def test_oversize_indicators_string_returns_422(self, client, mock_retriever):
+        oversize = "x," * 1000  # ~2000 chars, > max_length=200
+        resp = client.get(f"/stock/AAPL/chart?indicators={oversize}")
+        assert resp.status_code == 422
+
+    def test_under_limit_indicators_string_accepted(self, client, mock_retriever):
+        resp = client.get("/stock/AAPL/chart?indicators=rsi,macd")
+        assert resp.status_code == 200

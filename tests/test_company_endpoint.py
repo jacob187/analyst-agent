@@ -250,3 +250,23 @@ class TestProfilePartialFailure:
         assert data["patterns"] == []
         # Company info should still be present
         assert data["company"]["name"] == "Apple Inc."
+
+
+# ── Bounded cache (Phase 3 hardening) ──────────────────────────────────────
+
+
+class TestProfileCacheBounded:
+    """Profile cache must evict under unique-ticker rotation."""
+
+    def setup_method(self):
+        from api.routes.company import _profile_cache
+        _profile_cache.clear()
+
+    def test_profile_cache_evicts_at_maxsize(self):
+        from cachetools import TTLCache
+        from api.routes import company
+
+        assert isinstance(company._profile_cache, TTLCache)
+        for i in range(2000):
+            company._profile_cache[f"T{i}"] = {"ticker": f"T{i}"}
+        assert len(company._profile_cache) <= 1024

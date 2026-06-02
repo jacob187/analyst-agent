@@ -32,10 +32,10 @@ logger = logging.getLogger("analyst.filings")
 
 router = APIRouter(prefix="/api/company")
 
-# Server-side cache: {ticker: (monotonic_timestamp, payload)}
-# Values are JSON-round-tripped dicts to guarantee serializability.
-_profile_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-_PROFILE_CACHE_TTL = 300  # 5 minutes
+# Server-side cache: ticker -> JSON-round-tripped payload dict.
+# Bounded by cachetools to prevent unbounded growth under ticker rotation.
+_PROFILE_CACHE_TTL = 300  # 5 minutes (also used for Cache-Control max-age)
+_profile_cache: TTLCache = TTLCache(maxsize=1024, ttl=_PROFILE_CACHE_TTL)
 
 # Bounded per-ticker lock store. TTL-based eviction prevents unbounded growth
 # under ticker rotation — once a ticker hasn't been requested for the TTL
@@ -198,17 +198,16 @@ async def get_company_profile(ticker: str, keys: ApiKeys = Depends(get_api_keys)
     lock = _get_profile_lock(ticker)
     async with lock:
         # Check server-side cache (inside lock to avoid thundering herd)
-        now = time.monotonic()
         cached = _profile_cache.get(ticker)
-        if cached and (now - cached[0]) < _PROFILE_CACHE_TTL:
+        if cached is not None:
             return JSONResponse(
-                content=cached[1],
+                content=cached,
                 headers={"Cache-Control": f"public, max-age={_PROFILE_CACHE_TTL}"},
             )
 
         # _build_profile fans out yfinance calls in parallel via asyncio.gather.
         payload = await _build_profile(ticker)
-        _profile_cache[ticker] = (time.monotonic(), payload)
+        _profile_cache[ticker] = payload
 
         # Track the company as soon as its profile is first loaded.
         # This is the earliest signal that a user is interested in a ticker —
