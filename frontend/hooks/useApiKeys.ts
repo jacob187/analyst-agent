@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { authDisabled, useAuth } from "@/lib/auth";
 import type { ApiKeys, EnvKeysResponse } from "@/types";
 
 const STORAGE_KEY = "analyst_agent_keys";
@@ -16,6 +17,7 @@ const DEFAULT_KEYS: ApiKeys = {
 };
 
 export function useApiKeys() {
+  const { isSignedIn } = useAuth();
   const [keys, setKeysState] = useState<ApiKeys>(DEFAULT_KEYS);
   const [envKeys, setEnvKeys] = useState<EnvKeysResponse | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -49,14 +51,18 @@ export function useApiKeys() {
   }
 
   function hasRequiredKeys(): boolean {
-    // Keys can come from localStorage (user-entered) OR server .env
+    // Operator env provider keys are lent only to signed-in (or self-host)
+    // callers — mirror the backend's _env_keys_allowed gate. Counting them for
+    // anonymous visitors makes the chat tab render and then fail on WS connect.
+    // SEC_HEADER is a global server identity, not a per-user key, so it's
+    // available to everyone.
+    const canUseEnvKeys = !!isSignedIn || authDisabled;
     const hasProviderKey =
       !!keys.google_api_key ||
       !!keys.openai_api_key ||
       !!keys.anthropic_api_key ||
-      !!envKeys?.google ||
-      !!envKeys?.openai ||
-      !!envKeys?.anthropic;
+      (canUseEnvKeys &&
+        (!!envKeys?.google || !!envKeys?.openai || !!envKeys?.anthropic));
     const hasSecHeader = !!keys.sec_header || !!envKeys?.sec_header;
     return hasProviderKey && hasSecHeader;
   }

@@ -371,6 +371,87 @@ class TestClerkRestVerification:
         result = await get_api_keys(x_user_id=None, x_clerk_session_token=None)
         assert result.user_id is None
 
+    @pytest.mark.eval_unit
+    async def test_anonymous_uuid_accepted_without_token(self, clerk_env):
+        # Progressive auth: a per-browser UUID is not a Clerk account, so it's
+        # trusted as-is even with Clerk enabled and no session token.
+        anon = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        result = await get_api_keys(x_user_id=anon, x_clerk_session_token=None)
+        assert result.user_id == anon
+
+
+class TestEnvKeyGate:
+    """With Clerk enabled, the operator's env keys are lent only to verified
+    signed-in users — never to anonymous callers. This is the cost boundary:
+    anonymous visitors may use LLM features only with their own BYOK keys.
+    """
+
+    @pytest.mark.eval_unit
+    async def test_anon_does_not_inherit_env_key(self, clerk_env, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        result = await get_api_keys(
+            x_google_api_key=None, x_openai_api_key=None,
+            x_anthropic_api_key=None, x_tavily_api_key=None,
+            x_user_id=None, x_clerk_session_token=None,
+        )
+        assert result.google_api_key is None
+        assert result.is_operator_paid("google_genai") is False
+
+    @pytest.mark.eval_unit
+    async def test_anon_uuid_does_not_inherit_env_key(self, clerk_env, monkeypatch):
+        # A per-browser UUID is accepted as an id but is not a Clerk account,
+        # so it must not unlock operator env keys.
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        anon = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        result = await get_api_keys(
+            x_google_api_key=None, x_openai_api_key=None,
+            x_anthropic_api_key=None, x_tavily_api_key=None,
+            x_user_id=anon, x_clerk_session_token=None,
+        )
+        assert result.google_api_key is None
+
+    @pytest.mark.eval_unit
+    async def test_anon_byok_key_still_resolves(self, clerk_env, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        result = await get_api_keys(
+            x_google_api_key="byok", x_openai_api_key=None,
+            x_anthropic_api_key=None, x_tavily_api_key=None,
+            x_user_id=None, x_clerk_session_token=None,
+        )
+        assert result.google_api_key == "byok"
+        assert result.is_operator_paid("google_genai") is False
+
+    @pytest.mark.eval_unit
+    async def test_verified_user_inherits_env_key(self, clerk_env, rsa_keypair, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        priv, _ = rsa_keypair
+        token = _make_token(priv)
+        result = await get_api_keys(
+            x_google_api_key=None, x_openai_api_key=None,
+            x_anthropic_api_key=None, x_tavily_api_key=None,
+            x_user_id=TEST_SUB, x_clerk_session_token=token,
+        )
+        assert result.google_api_key == "env-key"
+        assert result.is_operator_paid("google_genai") is True
+
+    @pytest.mark.eval_unit
+    async def test_self_host_anon_inherits_env_key(self, no_clerk_env, monkeypatch):
+        # Clerk unconfigured (local/self-host): the single operator is trusted
+        # with env keys even without a user_id.
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        result = await get_api_keys(
+            x_google_api_key=None, x_openai_api_key=None,
+            x_anthropic_api_key=None, x_tavily_api_key=None,
+            x_user_id=None, x_clerk_session_token=None,
+        )
+        assert result.google_api_key == "env-key"
+
+    @pytest.mark.eval_unit
+    def test_ws_anon_does_not_inherit_env_key(self, clerk_env, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        result = resolve_ws_keys({})
+        assert result.google_api_key is None
+
 
 class TestClerkWsVerification:
     @pytest.mark.eval_unit
@@ -405,6 +486,14 @@ class TestClerkWsVerification:
     def test_ws_disable_auth_ok(self, clerk_env, monkeypatch):
         monkeypatch.setenv("DISABLE_AUTH", "true")
         ok, reason = verify_ws_identity(TEST_SUB, {})
+        assert ok is True
+        assert reason is None
+
+    @pytest.mark.eval_unit
+    def test_ws_anonymous_uuid_ok_without_token(self, clerk_env):
+        # Progressive auth: anonymous UUID needs no token even with Clerk on.
+        anon = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        ok, reason = verify_ws_identity(anon, {})
         assert ok is True
         assert reason is None
 

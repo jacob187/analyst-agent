@@ -47,7 +47,7 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
       ws.send(
         JSON.stringify({
           type: "auth",
-          user_id: getUserId(),
+          user_id: getUserId() || undefined,
           clerk_session_token: clerkToken || undefined,
           google_api_key: k.google_api_key || undefined,
           openai_api_key: k.openai_api_key || undefined,

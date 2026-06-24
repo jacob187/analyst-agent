@@ -240,7 +240,7 @@ async def _stream_section(
     raw_data: dict[str, Any],
     ticker: str,
     model_id: str,
-    api_key: str,
+    api_key: str | None,
 ):
     """Async generator for one filing analysis section.
 
@@ -256,6 +256,13 @@ async def _stream_section(
         logger.info("[%s] CACHE HIT  %s/%s", ticker, form_type, analysis_type)
         yield _sse({"type": "progress", "step": step, "status": "cached"})
         yield ("result", json.loads(cached["analysis_json"]))
+        return
+
+    if not api_key:
+        # Cache miss with no key to generate — anonymous / keyless caller.
+        # Signal the gap so the UI can prompt sign-in or BYOK; don't run the LLM.
+        yield _sse({"type": "progress", "step": step, "status": "needs_key"})
+        yield ("result", None)
         return
 
     logger.info("[%s] LLM CALL   %s/%s — calling %s", ticker, form_type, analysis_type, model_id)
@@ -494,15 +501,12 @@ async def get_company_filings(
     Subsequent calls return instantly from SQLite (keyed by accession
     number — automatic cache invalidation when new filings are published).
 
-    Requires an LLM API key and SEC header (via headers or env vars).
+    Cached analyses are public (no auth) for discoverability. Generating a
+    fresh analysis on a cache miss needs an LLM API key — BYOK, or the
+    operator key for signed-in users.
     """
     if not TICKER_RE.match(ticker.upper()):
         raise HTTPException(status_code=422, detail="Invalid ticker symbol")
-
-    try:
-        keys.require_user_id()
-    except ValueError:
-        raise HTTPException(status_code=401, detail="Sign in required to load filing analysis")
 
     client_ip = request.client.host if request.client else "unknown"
     if not check_rest_rate_limit(
@@ -520,13 +524,10 @@ async def get_company_filings(
 
     model_id = keys.model_id or get_default_model().id
     model = get_model(model_id) or get_default_model()
-    try:
-        api_key = keys.require_provider_key(model.provider)
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{model.provider.replace('_', ' ').title()} API key required for filing analysis",
-        )
+    # Key is optional: cached analyses are served to anyone. A key is only
+    # needed to generate a fresh analysis on cache miss (BYOK, or the operator
+    # env key for signed-in users).
+    api_key = keys.get_provider_key(model.provider)
 
     # Charge the daily budget only when the operator's env key is in use —
     # BYOK requests spend the user's own provider quota, not ours.
@@ -554,6 +555,10 @@ async def get_company_filings(
         if cached:
             logger.info("[%s] CACHE HIT  %s/%s (accession: %s)", ticker, form_type, analysis_type, accession)
             return json.loads(cached["analysis_json"])
+        if not api_key:
+            # Cache miss with no key — anonymous / keyless caller. Skip the LLM;
+            # the section is simply absent from the response (UI prompts sign-in).
+            return None
         logger.info("[%s] LLM CALL   %s/%s (accession: %s) — calling %s", ticker, form_type, analysis_type, accession, model.id)
         t_llm = time.monotonic()
         try:
@@ -663,24 +668,15 @@ async def stream_company_filings(
     if not TICKER_RE.match(ticker.upper()):
         raise HTTPException(status_code=422, detail="Invalid ticker symbol")
 
-    try:
-        keys.require_user_id()
-    except ValueError:
-        raise HTTPException(status_code=401, detail="Sign in required to load filing analysis")
-
     ticker = ticker.upper()
 
     from agents.model_registry import get_model, get_default_model
 
     model_id = keys.model_id or get_default_model().id
     model = get_model(model_id) or get_default_model()
-    try:
-        api_key = keys.require_provider_key(model.provider)
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{model.provider.replace('_', ' ').title()} API key required for filing analysis",
-        )
+    # Key is optional: cached sections stream to anyone; a key is only needed
+    # to generate fresh sections on cache miss (BYOK, or operator key signed-in).
+    api_key = keys.get_provider_key(model.provider)
 
     # Per-IP concurrency guard — prevents a single client from opening
     # many concurrent streams and exhausting the thread pool or API credits.

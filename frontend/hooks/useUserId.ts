@@ -4,9 +4,14 @@ import { useEffect } from "react";
 
 import { LOCAL_DEV_USER_ID, authDisabled, useAuth } from "@/lib/auth";
 
-// Cached Clerk user ID under a separate key. The old `analyst_agent_user_id`
-// UUID key is intentionally left untouched — Phase 1.5 migrates it.
-const CACHE_KEY = "clerk_user_id";
+// Identity is sign-in-only. Signed-out visitors have NO user id: they browse
+// and use BYOK LLM features freely, but nothing is persisted server-side.
+// Signing in (Clerk) is what unlocks DB persistence and cross-device sync.
+//
+// ACTIVE_KEY mirrors the current Clerk id so the sync getUserId() helper can
+// read it from non-component code (lib/api.ts, useWebSocket). It is cleared on
+// sign-out so getUserId() never returns a stale id.
+const ACTIVE_KEY = "analyst_agent_active_uid";
 
 // Optional stable dev override. When set, every request uses this ID,
 // bypassing Clerk entirely. Never set in production.
@@ -14,55 +19,53 @@ const CACHE_KEY = "clerk_user_id";
 const DEV_USER_ID = process.env.NEXT_PUBLIC_DEV_USER_ID
   ?? (authDisabled ? LOCAL_DEV_USER_ID : undefined);
 
-let cachedUserId = "";
+let cachedActiveId = "";
 
-function setCachedUserId(id: string) {
-  cachedUserId = id;
+function setActiveId(id: string) {
+  cachedActiveId = id;
   try {
-    localStorage.setItem(CACHE_KEY, id);
+    if (id) localStorage.setItem(ACTIVE_KEY, id);
+    else localStorage.removeItem(ACTIVE_KEY);
   } catch {
     // ignore — localStorage may be unavailable
   }
 }
 
 /**
- * Sync read of the current user ID for non-component contexts (e.g. fetch
- * helpers in lib/api.ts). Returns "" if Clerk hasn't loaded yet on this
- * client. Prefer useUserId() inside components.
+ * Sync read of the current user ID for non-component contexts (fetch helpers
+ * in lib/api.ts, the WebSocket hook). Returns the Clerk id when signed in,
+ * otherwise "" — signed-out visitors have no identity and send no X-User-Id.
  */
 export function getUserId(): string {
   if (DEV_USER_ID) return DEV_USER_ID;
-  if (cachedUserId) return cachedUserId;
+  if (typeof window === "undefined") return "";
+  if (cachedActiveId) return cachedActiveId;
   try {
-    const stored = localStorage.getItem(CACHE_KEY);
-    if (stored) {
-      cachedUserId = stored;
-      return stored;
-    }
+    cachedActiveId = localStorage.getItem(ACTIVE_KEY) ?? "";
   } catch {
-    // ignore
+    cachedActiveId = "";
   }
-  return "";
+  return cachedActiveId;
 }
 
 /**
- * React hook returning the current Clerk user ID and a loaded flag.
- * Writes the ID to module cache + localStorage so getUserId() can read it
- * synchronously from non-component code.
+ * React hook that keeps the active user id in sync with Clerk auth state: the
+ * Clerk id when signed in, "" when signed out (cache + localStorage cleared so
+ * getUserId() never returns a stale id after sign-out). Writes to module cache
+ * + localStorage so getUserId() can read it synchronously from non-component code.
  */
 export function useUserId() {
   const { userId, isLoaded } = useAuth();
 
   useEffect(() => {
     if (DEV_USER_ID) {
-      setCachedUserId(DEV_USER_ID);
+      setActiveId(DEV_USER_ID);
       return;
     }
-    if (isLoaded && userId) {
-      setCachedUserId(userId);
-    }
+    if (!isLoaded) return;
+    setActiveId(userId ?? "");
   }, [isLoaded, userId]);
 
-  const effectiveId = DEV_USER_ID ?? userId ?? "";
+  const effectiveId = DEV_USER_ID ?? (isLoaded ? (userId ?? "") : "");
   return { userId: effectiveId, loaded: isLoaded };
 }

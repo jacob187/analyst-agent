@@ -117,14 +117,8 @@ async def chat(websocket: WebSocket, ticker: str):
             await websocket.close(code=1008)
             return
 
-        if not keys.user_id:
-            await websocket.send_json({
-                "type": "error",
-                "message": "User ID required. Please refresh the page."
-            })
-            await websocket.close()
-            return
-
+        # Anonymous (no user_id) is allowed: signed-out visitors may chat with
+        # their own BYOK key, ephemerally. Persistence is sign-in-only (below).
         user_id = keys.user_id
 
         # Resolve model from auth message → registry default
@@ -141,7 +135,7 @@ async def chat(websocket: WebSocket, ticker: str):
             provider_display = model.provider.replace("_", " ").title()
             await websocket.send_json({
                 "type": "error",
-                "message": f"{provider_display} API key required for {model.display_name}. Add it in Settings."
+                "message": f"{provider_display} API key required for {model.display_name}. Sign in or add your key in Settings."
             })
             await websocket.close()
             return
@@ -151,27 +145,33 @@ async def chat(websocket: WebSocket, ticker: str):
         # for the session, so resolve once and reuse on every message.
         operator_paid = keys.is_operator_paid(model.provider)
 
-        # Resolve session (scoped to user)
-        explicit_session_id = auth_message.get("session_id")
-        if explicit_session_id:
-            session_id = explicit_session_id
+        # Persistence is sign-in-only. Anonymous users (BYOK) get an ephemeral,
+        # in-memory conversation — no session row, no saved messages.
+        if user_id:
+            explicit_session_id = auth_message.get("session_id")
+            if explicit_session_id:
+                session_id = explicit_session_id
+            else:
+                session_id = await get_or_create_session(ticker, user_id, model=model_id)
+
+            session = await get_session(session_id)
+
+            # Validate session belongs to this ticker AND this user (IDOR guard).
+            if (
+                session is None
+                or session["ticker"].upper() != ticker.upper()
+                or session.get("user_id") != user_id
+            ):
+                await websocket.send_json({"type": "error", "message": "Invalid session."})
+                await websocket.close()
+                return
+
+            all_messages = await get_session_messages(session_id)
+            conversation_history = build_context_from_session(session, all_messages)
         else:
-            session_id = await get_or_create_session(ticker, user_id, model=model_id)
-
-        session = await get_session(session_id)
-
-        # Validate session belongs to this ticker AND this user (IDOR guard).
-        if (
-            session is None
-            or session["ticker"].upper() != ticker.upper()
-            or session.get("user_id") != user_id
-        ):
-            await websocket.send_json({"type": "error", "message": "Invalid session."})
-            await websocket.close()
-            return
-
-        all_messages = await get_session_messages(session_id)
-        conversation_history = build_context_from_session(session, all_messages)
+            session_id = None
+            all_messages = []
+            conversation_history = []
 
         research_status = "Web research enabled" if keys.tavily_api_key else "Web research disabled (no Tavily API key)"
         await websocket.send_json({
@@ -264,7 +264,8 @@ async def chat(websocket: WebSocket, ticker: str):
                         })
                         continue
 
-                    asyncio.create_task(save_message(session_id, "user", user_query))
+                    if session_id:
+                        asyncio.create_task(save_message(session_id, "user", user_query))
                     conversation_history.append(HumanMessage(content=user_query))
 
                     full_response = ""
@@ -307,9 +308,10 @@ async def chat(websocket: WebSocket, ticker: str):
 
                     if full_response:
                         conversation_history.append(AIMessage(content=full_response))
-                        asyncio.create_task(
-                            save_message(session_id, "assistant", full_response)
-                        )
+                        if session_id:
+                            asyncio.create_task(
+                                save_message(session_id, "assistant", full_response)
+                            )
 
                         tokens_so_far, chars_so_far, messages_counted = (
                             estimate_tokens_incremental(

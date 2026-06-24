@@ -60,14 +60,16 @@ def estimate_tokens_incremental(
 
 
 async def compress_history(
-    session_id: str,
+    session_id: str | None,
     conversation_history: list,
     llm,
 ) -> list:
     """Summarize older messages with the LLM, returning a shorter context list.
 
     Returns [summary_message] + last RECENT_MESSAGES_TO_KEEP messages.
-    Full message history is untouched in the database.
+    Full message history is untouched in the database. When session_id is None
+    (anonymous, ephemeral chat) the summary is computed in-memory only — nothing
+    is persisted.
     """
     recent = conversation_history[-RECENT_MESSAGES_TO_KEEP:]
     to_summarize = conversation_history[:-RECENT_MESSAGES_TO_KEEP]
@@ -90,7 +92,8 @@ async def compress_history(
     response = await llm.ainvoke([HumanMessage(content=prompt)])
     summary_text = str(response.content)
 
-    asyncio.create_task(update_session_summary(session_id, summary_text))
+    if session_id:
+        asyncio.create_task(update_session_summary(session_id, summary_text))
 
     summary_message = HumanMessage(content=f"[CONVERSATION SUMMARY]\n{summary_text}")
     return [summary_message] + recent

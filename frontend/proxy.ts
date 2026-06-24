@@ -5,14 +5,16 @@ import { NextResponse } from "next/server";
 // don't want a Clerk account. Pair with `DISABLE_AUTH=true` on the backend.
 const authDisabled = process.env.NEXT_PUBLIC_DISABLE_AUTH === "true";
 
-// Everything not in this list is public (home, about, company pages, marketing).
-// Protected routes redirect signed-out visitors to /sign-in.
+// Progressive auth: most routes are public — signed-out visitors browse, chat
+// (BYOK), and read filings anonymously. The exceptions are the routes whose
+// only content is per-user persisted data: the backend has no anonymous data
+// model for them (require_user_id → 422), so they'd render permanently empty
+// with silently no-op actions. Redirect those to sign-in instead. /companies
+// and /settings stay public (public data / local BYOK config).
 const isProtectedRoute = createRouteMatcher([
   "/watchlist(.*)",
   "/history(.*)",
   "/session(.*)",
-  "/settings(.*)",
-  "/companies(.*)",
 ]);
 
 export default authDisabled

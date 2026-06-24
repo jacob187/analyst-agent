@@ -341,29 +341,51 @@ class TestFilings8K:
 
 
 class TestFilingsEndpointErrors:
-    def test_missing_api_key_returns_400(self, client, mock_filings_deps):
-        # No API key header and mock env to be empty
+    def test_invalid_ticker_returns_422(self, client):
+        resp = client.get("/api/company/INVALID!!!/filings")
+        assert resp.status_code == 422
+
+
+# ── Anonymous access (Browse-only + BYOK) ──────────────────────────────────
+
+
+class TestFilingsAnonAccess:
+    """Cached analyses are public for discoverability; generating a fresh
+    analysis on cache miss needs a key (BYOK, or operator key signed-in)."""
+
+    def test_anon_with_byok_key_generates(self, client, mock_filings_deps):
+        # No user_id, but a BYOK key → fresh analysis runs on cache miss.
+        resp = client.get(
+            "/api/company/AAPL/filings",
+            headers={"X-Google-Api-Key": "byok-key"},
+        )
+        assert resp.status_code == 200
+        assert "risk_10k" in resp.json()["tenk"]
+
+    def test_anon_no_key_serves_cache(self, client, mock_filings_deps):
+        # No user_id, no key, everything cached → public read, no LLM call.
+        mock_filings_deps["get_cache"].return_value = {
+            "analysis_json": json.dumps(_MOCK_RISK_ANALYSIS)
+        }
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("api.dependencies.os.getenv", return_value=None):
+                resp = client.get("/api/company/AAPL/filings")
+        assert resp.status_code == 200
+        assert resp.json()["tenk"]["risk_10k"]["summary"] == _MOCK_RISK_ANALYSIS["summary"]
+        mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
+
+    def test_keyless_cache_miss_skips_llm(self, client, mock_filings_deps):
+        # Keyless caller + cache miss → 200, but no analysis generated and no
+        # LLM call. Holds whether anonymous or signed-in without a key.
         with patch.dict("os.environ", {}, clear=True):
             with patch("api.dependencies.os.getenv", return_value=None):
                 resp = client.get(
                     "/api/company/AAPL/filings",
                     headers={"X-User-Id": "user_testfilings"},
                 )
-                assert resp.status_code == 400
-                assert "API key required" in resp.json()["detail"]
-
-    def test_invalid_ticker_returns_422(self, client):
-        resp = client.get("/api/company/INVALID!!!/filings")
-        assert resp.status_code == 422
-
-    def test_missing_user_id_returns_401(self, client, mock_filings_deps):
-        """Filings analysis requires sign-in even when Clerk is disabled."""
-        resp = client.get(
-            "/api/company/AAPL/filings",
-            headers={"X-Google-Api-Key": "test-key"},
-        )
-        assert resp.status_code == 401
-        assert "sign in" in resp.json()["detail"].lower()
+        assert resp.status_code == 200
+        assert "risk_10k" not in resp.json().get("tenk", {})
+        mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
 
 
 # ── Rate limiting ─────────────────────────────────────────────────────────

@@ -7,12 +7,17 @@ Keys are resolved with a consistent fallback chain:
 This module provides FastAPI dependencies that any route can inject.
 New endpoints should never read API keys directly — use these instead.
 
-User identity is verified via Clerk when `CLERK_SECRET_KEY` is configured:
-  - REST: clients send `X-Clerk-Session-Token` alongside `X-User-Id`.
-  - WS:   clients send `clerk_session_token` alongside `user_id`.
+User identity gates persistence and operator-paid LLM access:
+  - Anonymous (no user_id) → no DB writes and NO operator env keys. Anonymous
+    visitors browse freely and may use LLM features only with their own (BYOK)
+    keys sent per request.
+  - Clerk-format user_id (`user_...`) → verified against a Clerk session token
+    when `CLERK_SECRET_KEY` is configured (REST: `X-Clerk-Session-Token`;
+    WS: `clerk_session_token`). Verified users unlock DB persistence and may
+    use the operator's env keys (bounded by the per-user daily budget).
 
-If Clerk is unconfigured (local dev / self-host) verification is skipped
-entirely. `DISABLE_AUTH=true` always skips verification.
+If Clerk is unconfigured (local dev / self-host) verification is skipped and
+the single operator is trusted with env keys. `DISABLE_AUTH=true` does the same.
 
 Usage in a route:
     from api.dependencies import ApiKeys, get_api_keys
@@ -67,8 +72,25 @@ def _validate_user_id(raw: str | None) -> str | None:
     return None
 
 
+def _is_clerk_user_id(user_id: str) -> bool:
+    """True for Clerk account ids (`user_...`); False for anonymous UUIDs."""
+    return user_id.startswith("user_")
+
+
+def _env_keys_allowed(user_id: str | None) -> bool:
+    """Whether the operator's env keys may resolve for this caller.
+
+    Lent only to trusted callers: the local/self-host operator (auth disabled
+    or Clerk unconfigured) or a verified signed-in user. Anonymous visitors
+    resolve only their own BYOK keys — they never spend the operator's keys.
+    """
+    if is_auth_disabled() or not is_clerk_enabled():
+        return True
+    return bool(user_id) and _is_clerk_user_id(user_id)
+
+
 def _verify_user_identity(user_id: str | None, token: str | None) -> str | None:
-    """Cross-check user_id against a Clerk session token.
+    """Cross-check a Clerk-format user_id against a Clerk session token.
 
     Returns the verified user_id, or raises HTTPException(401) on mismatch
     when Clerk is enabled.
@@ -76,18 +98,19 @@ def _verify_user_identity(user_id: str | None, token: str | None) -> str | None:
     Behavior:
       - DISABLE_AUTH=true → skip; trust the validated user_id as-is.
       - Clerk unconfigured → skip; trust the validated user_id as-is.
-      - Clerk configured + no token → reject (401) when user_id is present.
-      - Clerk configured + token → verify; sub must equal user_id.
+      - Anonymous UUID user_id → trust as-is (no Clerk account to verify).
+      - Clerk-format user_id + no token → reject (401).
+      - Clerk-format user_id + token → verify; sub must equal user_id.
     """
     _maybe_warn_clerk_unconfigured()
 
     if is_auth_disabled() or not is_clerk_enabled():
         return user_id
 
-    if not user_id:
-        # No user_id supplied; nothing to verify. Endpoint-level checks
-        # (require_user_id) decide whether that's acceptable.
-        return None
+    if not user_id or not _is_clerk_user_id(user_id):
+        # No id, or an anonymous UUID — nothing Clerk-backed to verify.
+        # Endpoint-level checks (require_user_id) decide if an id is required.
+        return user_id
 
     if not token:
         raise HTTPException(status_code=401, detail="Missing Clerk session token")
@@ -154,14 +177,18 @@ class ApiKeys:
         return self.key_sources.get(provider) == "env"
 
 
-def _resolve_key(user_supplied: str | None, env_var: str) -> tuple[str | None, str | None]:
+def _resolve_key(
+    user_supplied: str | None, env_var: str, allow_env: bool = True
+) -> tuple[str | None, str | None]:
     """Resolve a key with provenance. Returns (key, source) where source is
-    "user", "env", or None when no key is available."""
+    "user", "env", or None when no key is available. Env fallback is skipped
+    when allow_env is False (anonymous callers never spend operator env keys)."""
     if user_supplied:
         return user_supplied, "user"
-    env_value = os.getenv(env_var)
-    if env_value:
-        return env_value, "env"
+    if allow_env:
+        env_value = os.getenv(env_var)
+        if env_value:
+            return env_value, "env"
     return None, None
 
 
@@ -192,10 +219,11 @@ async def get_api_keys(
     """FastAPI dependency that resolves API keys from headers → env vars."""
     user_id = _validate_user_id(x_user_id)
     user_id = _verify_user_identity(user_id, x_clerk_session_token)
-    google_key, google_source = _resolve_key(x_google_api_key, "GOOGLE_API_KEY")
-    openai_key, openai_source = _resolve_key(x_openai_api_key, "OPENAI_API_KEY")
-    anthropic_key, anthropic_source = _resolve_key(x_anthropic_api_key, "ANTHROPIC_API_KEY")
-    tavily_key, _ = _resolve_key(x_tavily_api_key, "TAVILY_API_KEY")
+    allow_env = _env_keys_allowed(user_id)
+    google_key, google_source = _resolve_key(x_google_api_key, "GOOGLE_API_KEY", allow_env)
+    openai_key, openai_source = _resolve_key(x_openai_api_key, "OPENAI_API_KEY", allow_env)
+    anthropic_key, anthropic_source = _resolve_key(x_anthropic_api_key, "ANTHROPIC_API_KEY", allow_env)
+    tavily_key, _ = _resolve_key(x_tavily_api_key, "TAVILY_API_KEY", allow_env)
     return ApiKeys(
         google_api_key=google_key,
         openai_api_key=openai_key,
@@ -217,17 +245,19 @@ def resolve_ws_keys(auth_message: dict) -> ApiKeys:
     `verify_ws_identity` separately so it can send a structured error
     frame and close with policy-violation code.
     """
-    google_key, google_source = _resolve_key(auth_message.get("google_api_key"), "GOOGLE_API_KEY")
-    openai_key, openai_source = _resolve_key(auth_message.get("openai_api_key"), "OPENAI_API_KEY")
-    anthropic_key, anthropic_source = _resolve_key(auth_message.get("anthropic_api_key"), "ANTHROPIC_API_KEY")
-    tavily_key, _ = _resolve_key(auth_message.get("tavily_api_key"), "TAVILY_API_KEY")
+    user_id = _validate_user_id(auth_message.get("user_id"))
+    allow_env = _env_keys_allowed(user_id)
+    google_key, google_source = _resolve_key(auth_message.get("google_api_key"), "GOOGLE_API_KEY", allow_env)
+    openai_key, openai_source = _resolve_key(auth_message.get("openai_api_key"), "OPENAI_API_KEY", allow_env)
+    anthropic_key, anthropic_source = _resolve_key(auth_message.get("anthropic_api_key"), "ANTHROPIC_API_KEY", allow_env)
+    tavily_key, _ = _resolve_key(auth_message.get("tavily_api_key"), "TAVILY_API_KEY", allow_env)
     return ApiKeys(
         google_api_key=google_key,
         openai_api_key=openai_key,
         anthropic_api_key=anthropic_key,
         tavily_api_key=tavily_key,
         model_id=auth_message.get("model_id") or os.getenv("DEFAULT_MODEL_ID"),
-        user_id=_validate_user_id(auth_message.get("user_id")),
+        user_id=user_id,
         key_sources=_build_key_sources(google_source, openai_source, anthropic_source),
     )
 
@@ -242,8 +272,9 @@ def verify_ws_identity(user_id: str | None, auth_message: dict) -> tuple[bool, s
 
     if is_auth_disabled() or not is_clerk_enabled():
         return True, None
-    if not user_id:
-        return True, None  # downstream code decides if user_id is required
+    if not user_id or not _is_clerk_user_id(user_id):
+        # Anonymous UUID or no id — nothing Clerk-backed to verify.
+        return True, None
 
     token = auth_message.get("clerk_session_token")
     if not token:

@@ -31,7 +31,8 @@ function keyHeaders(keys: Partial<ApiKeys>): Record<string, string> {
 }
 
 function userIdHeader(): Record<string, string> {
-  return { "X-User-Id": getUserId() };
+  const id = getUserId();
+  return id ? { "X-User-Id": id } : {};
 }
 
 /**
