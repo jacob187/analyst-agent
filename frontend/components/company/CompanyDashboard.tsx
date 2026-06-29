@@ -87,6 +87,7 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
 
   const loadFilings = useCallback(() => {
     if (filingsLoadedRef.current) return;
+    filingsControllerRef.current?.abort();
     setFilingsLoaded(true);
     filingsLoadedRef.current = true;
     setFilingsLoading(true);
@@ -152,6 +153,20 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
       loadFilings();
     }
   }, [activeTab, keysLoaded, loadFilings]);
+
+  // Re-fetch when the caller gains the ability to generate (signs in or adds a
+  // key). loadFilings is one-shot, so sections gated as `needs_key` on a prior
+  // keyless load would otherwise stay locked until a full page reload.
+  const canGenerate = keysLoaded && hasRequiredKeys();
+  const prevCanGenerateRef = useRef(canGenerate);
+  useEffect(() => {
+    const unlocked = canGenerate && !prevCanGenerateRef.current;
+    prevCanGenerateRef.current = canGenerate;
+    if (unlocked && filingsLoadedRef.current) {
+      filingsLoadedRef.current = false;
+      if (activeTab === "filings") loadFilings();
+    }
+  }, [canGenerate, activeTab, loadFilings]);
 
   const loadChart = useCallback(
     (p: Period) => {
@@ -272,9 +287,10 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
             <div className="h-[560px]">
               {keysLoaded && !hasRequiredKeys() ? (
                 <div className="flex h-full flex-col items-center justify-center gap-4 rounded-xl border border-border/60 bg-card p-8 text-center">
-                  <p className="text-sm font-medium">API keys required</p>
+                  <p className="text-sm font-medium">Sign in or add your API keys</p>
                   <p className="text-xs text-muted-foreground">
-                    Configure a provider key and SEC EDGAR User-Agent to use the AI analyst.
+                    Sign in to chat with our model, or add your own provider key and SEC EDGAR
+                    User-Agent in Settings.
                   </p>
                   <a
                     href="/settings"

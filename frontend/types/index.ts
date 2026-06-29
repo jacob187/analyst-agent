@@ -201,7 +201,7 @@ export interface BriefingResponse {
 export interface FilingProgressEvent {
   type: "progress";
   step: string; // "edgar_fetch" | "10-K/risk_10k" | ...
-  status: "fetching" | "complete" | "processing" | "cached" | "done" | "failed";
+  status: "fetching" | "complete" | "processing" | "cached" | "done" | "failed" | "needs_key";
   duration?: number;
 }
 
