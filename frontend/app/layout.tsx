@@ -5,6 +5,7 @@ import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Navbar } from "@/components/layout/Navbar";
 import { Footer } from "@/components/layout/Footer";
+import { UserIdSync } from "@/components/UserIdSync";
 
 // Skips loading Clerk entirely when set — for self-hosters who don't want to
 // create a Clerk account. Pair with `DISABLE_AUTH=true` on the backend.
@@ -48,6 +49,7 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
+          <UserIdSync />
           <Navbar />
           <main className="flex-1">{children}</main>
           <Footer />
