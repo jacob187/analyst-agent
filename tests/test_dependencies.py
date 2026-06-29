@@ -454,6 +454,34 @@ class TestEnvKeyGate:
         result = resolve_ws_keys({})
         assert result.google_api_key is None
 
+    @pytest.mark.eval_unit
+    async def test_env_keys_endpoint_hides_provider_from_anon(self, clerk_env, monkeypatch):
+        # /env-keys must not advertise the operator key to anonymous callers,
+        # or the UI renders chat/filings affordances the backend then refuses.
+        from api.routes.models import env_keys
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        keys = await get_api_keys(
+            x_google_api_key=None, x_openai_api_key=None,
+            x_anthropic_api_key=None, x_tavily_api_key=None,
+            x_user_id=None, x_clerk_session_token=None,
+        )
+        body = await env_keys(keys)
+        assert body["google"] is False
+
+    @pytest.mark.eval_unit
+    async def test_env_keys_endpoint_shows_provider_to_verified(self, clerk_env, rsa_keypair, monkeypatch):
+        from api.routes.models import env_keys
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        priv, _ = rsa_keypair
+        token = _make_token(priv)
+        keys = await get_api_keys(
+            x_google_api_key=None, x_openai_api_key=None,
+            x_anthropic_api_key=None, x_tavily_api_key=None,
+            x_user_id=TEST_SUB, x_clerk_session_token=token,
+        )
+        body = await env_keys(keys)
+        assert body["google"] is True
+
 
 class TestClerkWsVerification:
     @pytest.mark.eval_unit

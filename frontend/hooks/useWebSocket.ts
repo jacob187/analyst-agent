@@ -71,7 +71,9 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
             // If resuming, fetch and display prior messages
             if (data.resumed) {
               getClerkToken().then((tok) => {
-                const headers: Record<string, string> = { "X-User-Id": getUserId() };
+                const id = getUserId();
+                const headers: Record<string, string> = {};
+                if (id) headers["X-User-Id"] = id;
                 if (tok) headers["X-Clerk-Session-Token"] = tok;
                 return fetch(
                   `${API_BASE}/sessions/${data.session_id}/messages?ticker=${ticker}`,

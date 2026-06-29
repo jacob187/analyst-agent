@@ -17,10 +17,10 @@ const DEFAULT_KEYS: ApiKeys = {
 };
 
 export function useApiKeys() {
-  const { isSignedIn } = useAuth();
+  const { isSignedIn, isLoaded: authLoaded } = useAuth();
   const [keys, setKeysState] = useState<ApiKeys>(DEFAULT_KEYS);
   const [envKeys, setEnvKeys] = useState<EnvKeysResponse | null>(null);
-  const [loaded, setLoaded] = useState(false);
+  const [envLoaded, setEnvLoaded] = useState(false);
 
   useEffect(() => {
     // Load local keys from localStorage
@@ -38,8 +38,13 @@ export function useApiKeys() {
     api.envKeys()
       .then(setEnvKeys)
       .catch(() => {})
-      .finally(() => setLoaded(true));
+      .finally(() => setEnvLoaded(true));
   }, []);
+
+  // Gate consumers until BOTH the env-key probe and Clerk auth have resolved,
+  // so hasRequiredKeys() never runs while isSignedIn === undefined and flashes
+  // the "sign in / add keys" panel at a signed-in user relying on the env key.
+  const loaded = envLoaded && authLoaded;
 
   function setKeys(updated: ApiKeys) {
     setKeysState(updated);

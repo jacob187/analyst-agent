@@ -2,9 +2,10 @@
 
 import os
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from agents.model_registry import get_all_models
+from api.dependencies import ApiKeys, get_api_keys
 
 router = APIRouter(tags=["models"])
 
@@ -20,17 +21,22 @@ async def list_models():
 
 
 @router.get("/env-keys")
-async def env_keys():
-    """Return which API keys are available from server environment variables.
+async def env_keys(keys: ApiKeys = Depends(get_api_keys)):
+    """Return which API keys are available to this caller from server env vars.
 
-    Returns booleans only — never exposes the actual key values.
-    The frontend uses this to skip the settings prompt when keys are
-    configured via .env for local development.
+    Booleans only — never the key values. Provider keys are reported only to
+    callers allowed to spend the operator's env keys (signed-in or self-host),
+    mirroring the resolver's `_env_keys_allowed` gate: an anonymous caller sees
+    false even when the operator has keys configured, so the UI never advertises
+    a key the chat/filings path would then refuse. `is_operator_paid` reflects
+    that gated resolution (no provider headers are sent to this endpoint, so an
+    env key only resolves when the caller is allowed). SEC_HEADER is a global
+    server identity, reported to everyone.
     """
     return {
-        "google": bool(os.getenv("GOOGLE_API_KEY")),
-        "openai": bool(os.getenv("OPENAI_API_KEY")),
-        "anthropic": bool(os.getenv("ANTHROPIC_API_KEY")),
+        "google": keys.is_operator_paid("google_genai"),
+        "openai": keys.is_operator_paid("openai"),
+        "anthropic": keys.is_operator_paid("anthropic"),
         "sec_header": bool(os.getenv("SEC_HEADER")),
-        "tavily": bool(os.getenv("TAVILY_API_KEY")),
+        "tavily": bool(keys.tavily_api_key),
     }
