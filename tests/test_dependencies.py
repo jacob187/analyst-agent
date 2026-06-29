@@ -372,12 +372,13 @@ class TestClerkRestVerification:
         assert result.user_id is None
 
     @pytest.mark.eval_unit
-    async def test_anonymous_uuid_accepted_without_token(self, clerk_env):
-        # Progressive auth: a per-browser UUID is not a Clerk account, so it's
-        # trusted as-is even with Clerk enabled and no session token.
+    async def test_anonymous_uuid_dropped_without_token(self, clerk_env):
+        # Progressive auth: a legacy UUID is not a Clerk account and can't be
+        # verified, so with Clerk enabled and no token it is dropped to anonymous
+        # (None) — trusting it would let anyone claim any UUID's data.
         anon = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         result = await get_api_keys(x_user_id=anon, x_clerk_session_token=None)
-        assert result.user_id == anon
+        assert result.user_id is None
 
 
 class TestEnvKeyGate:
@@ -399,8 +400,8 @@ class TestEnvKeyGate:
 
     @pytest.mark.eval_unit
     async def test_anon_uuid_does_not_inherit_env_key(self, clerk_env, monkeypatch):
-        # A per-browser UUID is accepted as an id but is not a Clerk account,
-        # so it must not unlock operator env keys.
+        # A legacy UUID is dropped to anonymous under Clerk, so it neither
+        # becomes a trusted identity nor unlocks operator env keys.
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
         anon = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         result = await get_api_keys(
@@ -408,6 +409,7 @@ class TestEnvKeyGate:
             x_anthropic_api_key=None, x_tavily_api_key=None,
             x_user_id=anon, x_clerk_session_token=None,
         )
+        assert result.user_id is None
         assert result.google_api_key is None
 
     @pytest.mark.eval_unit
@@ -491,11 +493,21 @@ class TestClerkWsVerification:
 
     @pytest.mark.eval_unit
     def test_ws_anonymous_uuid_ok_without_token(self, clerk_env):
-        # Progressive auth: anonymous UUID needs no token even with Clerk on.
+        # A non-Clerk id connects as anonymous (no token needed) — but the
+        # identity itself is dropped in resolve_ws_keys (see below), so this
+        # only governs whether the connection is allowed, not who it acts as.
         anon = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         ok, reason = verify_ws_identity(anon, {})
         assert ok is True
         assert reason is None
+
+    @pytest.mark.eval_unit
+    def test_ws_legacy_uuid_identity_dropped(self, clerk_env):
+        # The WS path mirrors REST: a legacy UUID is unverifiable under Clerk,
+        # so resolve_ws_keys drops it to anonymous (no persistence under it).
+        anon = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        result = resolve_ws_keys({"user_id": anon})
+        assert result.user_id is None
 
 
 class TestUserIdRegexClerkFormat:

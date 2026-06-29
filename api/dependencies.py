@@ -77,6 +77,20 @@ def _is_clerk_user_id(user_id: str) -> bool:
     return user_id.startswith("user_")
 
 
+def _trusted_user_id(user_id: str | None) -> str | None:
+    """The identity trusted for persistence/scoping and operator resources.
+
+    When Clerk is enabled, only Clerk-format ids are trustworthy; a missing id
+    or a legacy UUID (which cannot be checked against Clerk) is anonymous —
+    trusting an unverifiable id would let anyone claim any UUID's data. Clerk
+    ids still require token verification by the caller (`_verify_user_identity`
+    / `verify_ws_identity`) before they're acted on.
+    """
+    if is_auth_disabled() or not is_clerk_enabled():
+        return user_id
+    return user_id if (user_id and _is_clerk_user_id(user_id)) else None
+
+
 def _env_keys_allowed(user_id: str | None) -> bool:
     """Whether the operator's env keys may resolve for this caller.
 
@@ -86,7 +100,7 @@ def _env_keys_allowed(user_id: str | None) -> bool:
     """
     if is_auth_disabled() or not is_clerk_enabled():
         return True
-    return bool(user_id) and _is_clerk_user_id(user_id)
+    return _trusted_user_id(user_id) is not None
 
 
 def _verify_user_identity(user_id: str | None, token: str | None) -> str | None:
@@ -98,7 +112,9 @@ def _verify_user_identity(user_id: str | None, token: str | None) -> str | None:
     Behavior:
       - DISABLE_AUTH=true → skip; trust the validated user_id as-is.
       - Clerk unconfigured → skip; trust the validated user_id as-is.
-      - Anonymous UUID user_id → trust as-is (no Clerk account to verify).
+      - Anonymous UUID user_id → treated as anonymous (None): a legacy UUID is
+        unverifiable against Clerk, so trusting it would let anyone claim any
+        UUID's persisted data.
       - Clerk-format user_id + no token → reject (401).
       - Clerk-format user_id + token → verify; sub must equal user_id.
     """
@@ -108,9 +124,10 @@ def _verify_user_identity(user_id: str | None, token: str | None) -> str | None:
         return user_id
 
     if not user_id or not _is_clerk_user_id(user_id):
-        # No id, or an anonymous UUID — nothing Clerk-backed to verify.
-        # Endpoint-level checks (require_user_id) decide if an id is required.
-        return user_id
+        # No id, or a legacy UUID that can't be checked against Clerk → anonymous.
+        # Never trust an unverifiable id; endpoint-level checks (require_user_id)
+        # then gate anything that needs a signed-in user.
+        return None
 
     if not token:
         raise HTTPException(status_code=401, detail="Missing Clerk session token")
@@ -245,7 +262,10 @@ def resolve_ws_keys(auth_message: dict) -> ApiKeys:
     `verify_ws_identity` separately so it can send a structured error
     frame and close with policy-violation code.
     """
-    user_id = _validate_user_id(auth_message.get("user_id"))
+    # Drop any unverifiable id (legacy UUID under Clerk) to anonymous, mirroring
+    # the REST path's _verify_user_identity. Clerk-format ids are verified by
+    # verify_ws_identity, which the route runs before acting on the identity.
+    user_id = _trusted_user_id(_validate_user_id(auth_message.get("user_id")))
     allow_env = _env_keys_allowed(user_id)
     google_key, google_source = _resolve_key(auth_message.get("google_api_key"), "GOOGLE_API_KEY", allow_env)
     openai_key, openai_source = _resolve_key(auth_message.get("openai_api_key"), "OPENAI_API_KEY", allow_env)
@@ -273,7 +293,8 @@ def verify_ws_identity(user_id: str | None, auth_message: dict) -> tuple[bool, s
     if is_auth_disabled() or not is_clerk_enabled():
         return True, None
     if not user_id or not _is_clerk_user_id(user_id):
-        # Anonymous UUID or no id — nothing Clerk-backed to verify.
+        # No id, or a non-Clerk id (legacy UUIDs are dropped to None upstream in
+        # resolve_ws_keys) — nothing Clerk-backed to verify; connect as anonymous.
         return True, None
 
     token = auth_message.get("clerk_session_token")
