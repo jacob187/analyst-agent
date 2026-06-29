@@ -12,6 +12,9 @@ paths, which run before any agent setup.
 """
 
 import asyncio
+import json
+import sqlite3
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -132,3 +135,100 @@ class TestSafeSendTimeout:
         ok = await chat._safe_send(ws, {"type": "ok"})
         assert ok is True
         assert ws.sent == [{"type": "ok"}]
+
+
+# ── Anonymous chat persists nothing ────────────────────────────────────────
+
+
+class _FakeAgent:
+    """Stand-in for the LangGraph agent: streams a single response event."""
+
+    def stream(self, *args, **kwargs):
+        async def _gen():
+            yield {"type": "response", "message": "Analysis complete."}
+        return _gen()
+
+
+@pytest.fixture
+def temp_db(tmp_path, monkeypatch):
+    """Point api.db at a throwaway SQLite file with the schema initialised, so a
+    full WS exchange can run and the test can count persisted rows directly."""
+    import api.db as db_module
+    db_path = tmp_path / "chat.db"
+    monkeypatch.setattr(db_module, "DB_PATH", db_path)
+    monkeypatch.setattr(db_module, "_db", None)
+    asyncio.get_event_loop().run_until_complete(db_module.init_db())
+    yield db_path
+    asyncio.get_event_loop().run_until_complete(db_module.close_db())
+
+
+def _patch_agent(monkeypatch):
+    """Replace LLM + agent construction so no real model is created."""
+    monkeypatch.setattr(chat, "create_llm_pair", lambda *a, **k: (MagicMock(), MagicMock()))
+    monkeypatch.setattr(
+        "agents.graph.analyst_graph.create_sec_qa_agent",
+        lambda *a, **k: _FakeAgent(),
+    )
+
+
+def _drain_until(ws, target_type):
+    while True:
+        ev = ws.receive_json()
+        if ev["type"] == target_type:
+            return ev
+
+
+def _row_count(db_path, table):
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    finally:
+        conn.close()
+
+
+# BYOK keys for every provider so the default model's provider key always
+# resolves; no user_id → anonymous.
+_BYOK_AUTH = {
+    "type": "auth",
+    "google_api_key": "byok-key",
+    "openai_api_key": "byok-key",
+    "anthropic_api_key": "byok-key",
+}
+
+
+class TestAnonChatNoPersistence:
+    """Anonymous (no user_id) chat with a BYOK key streams a response but writes
+    zero rows — persistence is sign-in-only."""
+
+    def test_anon_chat_streams_but_persists_nothing(self, client, temp_db, monkeypatch):
+        _patch_agent(monkeypatch)
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(_BYOK_AUTH))  # no user_id → anonymous
+            ok = _drain_until(ws, "auth_success")
+            assert ok["session_id"] is None
+            assert ok["resumed"] is False
+
+            ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+            resp = _drain_until(ws, "response")
+            assert resp["message"] == "Analysis complete."
+
+        assert _row_count(temp_db, "sessions") == 0
+        assert _row_count(temp_db, "messages") == 0
+
+    def test_signed_in_chat_persists_session(self, client, temp_db, monkeypatch):
+        # Contrast: a Clerk-format id (Clerk disabled in tests → trusted) writes a
+        # session row, proving the test would catch an anon-persistence regression.
+        # Assert on the session row (awaited), not messages (fire-and-forget task).
+        _patch_agent(monkeypatch)
+        auth = {**_BYOK_AUTH, "user_id": "user_contrasttest"}
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            ok = _drain_until(ws, "auth_success")
+            assert ok["session_id"]  # a real session id
+
+            ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+            _drain_until(ws, "response")
+
+        assert _row_count(temp_db, "sessions") == 1

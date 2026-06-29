@@ -7,11 +7,12 @@ import re
 # All callers should normalize to uppercase before matching.
 TICKER_RE = re.compile(r"^[A-Z0-9.\-]{1,10}$")
 
-# Accepts two user-ID formats (progressive auth):
-#   1. Anonymous UUID v4 — per-browser ID minted by the frontend for signed-out
-#      visitors. Trusted as-is; gives data isolation without a Clerk account.
-#   2. Clerk account ID  — `user_` followed by Clerk's opaque alphanumeric suffix.
-#      Verified against a Clerk session token when Clerk is configured.
+# Accepts two user-ID formats:
+#   1. Clerk account ID — `user_` followed by Clerk's opaque alphanumeric suffix.
+#      Verified against a Clerk session token when Clerk is configured. This is
+#      the only id the frontend sends today; it unlocks DB persistence.
+#   2. Legacy UUID v4 — kept for backward-compat only. The frontend no longer
+#      mints anonymous UUIDs; anonymous visitors send no id and have no DB data.
 USER_ID_RE = re.compile(
     r"^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|user_[A-Za-z0-9]+)$"
 )
