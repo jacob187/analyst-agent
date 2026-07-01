@@ -233,59 +233,6 @@ def _sse(data: dict) -> str:
     return f"data: {json.dumps(data)}\n\n"
 
 
-async def _stream_section(
-    form_type: str,
-    accession: str,
-    analysis_type: str,
-    raw_data: dict[str, Any],
-    ticker: str,
-    model_id: str,
-    api_key: str | None,
-):
-    """Async generator for one filing analysis section.
-
-    Yields SSE event strings for progress updates, then yields a
-    ``("result", analysis_or_None)`` sentinel as the final item so the
-    caller can capture the data without breaking the yield chain.
-    """
-    from api.db import get_filing_analysis, save_filing_analysis
-
-    step = f"{form_type}/{analysis_type}"
-    cached = await get_filing_analysis(ticker, form_type, accession, analysis_type)
-    if cached:
-        logger.info("[%s] CACHE HIT  %s/%s", ticker, form_type, analysis_type)
-        yield _sse({"type": "progress", "step": step, "status": "cached"})
-        yield ("result", json.loads(cached["analysis_json"]))
-        return
-
-    if not api_key:
-        # Cache miss with no key to generate — anonymous / keyless caller.
-        # Signal the gap so the UI can prompt sign-in or BYOK; don't run the LLM.
-        yield _sse({"type": "progress", "step": step, "status": "needs_key"})
-        yield ("result", None)
-        return
-
-    logger.info("[%s] LLM CALL   %s/%s — calling %s", ticker, form_type, analysis_type, model_id)
-    yield _sse({"type": "progress", "step": step, "status": "processing"})
-    t0 = time.monotonic()
-    try:
-        async with llm_slot():
-            analysis = await asyncio.to_thread(
-                _run_llm_analysis, ticker, analysis_type, raw_data, model_id, api_key,
-            )
-        await save_filing_analysis(
-            ticker, form_type, accession, analysis_type, json.dumps(analysis),
-        )
-        duration = round(time.monotonic() - t0, 1)
-        logger.info("[%s] LLM DONE   %s/%s (%.1fs)", ticker, form_type, analysis_type, duration)
-        yield _sse({"type": "progress", "step": step, "status": "done", "duration": duration})
-        yield ("result", analysis)
-    except Exception as e:
-        logger.error("[%s] LLM FAILED %s/%s: %s", ticker, form_type, analysis_type, e)
-        yield _sse({"type": "progress", "step": step, "status": "failed"})
-        yield ("result", None)
-
-
 def _build_edgar_url(cik: str, accession: str) -> str:
     """Construct a URL to the filing on SEC EDGAR.
 
@@ -301,18 +248,18 @@ def _build_edgar_url(cik: str, accession: str) -> str:
     return f"https://www.sec.gov/Archives/edgar/data/{cik}/{cleaned}/"
 
 
-def _fetch_filing_data(ticker: str) -> dict[str, Any]:
+def _fetch_filing_data(ticker: str, fetch_raw: bool = True) -> dict[str, Any]:
     """Synchronous SEC data fetching — runs in a thread pool.
 
-    Returns raw filing data (metadata, section text) without LLM analysis.
-    Each filing type fails independently.
+    Returns filing metadata plus, when ``fetch_raw`` is True, the raw section
+    text needed for LLM analysis. Keyless callers (who can only ever be served
+    *cached* analyses) pass ``fetch_raw=False`` to skip the expensive
+    per-section extraction/parse — only the metadata (accession, used as the
+    cache key) is fetched. Each filing type fails independently.
 
     For foreign private issuers (BP, BABA, TSM), falls back to 20-F when
-    no 10-K is available. SECDataRetrieval handles 20-F via the same
-    get_section() / get_risk_factors_raw() / get_mda_raw() interface.
-
-    6-K is NOT a 10-Q replacement — edgartools' SixK class is a press
-    release wrapper without structured section access.
+    no 10-K is available. 6-K is NOT a 10-Q replacement — edgartools' SixK
+    class is a press-release wrapper without structured section access.
     """
     from agents.sec_workflow.get_SEC_data import SECDataRetrieval
 
@@ -324,69 +271,76 @@ def _fetch_filing_data(ticker: str) -> dict[str, Any]:
         retriever.get_tenk_filing()
         meta = retriever._tenk_metadata
         if meta:
-            result["tenk"] = {
+            tenk: dict[str, Any] = {
                 "metadata": {
                     **meta.to_dict(),
                     "edgar_url": _build_edgar_url(meta.cik, meta.accession),
                     "form_type": "10-K",
                 },
-                "risk_raw": retriever.get_risk_factors_raw("10-K"),
-                "mda_raw": retriever.get_mda_raw("10-K"),
-                "balance_sheet_raw": retriever.extract_balance_sheet_as_str("tenk"),
-                "business_raw": retriever.get_business_raw(),
-                "cyber_raw": retriever.get_cybersecurity_raw(),
-                "legal_raw": retriever.get_legal_proceedings_raw(),
-                "market_risk_raw": retriever.get_market_risk_raw("10-K"),
-                "income_stmt_raw": retriever.get_income_statement("10-K"),
-                "cashflow_raw": retriever.get_cashflow_statement("10-K"),
             }
+            if fetch_raw:
+                tenk.update({
+                    "risk_raw": retriever.get_risk_factors_raw("10-K"),
+                    "mda_raw": retriever.get_mda_raw("10-K"),
+                    "balance_sheet_raw": retriever.extract_balance_sheet_as_str("tenk"),
+                    "business_raw": retriever.get_business_raw(),
+                    "cyber_raw": retriever.get_cybersecurity_raw(),
+                    "legal_raw": retriever.get_legal_proceedings_raw(),
+                    "market_risk_raw": retriever.get_market_risk_raw("10-K"),
+                    "income_stmt_raw": retriever.get_income_statement("10-K"),
+                    "cashflow_raw": retriever.get_cashflow_statement("10-K"),
+                })
+            result["tenk"] = tenk
     except (ValueError, Exception):
         # Foreign filers (BP, BABA, TSM) file 20-F instead of 10-K.
-        # SECDataRetrieval.get_section("20-F", item) uses TwentyF's named
-        # property accessors (.risk_factors, .management_discussion).
         try:
             retriever.get_twentyf_filing()
             meta = retriever._twentyf_metadata
             if meta:
-                result["tenk"] = {
+                tenk = {
                     "metadata": {
                         **meta.to_dict(),
                         "edgar_url": _build_edgar_url(meta.cik, meta.accession),
                         "form_type": "20-F",
                     },
-                    "risk_raw": retriever.get_risk_factors_raw("20-F"),
-                    "mda_raw": retriever.get_mda_raw("20-F"),
-                    "balance_sheet_raw": {},
                 }
+                if fetch_raw:
+                    tenk.update({
+                        "risk_raw": retriever.get_risk_factors_raw("20-F"),
+                        "mda_raw": retriever.get_mda_raw("20-F"),
+                        "balance_sheet_raw": {},
+                    })
+                result["tenk"] = tenk
         except (ValueError, Exception):
             pass  # No 10-K or 20-F available
 
     # --- 10-Q ---
     # Foreign filers use 6-K, but edgartools' SixK class only wraps press
-    # releases — no structured section access. Quarterly section will be
-    # empty for foreign filers until edgartools adds 6-K parsing.
+    # releases — no structured section access.
     try:
         retriever.get_tenq_filing()
         meta = retriever._tenq_metadata
         if meta:
-            result["tenq"] = {
+            tenq: dict[str, Any] = {
                 "metadata": {
                     **meta.to_dict(),
                     "edgar_url": _build_edgar_url(meta.cik, meta.accession),
                 },
-                "risk_raw": retriever.get_risk_factors_raw("10-Q"),
-                "mda_raw": retriever.get_mda_raw("10-Q"),
-                "income_stmt_raw": retriever.get_income_statement("10-Q"),
-                "cashflow_raw": retriever.get_cashflow_statement("10-Q"),
             }
+            if fetch_raw:
+                tenq.update({
+                    "risk_raw": retriever.get_risk_factors_raw("10-Q"),
+                    "mda_raw": retriever.get_mda_raw("10-Q"),
+                    "income_stmt_raw": retriever.get_income_statement("10-Q"),
+                    "cashflow_raw": retriever.get_cashflow_statement("10-Q"),
+                })
+            result["tenq"] = tenq
     except (ValueError, Exception):
         pass  # No 10-Q available
 
     # --- 8-K (earnings or material event) ---
-    # Always fetch the overview first; branch on `has_earnings` to dispatch to
-    # the right analyzer downstream. Earnings (Item 2.02 + parseable EX-99.1)
-    # goes to the earnings analyzer; everything else goes to the material-event
-    # analyzer (leadership changes, M&A, cyber incidents, Reg FD, etc.).
+    # The overview (kind + accession) is needed even keyless to pick the cache
+    # key; only the per-item/earnings extraction is gated on fetch_raw.
     try:
         overview = retriever.get_8k_overview()
         if not overview.get("found"):
@@ -403,7 +357,10 @@ def _fetch_filing_data(ticker: str) -> dict[str, Any]:
                 ) if eightk_meta else "",
                 "form_type": "8-K",
             }
-            if overview.get("has_earnings"):
+            kind = "earnings" if overview.get("has_earnings") else "event"
+            if not fetch_raw:
+                result["eightk"] = {"kind": kind, "raw": {}, "metadata": metadata}
+            elif kind == "earnings":
                 earnings = retriever.get_earnings_data()
                 result["eightk"] = {
                     "kind": "earnings",
@@ -434,6 +391,137 @@ def _fetch_filing_data(ticker: str) -> dict[str, Any]:
         result["eightk"] = {"kind": "none", "reason": f"No 8-K available ({e})"}
 
     return result
+
+
+def _plan_sections(filing_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Ordered list of analyzable sections from fetched filing data — the single
+    source of truth for both endpoints (#10).
+
+    Each entry: ``{section, key, form, accession, atype, input}``. ``section``/
+    ``key`` place the result in the response; ``atype`` is the cache
+    analysis_type (== key except 8-K, where atype is the 8-K kind). Conditional
+    10-K sections (Item 1/1C/3/7A, XBRL) appear only when their raw text was
+    extracted and found, so a keyless fetch (``fetch_raw=False`` → empty raw)
+    yields just the always-present core sections.
+    """
+    plan: list[dict[str, Any]] = []
+
+    if "tenk" in filing_data:
+        tenk = filing_data["tenk"]
+        acc = tenk["metadata"].get("accession", "")
+        plan.append({"section": "tenk", "key": "risk_10k", "form": "10-K", "accession": acc, "atype": "risk_10k", "input": tenk.get("risk_raw", {})})
+        plan.append({"section": "tenk", "key": "mda_10k", "form": "10-K", "accession": acc, "atype": "mda_10k", "input": tenk.get("mda_raw", {})})
+
+        balance_input: dict[str, Any] = {"tenk": tenk.get("balance_sheet_raw", {})}
+        if "tenq" in filing_data and filing_data["tenq"].get("balance_sheet_raw"):
+            balance_input["tenq"] = filing_data["tenq"]["balance_sheet_raw"]
+        plan.append({"section": "tenk", "key": "balance", "form": "10-K", "accession": acc, "atype": "balance", "input": balance_input})
+
+        for atype, raw_key in [("business", "business_raw"), ("cybersecurity", "cyber_raw"), ("legal", "legal_raw"), ("market_risk", "market_risk_raw")]:
+            raw = tenk.get(raw_key)
+            if raw and raw.get("found"):
+                plan.append({"section": "tenk", "key": atype, "form": "10-K", "accession": acc, "atype": atype, "input": raw})
+
+        if tenk.get("income_stmt_raw"):
+            income_input: dict[str, Any] = {"tenk": tenk["income_stmt_raw"], "tenk_metadata": tenk["metadata"]}
+            if "tenq" in filing_data and filing_data["tenq"].get("income_stmt_raw"):
+                income_input["tenq"] = filing_data["tenq"]["income_stmt_raw"]
+                income_input["tenq_metadata"] = filing_data["tenq"]["metadata"]
+            plan.append({"section": "tenk", "key": "income_stmt", "form": "10-K", "accession": acc, "atype": "income_stmt", "input": income_input})
+
+        if tenk.get("cashflow_raw"):
+            cashflow_input: dict[str, Any] = {"tenk": tenk["cashflow_raw"], "tenk_metadata": tenk["metadata"]}
+            if "tenq" in filing_data and filing_data["tenq"].get("cashflow_raw"):
+                cashflow_input["tenq"] = filing_data["tenq"]["cashflow_raw"]
+                cashflow_input["tenq_metadata"] = filing_data["tenq"]["metadata"]
+            plan.append({"section": "tenk", "key": "cashflow", "form": "10-K", "accession": acc, "atype": "cashflow", "input": cashflow_input})
+
+    if "tenq" in filing_data:
+        tenq = filing_data["tenq"]
+        acc = tenq["metadata"].get("accession", "")
+        plan.append({"section": "tenq", "key": "risk_10q", "form": "10-Q", "accession": acc, "atype": "risk_10q", "input": tenq.get("risk_raw", {})})
+        plan.append({"section": "tenq", "key": "mda_10q", "form": "10-Q", "accession": acc, "atype": "mda_10q", "input": tenq.get("mda_raw", {})})
+
+    eightk = filing_data.get("eightk", {})
+    kind = eightk.get("kind", "none")
+    if kind in ("earnings", "event"):
+        acc = eightk.get("metadata", {}).get("accession", "")
+        plan.append({"section": "eightk", "key": "analysis", "form": "8-K", "accession": acc, "atype": kind, "input": eightk.get("raw", {})})
+
+    return plan
+
+
+async def _analyze_or_cache(
+    ticker: str, form_type: str, accession: str, analysis_type: str,
+    llm_input: dict[str, Any], model_id: str, api_key: str | None,
+    on_progress=None,
+) -> tuple[str, dict[str, Any] | None]:
+    """Resolve one filing section — the single source of truth for the
+    cache → keyless-gate → generate flow shared by the JSON and SSE endpoints (#10).
+
+    Returns ``(status, data)``: 'cached'|'needs_key'|'done'|'failed'. ``data``
+    is None for needs_key/failed. ``on_progress(status, extra)`` (optional) is
+    called as the state advances so the SSE endpoint can stream progress; the
+    JSON endpoint passes None. The daily budget is charged by the caller's
+    pre-flight (only when generation will occur), never here.
+    """
+    from api.db import get_filing_analysis, save_filing_analysis
+
+    def progress(status: str, **extra):
+        if on_progress:
+            on_progress(status, extra)
+
+    cached = await get_filing_analysis(ticker, form_type, accession, analysis_type)
+    if cached:
+        logger.info("[%s] CACHE HIT  %s/%s", ticker, form_type, analysis_type)
+        progress("cached")
+        return "cached", json.loads(cached["analysis_json"])
+
+    if not api_key:
+        # Cache miss with no key to generate — anonymous / keyless caller.
+        progress("needs_key")
+        return "needs_key", None
+
+    progress("processing")
+    logger.info("[%s] LLM CALL   %s/%s — calling %s", ticker, form_type, analysis_type, model_id)
+    t0 = time.monotonic()
+    try:
+        async with llm_slot():
+            analysis = await asyncio.to_thread(
+                _run_llm_analysis, ticker, analysis_type, llm_input, model_id, api_key,
+            )
+        await save_filing_analysis(
+            ticker, form_type, accession, analysis_type, json.dumps(analysis),
+        )
+        duration = round(time.monotonic() - t0, 1)
+        logger.info("[%s] LLM DONE   %s/%s (%.1fs)", ticker, form_type, analysis_type, duration)
+        progress("done", duration=duration)
+        return "done", analysis
+    except Exception as e:
+        logger.error("[%s] LLM FAILED %s/%s: %s", ticker, form_type, analysis_type, e)
+        progress("failed")
+        return "failed", None
+
+
+async def _charge_budget_if_generating(
+    keys: ApiKeys, provider: str, ticker: str, plan: list[dict[str, Any]],
+) -> bool:
+    """Charge the operator's daily budget once, only when the request will
+    actually run ≥1 LLM call (#6): operator-paid AND some planned section is a
+    cache miss. A fully-cached (or keyless) request is never charged.
+
+    Returns True if charging succeeded or wasn't needed; raises LLMBudgetExceeded
+    when over budget so the caller can surface a 429 / SSE error.
+    """
+    if not keys.is_operator_paid(provider):
+        return True
+    from api.db import get_filing_analysis
+    cached = await asyncio.gather(*[
+        get_filing_analysis(ticker, p["form"], p["accession"], p["atype"]) for p in plan
+    ])
+    if any(c is None for c in cached):
+        await check_and_charge_budget(keys.user_id)
+    return True
 
 
 def _run_llm_analysis(
@@ -526,109 +614,52 @@ async def get_company_filings(
     model = get_model(model_id) or get_default_model()
     # Key is optional: cached analyses are served to anyone. A key is only
     # needed to generate a fresh analysis on cache miss (BYOK, or the operator
-    # env key for signed-in users).
+    # env key for signed-in users). Keyless callers skip the expensive raw
+    # section extraction — only metadata (the cache key) is fetched.
     api_key = keys.get_provider_key(model.provider)
 
-    # Charge the daily budget only when the operator's env key is in use —
-    # BYOK requests spend the user's own provider quota, not ours.
-    if keys.is_operator_paid(model.provider):
-        try:
-            await check_and_charge_budget(keys.user_id)
-        except LLMBudgetExceeded as e:
-            raise HTTPException(status_code=429, detail=str(e))
-
-    # Step 1: Fetch raw filing data from EDGAR (no LLM, ~1-3s)
-    logger.info("[%s] Fetching raw filings from EDGAR...", ticker)
+    # Step 1: Fetch filing data from EDGAR (no LLM, ~1-3s). Raw section text is
+    # extracted only when there's a key to generate with.
+    logger.info("[%s] Fetching filings from EDGAR (raw=%s)...", ticker, bool(api_key))
     t0 = time.monotonic()
-    filing_data = await asyncio.to_thread(_fetch_filing_data, ticker)
+    filing_data = await asyncio.to_thread(_fetch_filing_data, ticker, api_key is not None)
     logger.info("[%s] EDGAR fetch complete (%.1fs)", ticker, time.monotonic() - t0)
 
-    # Step 2: For each filing section, check DB cache then run LLM if needed
-    from api.db import get_filing_analysis, save_filing_analysis
+    plan = _plan_sections(filing_data)
 
-    async def _cached_analysis(
-        form_type: str, accession: str, analysis_type: str,
-        raw_data: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        """Check DB cache, run LLM on miss, save result. Returns None on error."""
-        cached = await get_filing_analysis(ticker, form_type, accession, analysis_type)
-        if cached:
-            logger.info("[%s] CACHE HIT  %s/%s (accession: %s)", ticker, form_type, analysis_type, accession)
-            return json.loads(cached["analysis_json"])
-        if not api_key:
-            # Cache miss with no key — anonymous / keyless caller. Skip the LLM;
-            # the section is simply absent from the response (UI prompts sign-in).
-            return None
-        logger.info("[%s] LLM CALL   %s/%s (accession: %s) — calling %s", ticker, form_type, analysis_type, accession, model.id)
-        t_llm = time.monotonic()
-        try:
-            async with llm_slot():
-                analysis = await asyncio.to_thread(
-                    _run_llm_analysis, ticker, analysis_type,
-                    raw_data, model.id, api_key,
-                )
-            await save_filing_analysis(
-                ticker, form_type, accession, analysis_type, json.dumps(analysis),
-            )
-            logger.info("[%s] LLM DONE   %s/%s (%.1fs) — saved to DB", ticker, form_type, analysis_type, time.monotonic() - t_llm)
-            return analysis
-        except Exception as e:
-            logger.error("[%s] LLM FAILED %s/%s: %s", ticker, form_type, analysis_type, e)
-            return None
+    # Charge the daily budget once, and only when an LLM call will actually run
+    # (operator-paid + ≥1 cache miss). Fully-cached / keyless reads cost nothing.
+    try:
+        await _charge_budget_if_generating(keys, model.provider, ticker, plan)
+    except LLMBudgetExceeded as e:
+        raise HTTPException(status_code=429, detail=str(e))
 
-    # Build all analysis coroutines upfront so they can run in parallel.
-    # Each entry is (section_key, analysis_key, coroutine).
-    analysis_tasks: list[tuple[str, str, Any]] = []
+    # Resolve every section concurrently — cache hits return instantly, misses
+    # with a key run the LLM in parallel threads.
+    results = await asyncio.gather(*[
+        _analyze_or_cache(ticker, p["form"], p["accession"], p["atype"], p["input"], model.id, api_key)
+        for p in plan
+    ])
 
-    if "tenk" in filing_data:
-        tenk = filing_data["tenk"]
-        acc = tenk["metadata"].get("accession", "")
-        for atype, raw_key in [("risk_10k", "risk_raw"), ("mda_10k", "mda_raw")]:
-            analysis_tasks.append(("tenk", atype, _cached_analysis("10-K", acc, atype, tenk[raw_key])))
-
-        balance_input: dict[str, Any] = {"tenk": tenk.get("balance_sheet_raw", {})}
-        if "tenq" in filing_data:
-            tenq_bs = filing_data["tenq"].get("balance_sheet_raw")
-            if tenq_bs:
-                balance_input["tenq"] = tenq_bs
-        analysis_tasks.append(("tenk", "balance", _cached_analysis("10-K", acc, "balance", balance_input)))
-
-    if "tenq" in filing_data:
-        tenq = filing_data["tenq"]
-        acc = tenq["metadata"].get("accession", "")
-        for atype, raw_key in [("risk_10q", "risk_raw"), ("mda_10q", "mda_raw")]:
-            analysis_tasks.append(("tenq", atype, _cached_analysis("10-Q", acc, atype, tenq[raw_key])))
-
-    eightk = filing_data.get("eightk", {})
-    eightk_kind = eightk.get("kind", "none")
-    if eightk_kind in ("earnings", "event"):
-        acc = eightk.get("metadata", {}).get("accession", "")
-        analysis_tasks.append(
-            ("eightk", "analysis", _cached_analysis("8-K", acc, eightk_kind, eightk["raw"]))
-        )
-
-    # Run all LLM analyses concurrently — on cache hit they return instantly,
-    # on cache miss the LLM calls run in parallel threads via asyncio.to_thread.
-    results = await asyncio.gather(*(coro for _, _, coro in analysis_tasks))
-
-    # Assemble response from parallel results
     response: dict[str, Any] = {"ticker": ticker}
-
     if "tenk" in filing_data:
         response["tenk"] = {"metadata": filing_data["tenk"]["metadata"]}
     if "tenq" in filing_data:
         response["tenq"] = {"metadata": filing_data["tenq"]["metadata"]}
 
-    for (section, key, _), result in zip(analysis_tasks, results):
-        if result is None:
+    eightk = filing_data.get("eightk", {})
+    eightk_kind = eightk.get("kind", "none")
+
+    for p, (_status, data) in zip(plan, results):
+        if data is None:
             continue
-        if section in ("tenk", "tenq"):
-            response[section][key] = result
-        elif section == "eightk":
+        if p["section"] in ("tenk", "tenq"):
+            response[p["section"]][p["key"]] = data
+        elif p["section"] == "eightk":
             response["eightk"] = {
                 "kind": eightk_kind,
                 "metadata": eightk.get("metadata", {}),
-                "analysis": result,
+                "analysis": data,
             }
 
     if "eightk" not in response:
@@ -676,6 +707,7 @@ async def stream_company_filings(
     model = get_model(model_id) or get_default_model()
     # Key is optional: cached sections stream to anyone; a key is only needed
     # to generate fresh sections on cache miss (BYOK, or operator key signed-in).
+    # Keyless callers skip raw section extraction (only metadata is fetched).
     api_key = keys.get_provider_key(model.provider)
 
     # Per-IP concurrency guard — prevents a single client from opening
@@ -697,24 +729,17 @@ async def stream_company_filings(
     ):
         raise HTTPException(status_code=429, detail="Rate limit exceeded — try again later")
 
-    # Charge the daily budget only when the operator's env key is in use —
-    # BYOK requests spend the user's own provider quota.
-    if keys.is_operator_paid(model.provider):
-        try:
-            await check_and_charge_budget(keys.user_id)
-        except LLMBudgetExceeded as e:
-            raise HTTPException(status_code=429, detail=str(e))
-
     async def generate():
         # Acquire a concurrency slot for the duration of this stream.
         # Released when the generator finishes (normal exit or client disconnect).
         await semaphore.acquire()
         try:
-            # Step 1: Fetch raw filings from EDGAR
+            # Step 1: Fetch filings from EDGAR. Raw section text is extracted
+            # only when there's a key to generate with (keyless → metadata only).
             yield _sse({"type": "progress", "step": "edgar_fetch", "status": "fetching"})
             try:
                 t0 = time.monotonic()
-                filing_data = await asyncio.to_thread(_fetch_filing_data, ticker)
+                filing_data = await asyncio.to_thread(_fetch_filing_data, ticker, api_key is not None)
                 logger.info("[%s] EDGAR fetch complete (%.1fs)", ticker, time.monotonic() - t0)
                 yield _sse({
                     "type": "progress",
@@ -738,84 +763,36 @@ async def stream_company_filings(
                 "eightk_metadata": eightk.get("metadata") if eightk_kind != "none" else None,
             })
 
-            # Run all LLM sections concurrently using a shared queue.
-            # Each task pushes SSE events (progress + section) to the queue
-            # as they happen; the outer generator yields them to the client
-            # in real time.  This cuts wall-clock time from the *sum* of all
-            # LLM calls (~90s worst case) to the *max* of them (~15s).
+            plan = _plan_sections(filing_data)
+
+            # Charge the daily budget once, only when an LLM call will run
+            # (operator-paid + ≥1 cache miss). Over budget → error + stop.
+            try:
+                await _charge_budget_if_generating(keys, model.provider, ticker, plan)
+            except LLMBudgetExceeded as e:
+                yield _sse({"type": "error", "message": str(e)})
+                return
+
+            # Run all sections concurrently using a shared queue. Each task pushes
+            # progress + section events as they happen; the outer generator yields
+            # them in real time, so wall-clock is the *max* of the LLM calls, not
+            # the sum. _analyze_or_cache is the same resolver the JSON endpoint uses.
             queue: asyncio.Queue[str | None] = asyncio.Queue()
 
-            async def section_task(form_type: str, accession: str, analysis_type: str, raw_data: dict):
-                """Run one analysis and push events to the shared queue."""
-                result = None
-                async for item in _stream_section(form_type, accession, analysis_type, raw_data, ticker, model.id, api_key):
-                    if isinstance(item, tuple):
-                        result = item[1]
-                    else:
-                        await queue.put(item)
-                if result is not None:
-                    await queue.put(_sse({"type": "section", "form": form_type, "key": analysis_type, "data": result}))
+            async def section_task(p: dict[str, Any]):
+                step = f"{p['form']}/{p['atype']}"
 
-            # Collect all independent section tasks
-            tasks: list[Any] = []
+                def on_progress(status: str, extra: dict):
+                    queue.put_nowait(_sse({"type": "progress", "step": step, "status": status, **extra}))
 
-            if "tenk" in filing_data:
-                tenk = filing_data["tenk"]
-                accession = tenk["metadata"].get("accession", "")
+                _status, data = await _analyze_or_cache(
+                    ticker, p["form"], p["accession"], p["atype"], p["input"],
+                    model.id, api_key, on_progress=on_progress,
+                )
+                if data is not None:
+                    await queue.put(_sse({"type": "section", "form": p["form"], "key": p["key"], "data": data}))
 
-                # Existing financial statement sections
-                for analysis_type, raw_key in [("risk_10k", "risk_raw"), ("mda_10k", "mda_raw")]:
-                    tasks.append(section_task("10-K", accession, analysis_type, tenk[raw_key]))
-
-                balance_input: dict[str, Any] = {"tenk": tenk.get("balance_sheet_raw", {})}
-                if "tenq" in filing_data:
-                    tenq_bs = filing_data["tenq"].get("balance_sheet_raw")
-                    if tenq_bs:
-                        balance_input["tenq"] = tenq_bs
-                tasks.append(section_task("10-K", accession, "balance", balance_input))
-
-                # Newly surfaced 10-K text sections (Item 1, 1C, 3, 7A)
-                for analysis_type, raw_key in [
-                    ("business", "business_raw"),
-                    ("cybersecurity", "cyber_raw"),
-                    ("legal", "legal_raw"),
-                    ("market_risk", "market_risk_raw"),
-                ]:
-                    raw = tenk.get(raw_key)
-                    if raw and raw.get("found"):
-                        tasks.append(section_task("10-K", accession, analysis_type, raw))
-
-                # Income statement — combines 10-K + 10-Q XBRL data
-                if tenk.get("income_stmt_raw"):
-                    income_input: dict[str, Any] = {
-                        "tenk": tenk["income_stmt_raw"],
-                        "tenk_metadata": tenk["metadata"],
-                    }
-                    if "tenq" in filing_data and filing_data["tenq"].get("income_stmt_raw"):
-                        income_input["tenq"] = filing_data["tenq"]["income_stmt_raw"]
-                        income_input["tenq_metadata"] = filing_data["tenq"]["metadata"]
-                    tasks.append(section_task("10-K", accession, "income_stmt", income_input))
-
-                # Cash flow — combines 10-K + 10-Q XBRL data
-                if tenk.get("cashflow_raw"):
-                    cashflow_input: dict[str, Any] = {
-                        "tenk": tenk["cashflow_raw"],
-                        "tenk_metadata": tenk["metadata"],
-                    }
-                    if "tenq" in filing_data and filing_data["tenq"].get("cashflow_raw"):
-                        cashflow_input["tenq"] = filing_data["tenq"]["cashflow_raw"]
-                        cashflow_input["tenq_metadata"] = filing_data["tenq"]["metadata"]
-                    tasks.append(section_task("10-K", accession, "cashflow", cashflow_input))
-
-            if "tenq" in filing_data:
-                tenq = filing_data["tenq"]
-                accession = tenq["metadata"].get("accession", "")
-                for analysis_type, raw_key in [("risk_10q", "risk_raw"), ("mda_10q", "mda_raw")]:
-                    tasks.append(section_task("10-Q", accession, analysis_type, tenq[raw_key]))
-
-            if eightk_kind in ("earnings", "event"):
-                accession = eightk.get("metadata", {}).get("accession", "")
-                tasks.append(section_task("8-K", accession, eightk_kind, eightk["raw"]))
+            tasks = [section_task(p) for p in plan]
 
             if tasks:
                 async def run_all():

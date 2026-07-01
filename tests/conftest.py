@@ -56,6 +56,21 @@ def _scrub_clerk_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_llm_semaphore():
+    """Rebuild the module-level LLM dispatch semaphore before each test.
+
+    It's an asyncio.Semaphore that binds to the event loop of its first
+    acquire. TestClient runs each request on a fresh loop, so a semaphore
+    bound by an earlier test raises 'bound to a different event loop' when a
+    later test reuses it. Production runs a single loop, so this is a no-op
+    there — purely a test-isolation guard.
+    """
+    from api import llm_concurrency
+    llm_concurrency._rebuild_semaphore()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_rate_limit_state():
     """Clear in-memory rate-limit caches between tests so REST tests that
     hit the same endpoint repeatedly don't trip each other's quotas."""

@@ -522,3 +522,141 @@ class TestFilingsConcurrencyCap:
         # Restore the default semaphore size for the rest of the suite.
         monkeypatch.undo()
         llm_concurrency._rebuild_semaphore()
+
+
+# ── Streaming endpoint (SSE) ───────────────────────────────────────────────
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def _no_keys():
+    """Force a truly keyless request: the project .env may set GOOGLE_API_KEY,
+    and with Clerk disabled the env key would otherwise resolve for an anon
+    caller. Mirror the existing keyless tests' env-clearing pattern."""
+    with patch.dict("os.environ", {}, clear=True):
+        with patch("api.dependencies.os.getenv", return_value=None):
+            yield
+
+
+def _stream_events(client, path, headers=None):
+    """Open the SSE filings stream and collect parsed `data:` events."""
+    events = []
+    with client.stream("GET", path, headers=headers or {}) as resp:
+        assert resp.status_code == 200
+        for line in resp.iter_lines():
+            if line.startswith("data: "):
+                events.append(json.loads(line[6:]))
+    return events
+
+
+def _core_only(deps):
+    """Restrict the SEC mock to core sections so the stream's conditional
+    (Item 1/1C/3/7A) and XBRL sections produce no tasks — keeps the event set
+    predictable. Unconfigured MagicMock getters otherwise look 'found'."""
+    sec = deps["sec"]
+    for m in ("get_business_raw", "get_cybersecurity_raw",
+              "get_legal_proceedings_raw", "get_market_risk_raw"):
+        getattr(sec, m).return_value = {"found": False}
+    sec.get_income_statement.return_value = None
+    sec.get_cashflow_statement.return_value = None
+
+
+_KEYED = {"X-Google-Api-Key": "test-key", "X-User-Id": "user_streamtest"}
+
+
+class TestFilingsStream:
+    """Characterization of GET /{ticker}/filings/stream (previously untested)."""
+
+    def test_stream_generates_and_completes(self, client, mock_filings_deps):
+        _core_only(mock_filings_deps)
+        events = _stream_events(client, "/api/company/AAPL/filings/stream", _KEYED)
+        types = [e.get("type") for e in events]
+        assert "metadata" in types
+        assert types[-1] == "complete"
+        # Cache miss + key → core sections generate and stream a section payload.
+        section_keys = {e["key"] for e in events if e.get("type") == "section"}
+        assert {"risk_10k", "mda_10k", "balance"} <= section_keys
+        statuses = {e["status"] for e in events if e.get("type") == "progress"}
+        assert "done" in statuses
+
+    def test_stream_serves_cached_without_llm(self, client, mock_filings_deps):
+        _core_only(mock_filings_deps)
+        mock_filings_deps["get_cache"].return_value = {
+            "analysis_json": json.dumps(_MOCK_RISK_ANALYSIS)
+        }
+        events = _stream_events(client, "/api/company/AAPL/filings/stream", _KEYED)
+        statuses = {e["status"] for e in events if e.get("type") == "progress"}
+        assert "cached" in statuses
+        assert "done" not in statuses  # nothing generated
+        mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
+
+    def test_stream_keyless_emits_needs_key(self, client, mock_filings_deps):
+        _core_only(mock_filings_deps)
+        with _no_keys():
+            events = _stream_events(client, "/api/company/AAPL/filings/stream")
+        statuses = {e["status"] for e in events if e.get("type") == "progress"}
+        assert "needs_key" in statuses
+        assert not any(e.get("type") == "section" for e in events)
+        mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
+
+
+# ── #5: keyless callers must not pay for raw section extraction ────────────
+
+
+class TestKeylessSkipsRawExtraction:
+    def test_stream_keyless_skips_raw_extraction(self, client, mock_filings_deps):
+        _core_only(mock_filings_deps)
+        with _no_keys():
+            _stream_events(client, "/api/company/AAPL/filings/stream")
+        sec = mock_filings_deps["sec"]
+        sec.get_risk_factors_raw.assert_not_called()
+        sec.get_mda_raw.assert_not_called()
+        sec.extract_balance_sheet_as_str.assert_not_called()
+        sec.get_earnings_data.assert_not_called()
+
+    def test_get_keyless_skips_raw_extraction(self, client, mock_filings_deps):
+        with _no_keys():
+            client.get("/api/company/AAPL/filings")
+        sec = mock_filings_deps["sec"]
+        sec.get_risk_factors_raw.assert_not_called()
+        sec.get_mda_raw.assert_not_called()
+        sec.extract_balance_sheet_as_str.assert_not_called()
+
+
+# ── #6: budget charged only when an LLM call actually happens ──────────────
+
+
+class TestBudgetChargedOnlyOnGeneration:
+    def test_fully_cached_does_not_charge_budget(self, client, mock_filings_deps, monkeypatch):
+        from unittest.mock import AsyncMock as _AsyncMock
+        from api.routes import company as company_route
+
+        mock_charge = _AsyncMock()
+        monkeypatch.setattr(company_route, "check_and_charge_budget", mock_charge)
+        # Operator-paid (env key, no header) + every section cached.
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        mock_filings_deps["get_cache"].return_value = {
+            "analysis_json": json.dumps(_MOCK_RISK_ANALYSIS)
+        }
+        resp = client.get("/api/company/AAPL/filings", headers={"X-User-Id": "user_cachedbudget"})
+        assert resp.status_code == 200
+        mock_charge.assert_not_called()
+
+    def test_stream_fully_cached_does_not_charge_budget(self, client, mock_filings_deps, monkeypatch):
+        from unittest.mock import AsyncMock as _AsyncMock
+        from api.routes import company as company_route
+
+        _core_only(mock_filings_deps)
+        mock_charge = _AsyncMock()
+        monkeypatch.setattr(company_route, "check_and_charge_budget", mock_charge)
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        mock_filings_deps["get_cache"].return_value = {
+            "analysis_json": json.dumps(_MOCK_RISK_ANALYSIS)
+        }
+        events = _stream_events(
+            client, "/api/company/AAPL/filings/stream", {"X-User-Id": "user_streamcached"}
+        )
+        assert events[-1]["type"] == "complete"
+        mock_charge.assert_not_called()
