@@ -13,19 +13,21 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 const GRAPH = `
 START
-  └─▶ [ROUTER]
-       ├─▶ "simple"  ──▶ [REACT AGENT] ──▶ END
-       └─▶ "complex" ──▶ [PLANNER]
-                               └─▶ [STEP EXECUTOR] ⟵──┐
-                                         └─▶ (loop)  ──┘
-                                         └─▶ [SYNTHESIZER] ──▶ END
+  └─▶ [ROUTER] ── classifies query complexity
+        ├─▶ simple  ──▶ [REACT AGENT] ─────────────▶ END
+        ├─▶ unclear ────────────────────────────────▶ END
+        └─▶ complex ──▶ [PLANNER]
+                          └─▶ dispatch (Send fan-out)
+                                ├─▶ [WORKER] ┐
+                                ├─▶ [WORKER] ├─▶ [RECONCILER] ──▶ [SYNTHESIZER] ──▶ END
+                                └─▶ [WORKER] ┘   (independent steps, in parallel)
 `.trim();
 
 const CAPABILITIES = [
   {
     icon: FileText,
     category: "SEC Filing Analysis",
-    count: "15 tools",
+    count: "13 tools",
     description:
       "Powered by edgartools. Raw and AI-analyzed 10-K/10-Q sections — risk factors, MD&A, balance sheets, full 10-K text, business overview, cybersecurity disclosure, legal proceedings, and a concurrent all-summaries tool. 8-K support with earnings release analysis (beats/misses, guidance) and material event analysis. Supports 20-F for foreign filers.",
   },
@@ -76,7 +78,7 @@ const DASHBOARD_FEATURES = [
     icon: MessageSquare,
     label: "Integrated Chart + Chat",
     description:
-      "The third tab embeds the full interactive chart (TradingView Lightweight Charts with RSI, MACD, Bollinger Bands) alongside the conversational agent — 31 tools available when Tavily is configured.",
+      "The third tab embeds the full interactive chart (TradingView Lightweight Charts with RSI, MACD, Bollinger Bands) alongside the conversational agent — 29 tools available when Tavily is configured (24 without).",
   },
 ];
 
@@ -100,9 +102,6 @@ export default function AboutPage() {
     <div className="mx-auto max-w-3xl px-4 py-12 sm:px-6">
       {/* Header */}
       <div className="mb-10">
-        <Badge variant="secondary" className="mb-4 rounded-full px-3 py-1 text-xs">
-          Portfolio Project
-        </Badge>
         <h1 className="font-display text-3xl font-bold sm:text-4xl">
           How it works
         </h1>
@@ -135,11 +134,11 @@ export default function AboutPage() {
           {GRAPH}
         </pre>
         <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-          The agent uses query complexity classification to determine the optimal
-          execution path. Simple queries are handled by a ReAct agent with dynamic
-          tool selection. Complex queries are decomposed into structured execution
-          plans where independent steps run concurrently, and the synthesizer
-          assembles the final response.
+          The agent classifies query complexity to pick an execution path. Simple
+          queries are handled by a ReAct agent with dynamic tool selection. Complex
+          queries are decomposed by a planner into independent steps that fan out to
+          parallel workers (LangGraph Send); a reconciler merges their results and
+          the synthesizer assembles the final response.
         </p>
       </div>
 
@@ -215,11 +214,14 @@ export default function AboutPage() {
           API Key Architecture
         </h3>
         <p className="text-xs leading-relaxed text-muted-foreground">
-          Keys are never stored on the server. They&apos;re saved in your browser&apos;s{" "}
+          Keys are never stored on the server. Bring-your-own-key values — for any of
+          Google Gemini, OpenAI, or Anthropic models — are saved in your browser&apos;s{" "}
           <code className="text-xs">localStorage</code> and injected per-request as HTTP
-          headers or WebSocket auth messages. The backend falls back to server-side
-          environment variables if no client key is provided — useful for local
-          development.
+          headers or WebSocket auth messages. Anonymous visitors can browse and analyze
+          with their own key; signing in (Clerk) unlocks saved sessions and watchlists.
+          The server&apos;s own environment keys are lent only to the local/self-host
+          operator or verified signed-in users — never to anonymous traffic — so
+          drive-by requests can&apos;t spend them.
         </p>
       </div>
     </div>
