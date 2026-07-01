@@ -243,7 +243,7 @@ class TestCompanyNotFoundError:
         with patch("agents.sec_workflow.get_SEC_data.Company") as MockCompany:
             MockCompany.side_effect = CompanyNotFoundError("FAKE", suggestions=[])
             with pytest.raises(ValueError, match="Company not found"):
-                SECDataRetrieval("FAKE", "test test@test.com")
+                SECDataRetrieval("FAKE")
 
     def test_invalid_ticker_includes_suggestions(self):
         suggestions = [{"ticker": "AAPL", "company": "Apple Inc"}]
@@ -252,14 +252,13 @@ class TestCompanyNotFoundError:
                 "AAPL1", suggestions=suggestions
             )
             with pytest.raises(ValueError, match="Did you mean: AAPL"):
-                SECDataRetrieval("AAPL1", "test test@test.com")
+                SECDataRetrieval("AAPL1")
 
     def test_valid_ticker_no_error(self):
         with patch("agents.sec_workflow.get_SEC_data.Company") as MockCompany:
-            with patch("agents.sec_workflow.get_SEC_data.set_identity"):
-                MockCompany.return_value = MagicMock()
-                retriever = SECDataRetrieval("AAPL", "test test@test.com")
-                assert retriever.ticker == "AAPL"
+            MockCompany.return_value = MagicMock()
+            retriever = SECDataRetrieval("AAPL")
+            assert retriever.ticker == "AAPL"
 
 
 # ── 8-K retrieval methods ────────────────────────────────────────────────────

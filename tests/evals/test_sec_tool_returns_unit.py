@@ -338,7 +338,7 @@ class TestDispatcherRouting:
         _seed(TICKER, "earnings_summary", _full_earnings_analysis())
         monkeypatch.setattr(
             sec_tools, "_get_shared_retriever",
-            lambda ticker, header: _StubRetriever(has_earnings=True),
+            lambda ticker: _StubRetriever(has_earnings=True),
         )
         parsed = json.loads(sec_tools._tool_analyze_latest_8k(TICKER, llm=None))
         assert "key_metrics" in parsed, "Expected earnings shape (key_metrics)"
@@ -348,7 +348,7 @@ class TestDispatcherRouting:
         _seed(TICKER, "material_event_summary", _full_material_event_analysis())
         monkeypatch.setattr(
             sec_tools, "_get_shared_retriever",
-            lambda ticker, header: _StubRetriever(has_earnings=False),
+            lambda ticker: _StubRetriever(has_earnings=False),
         )
         parsed = json.loads(sec_tools._tool_analyze_latest_8k(TICKER, llm=None))
         assert "event_type" in parsed, "Expected material-event shape (event_type)"
@@ -357,7 +357,7 @@ class TestDispatcherRouting:
     def test_returns_json_when_no_filing_found(self, monkeypatch):
         monkeypatch.setattr(
             sec_tools, "_get_shared_retriever",
-            lambda ticker, header: _StubRetriever(has_earnings=False, found=False),
+            lambda ticker: _StubRetriever(has_earnings=False, found=False),
         )
         parsed = json.loads(sec_tools._tool_analyze_latest_8k(TICKER, llm=None))
         assert parsed["found"] is False
