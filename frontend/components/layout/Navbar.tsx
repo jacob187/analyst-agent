@@ -89,12 +89,14 @@ export function Navbar() {
 
         <div className="flex items-center gap-2">
           <ThemeToggle />
+          {/* Settings is public — anonymous BYOK users configure keys here, so
+              it's always reachable, not gated behind sign-in. */}
+          <Link href="/settings" className="hidden md:block">
+            <Button size="sm" variant="outline" className="rounded-full font-medium">
+              Settings
+            </Button>
+          </Link>
           <Show when="signed-in">
-            <Link href="/settings" className="hidden md:block">
-              <Button size="sm" className="rounded-full font-medium">
-                Settings
-              </Button>
-            </Link>
             <div className="hidden md:flex items-center">
               <UserButton
                 appearance={{ elements: { avatarBox: "h-8 w-8" } }}
@@ -174,14 +176,14 @@ export function Navbar() {
                     </>
                   );
                 })()}
+                <Link
+                  href="/settings"
+                  onClick={() => setMobileOpen(false)}
+                  className="mt-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+                >
+                  Settings
+                </Link>
                 <Show when="signed-in">
-                  <Link
-                    href="/settings"
-                    onClick={() => setMobileOpen(false)}
-                    className="mt-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
-                  >
-                    Settings
-                  </Link>
                   <div className="mt-4 flex items-center gap-2 px-3">
                     <UserButton
                       appearance={{ elements: { avatarBox: "h-8 w-8" } }}

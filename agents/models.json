@@ -32,18 +32,18 @@
     "default": false
   },
   {
-    "id": "o4-mini",
+    "id": "gpt-5.4-mini",
     "provider": "openai",
-    "display_name": "o4 Mini",
-    "max_context": 200000,
+    "display_name": "GPT-5.4 Mini",
+    "max_context": 400000,
     "thinking_capable": true,
     "default": false
   },
   {
-    "id": "o3",
+    "id": "gpt-5.5",
     "provider": "openai",
-    "display_name": "o3",
-    "max_context": 200000,
+    "display_name": "GPT-5.5",
+    "max_context": 1050000,
     "thinking_capable": true,
     "default": false
   },
@@ -51,15 +51,15 @@
     "id": "claude-sonnet-4-6",
     "provider": "anthropic",
     "display_name": "Claude Sonnet 4.6",
-    "max_context": 200000,
+    "max_context": 1000000,
     "thinking_capable": true,
     "default": false
   },
   {
-    "id": "claude-opus-4-6",
+    "id": "claude-opus-4-8",
     "provider": "anthropic",
-    "display_name": "Claude Opus 4.6",
-    "max_context": 200000,
+    "display_name": "Claude Opus 4.8",
+    "max_context": 1000000,
     "thinking_capable": true,
     "default": false
   }
