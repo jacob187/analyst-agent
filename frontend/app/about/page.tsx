@@ -83,10 +83,9 @@ const DASHBOARD_FEATURES = [
 ];
 
 const STORY = [
-  `This project was born from the challenge of parsing SEC N-PX filings
-  to understand institutional investor voting patterns.`,
-  `What started as a data extraction problem evolved into a comprehensive
-  AI-powered financial analysis platform.`,
+  `Analyst Agent is a comprehensive AI-powered financial analysis platform
+  that turns SEC filings, market data, and web research into natural-language
+  answers.`,
   `The architecture evolved from a simple ReAct agent to an intelligent
   planning system that routes queries based on complexity — using dynamic tool
   selection for simple questions and structured multi-step execution for complex
