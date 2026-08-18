@@ -195,7 +195,7 @@ export function FilingsTab({ data, loading, progressSteps }: FilingsTabProps) {
           No SEC filings found
         </p>
         <p className="mt-1 text-xs text-muted-foreground/70">
-          This ticker may be an ETF, mutual fund, or foreign issuer without standard SEC filings.
+          This ticker may be an ETF, mutual fund, or foreign issuer without standard SEC filings — or an API key may not be set.
         </p>
       </div>
     );
