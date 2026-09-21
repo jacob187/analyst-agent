@@ -48,6 +48,15 @@ WS_SEND_TIMEOUT_SECONDS = float(os.getenv("WS_SEND_TIMEOUT_SECONDS", "10"))
 MAX_QUERY_LENGTH = 4000
 
 
+def _free_trial_window_description() -> str:
+    """Human-readable free-trial cooldown, e.g. '12 hours' or '2 days'."""
+    hours = ANON_FREE_WINDOW_SECONDS // 3600
+    if hours % 24 == 0:
+        days = hours // 24
+        return f"{days} day" + ("s" if days != 1 else "")
+    return f"{hours} hour" + ("s" if hours != 1 else "")
+
+
 async def _safe_send(websocket: WebSocket, data: dict) -> bool:
     """Send JSON with a send timeout; return False if the peer is gone or slow.
 
@@ -129,8 +138,22 @@ async def chat(websocket: WebSocket, ticker: str):
         user_id = keys.user_id
         client_ip = websocket.client.host if websocket.client else "unknown"
 
-        # Resolve model from auth message → registry default
-        model_id = keys.model_id or get_default_model().id
+        # Resolve model from auth message → registry default. An anonymous
+        # caller with no explicit model choice and no BYOK key of their own
+        # defaults to the free-trial model instead — otherwise they'd land on
+        # the general default, which the free trial doesn't cover, and get
+        # bounced straight to "API key required" without ever seeing the
+        # trial. Anyone who brought a key or is signed in keeps the normal
+        # default.
+        has_any_byok_key = any(
+            [keys.google_api_key, keys.openai_api_key, keys.anthropic_api_key]
+        )
+        if keys.model_id:
+            model_id = keys.model_id
+        elif user_id is None and not has_any_byok_key:
+            model_id = free_trial_model_id()
+        else:
+            model_id = get_default_model().id
         model = get_model(model_id)
         if model is None:
             default = get_default_model()
@@ -201,6 +224,7 @@ async def chat(websocket: WebSocket, ticker: str):
             "model_id": model_id,
             "free_trial": free_trial,
             "free_trial_queries": ANON_FREE_QUERIES if free_trial else None,
+            "free_trial_window": _free_trial_window_description() if free_trial else None,
         })
 
         # Initialise agent
@@ -282,7 +306,8 @@ async def chat(websocket: WebSocket, ticker: str):
                             await _safe_send(websocket, {
                                 "type": "error",
                                 "message": (
-                                    f"Free trial limit reached ({ANON_FREE_QUERIES} queries/day). "
+                                    f"Free trial limit reached ({ANON_FREE_QUERIES} queries "
+                                    f"per {_free_trial_window_description()}). "
                                     "Sign in or add your own API key in Settings to continue."
                                 ),
                             })

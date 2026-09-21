@@ -6,6 +6,7 @@ from agents.model_registry import (
     ModelDef,
     get_all_models,
     get_default_model,
+    get_free_tier_model,
     get_model,
     get_models_by_provider,
     get_token_threshold,
@@ -37,6 +38,31 @@ class TestModelsJsonLoading:
     def test_all_ids_are_unique(self):
         ids = [m.id for m in get_all_models()]
         assert len(ids) == len(set(ids)), "Duplicate model IDs found"
+
+    def test_at_most_one_free_tier_model(self):
+        free_tier_models = [m for m in get_all_models() if m.free_tier]
+        assert len(free_tier_models) <= 1, f"Expected ≤1 free_tier model, got {len(free_tier_models)}"
+
+
+class TestGetFreeTierModel:
+    def test_returns_the_flagged_model(self):
+        model = get_free_tier_model()
+        assert model.id == "gemini-3.1-flash-lite"
+        assert model.free_tier is True
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("ANON_FREE_MODEL_ID", "gpt-4.1-mini")
+        assert get_free_tier_model().id == "gpt-4.1-mini"
+
+    def test_invalid_env_override_falls_back(self, monkeypatch):
+        monkeypatch.setenv("ANON_FREE_MODEL_ID", "nonexistent-model-xyz")
+        assert get_free_tier_model().id == "gemini-3.1-flash-lite"
+
+    def test_falls_back_to_default_when_no_model_flagged(self, monkeypatch):
+        import agents.model_registry as registry
+        monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
+        monkeypatch.setattr(registry, "_FREE_TIER_MODEL", None)
+        assert get_free_tier_model().id == get_default_model().id
 
     def test_max_context_is_positive(self):
         for model in get_all_models():

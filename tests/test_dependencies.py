@@ -636,10 +636,10 @@ class TestFreeTrial:
     """
 
     @pytest.mark.eval_unit
-    def test_defaults_to_registry_default_model(self, monkeypatch):
-        from agents.model_registry import get_default_model
+    def test_defaults_to_registry_free_tier_model(self, monkeypatch):
+        from agents.model_registry import get_free_tier_model
         monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
-        assert free_trial_model_id() == get_default_model().id
+        assert free_trial_model_id() == get_free_tier_model().id
 
     @pytest.mark.eval_unit
     def test_respects_env_override(self, monkeypatch):

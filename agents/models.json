@@ -16,6 +16,15 @@
     "default": false
   },
   {
+    "id": "gemini-3.1-flash-lite",
+    "provider": "google_genai",
+    "display_name": "Gemini 3.1 Flash-Lite",
+    "max_context": 1000000,
+    "thinking_capable": true,
+    "default": false,
+    "free_tier": true
+  },
+  {
     "id": "gpt-5.4",
     "provider": "openai",
     "display_name": "GPT-5.4",

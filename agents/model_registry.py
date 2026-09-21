@@ -28,6 +28,7 @@ class ModelDef(BaseModel):
     max_context: int
     thinking_capable: bool
     default: bool
+    free_tier: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +49,15 @@ if len(_defaults) != 1:
     )
 
 _DEFAULT_MODEL: ModelDef = _defaults[0]
+
+# At most one model may be flagged as the free-tier model — anonymous
+# visitors are only ever lent a key for one specific model.
+_free_tier_models = [m for m in _MODELS.values() if m.free_tier]
+if len(_free_tier_models) > 1:
+    raise ValueError(
+        f"models.json must have at most one free_tier model, found {len(_free_tier_models)}"
+    )
+_FREE_TIER_MODEL: ModelDef | None = _free_tier_models[0] if _free_tier_models else None
 
 # Fallback threshold when a model isn't in the registry (e.g. custom model ID).
 _FALLBACK_THRESHOLD = 30_000
@@ -72,6 +82,21 @@ def get_default_model() -> ModelDef:
         if model:
             return model
     return _DEFAULT_MODEL
+
+
+def get_free_tier_model() -> ModelDef:
+    """Return the model anonymous free-trial callers may use.
+
+    env var ANON_FREE_MODEL_ID overrides models.json. Falls back to the
+    default model if no model is flagged free_tier.
+    """
+    import os
+    env_id = os.getenv("ANON_FREE_MODEL_ID")
+    if env_id:
+        model = _MODELS.get(env_id)
+        if model:
+            return model
+    return _FREE_TIER_MODEL or get_default_model()
 
 
 def get_all_models() -> list[ModelDef]:

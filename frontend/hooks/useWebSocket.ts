@@ -20,7 +20,7 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(
     sessionId ?? null
   );
-  const [freeTrial, setFreeTrial] = useState<{ queries: number } | null>(null);
+  const [freeTrial, setFreeTrial] = useState<{ queries: number; window: string } | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const streamingIdxRef = useRef<number | null>(null);
@@ -68,7 +68,9 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
         case "auth_success":
           setStatus("connected");
           setFreeTrial(
-            data.free_trial ? { queries: data.free_trial_queries ?? 0 } : null
+            data.free_trial
+              ? { queries: data.free_trial_queries ?? 0, window: data.free_trial_window ?? "" }
+              : null
           );
           if (data.session_id) {
             setActiveSessionId(data.session_id);

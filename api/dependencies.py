@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 
 from fastapi import Header, HTTPException
 
-from agents.model_registry import get_default_model, get_model
+from agents.model_registry import get_free_tier_model, get_model
 from api.clerk_auth import is_auth_disabled, is_clerk_enabled, verify_clerk_token
 from api.validators import USER_ID_RE
 
@@ -62,13 +62,13 @@ PROVIDER_ENV_VARS: dict[str, str] = {
 # by the caller (see api/routes/chat.py). This exists so a demo visitor can
 # chat without signing in or bringing a key; it does not change env-key
 # resolution for any other model or route.
-ANON_FREE_QUERIES = int(os.getenv("ANON_FREE_QUERIES", "2"))
-ANON_FREE_WINDOW_SECONDS = int(os.getenv("ANON_FREE_WINDOW_SECONDS", str(24 * 3600)))
+ANON_FREE_QUERIES = int(os.getenv("ANON_FREE_QUERIES", "3"))
+ANON_FREE_WINDOW_SECONDS = int(os.getenv("ANON_FREE_WINDOW_SECONDS", str(12 * 3600)))
 
 
 def free_trial_model_id() -> str:
     """The model anonymous visitors may use without a key, budget-capped."""
-    return os.getenv("ANON_FREE_MODEL_ID") or get_default_model().id
+    return get_free_tier_model().id
 
 
 def free_trial_key() -> str | None:

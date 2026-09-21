@@ -265,6 +265,22 @@ class TestAnonFreeTrial:
             resp = _drain_until(ws, "response")
             assert resp["message"] == "Analysis complete."
 
+    def test_anon_with_byok_key_and_no_model_choice_uses_registry_default(
+        self, client, temp_db, monkeypatch
+    ):
+        # A BYOK anon caller who hasn't picked a model shouldn't be silently
+        # steered onto the free-trial model — they get the normal default,
+        # paid for by their own key.
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "google_api_key": "byok-key"}))
+            ok = _drain_until(ws, "auth_success")
+            assert ok["free_trial"] is False
+            from agents.model_registry import get_default_model
+            assert ok["model_id"] == get_default_model().id
+
     def test_anon_free_trial_quota_exhausted(self, client, temp_db, monkeypatch):
         _patch_agent(monkeypatch)
         monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")

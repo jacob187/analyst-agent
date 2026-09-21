@@ -80,7 +80,7 @@ export function ChatWindow({ ticker, keys, initialSessionId }: ChatWindowProps) 
 
       {freeTrial && (
         <div className="border-b border-border/60 bg-primary/5 px-4 py-1.5 text-center text-[11px] text-muted-foreground">
-          Free trial — up to {freeTrial.queries} queries/day.{" "}
+          Free trial — up to {freeTrial.queries} queries every {freeTrial.window}.{" "}
           <a href="/settings" className="underline hover:text-foreground">
             Sign in or add your own key
           </a>{" "}
