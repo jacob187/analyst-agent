@@ -15,13 +15,20 @@ from api.db import (
 from api.memory import (
     estimate_tokens_incremental, compress_history, build_context_from_session,
 )
-from api.dependencies import resolve_ws_keys, verify_ws_identity
+from api.dependencies import (
+    ANON_FREE_QUERIES,
+    ANON_FREE_WINDOW_SECONDS,
+    free_trial_key,
+    free_trial_model_id,
+    resolve_ws_keys,
+    verify_ws_identity,
+)
 from api.llm_concurrency import (
     LLMBudgetExceeded,
     LLMConcurrencyExceeded,
     check_and_charge_budget,
 )
-from api.rate_limit import check_rate_limit
+from api.rate_limit import check_rate_limit, check_rest_rate_limit
 from api.validators import TICKER_RE
 from agents.graph.analyst_graph import LLMTimeoutError
 from agents.model_registry import get_model, get_default_model, get_token_threshold
@@ -120,6 +127,7 @@ async def chat(websocket: WebSocket, ticker: str):
         # Anonymous (no user_id) is allowed: signed-out visitors may chat with
         # their own BYOK key, ephemerally. Persistence is sign-in-only (below).
         user_id = keys.user_id
+        client_ip = websocket.client.host if websocket.client else "unknown"
 
         # Resolve model from auth message → registry default
         model_id = keys.model_id or get_default_model().id
@@ -131,6 +139,17 @@ async def chat(websocket: WebSocket, ticker: str):
 
         # Resolve the API key for the selected provider
         api_key = keys.get_provider_key(model.provider)
+
+        # Anonymous free trial: no BYOK key, but the requested model is the
+        # one designated light model the operator lends to anon visitors,
+        # capped per-IP below. Any other model still requires a key.
+        free_trial = False
+        if not api_key and user_id is None and model_id == free_trial_model_id():
+            trial_key = free_trial_key()
+            if trial_key:
+                api_key = trial_key
+                free_trial = True
+
         if not api_key:
             provider_display = model.provider.replace("_", " ").title()
             await websocket.send_json({
@@ -180,6 +199,8 @@ async def chat(websocket: WebSocket, ticker: str):
             "session_id": session_id,
             "resumed": len(all_messages) > 0,
             "model_id": model_id,
+            "free_trial": free_trial,
+            "free_trial_queries": ANON_FREE_QUERIES if free_trial else None,
         })
 
         # Initialise agent
@@ -218,7 +239,6 @@ async def chat(websocket: WebSocket, ticker: str):
         # the running character total threaded between turns; tokens are
         # derived inside the helper.
         chars_so_far, messages_counted = 0, 0
-        client_ip = websocket.client.host if websocket.client else "unknown"
         while True:
             try:
                 # Reap idle sessions — clients that disappear without sending FIN
@@ -252,6 +272,19 @@ async def chat(websocket: WebSocket, ticker: str):
                             await _safe_send(websocket, {
                                 "type": "error",
                                 "message": "Daily LLM budget reached. Try again tomorrow or add your own API key in Settings.",
+                            })
+                            continue
+                    elif free_trial:
+                        if not check_rest_rate_limit(
+                            f"ip:{client_ip}", "anon_free_trial",
+                            ANON_FREE_QUERIES, ANON_FREE_WINDOW_SECONDS,
+                        ):
+                            await _safe_send(websocket, {
+                                "type": "error",
+                                "message": (
+                                    f"Free trial limit reached ({ANON_FREE_QUERIES} queries/day). "
+                                    "Sign in or add your own API key in Settings to continue."
+                                ),
                             })
                             continue
 

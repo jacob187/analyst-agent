@@ -28,7 +28,7 @@ export function ChatWindow({ ticker, keys, initialSessionId }: ChatWindowProps) 
   }, [input]);
 
   // History loading is handled inside the hook — no callback needed here
-  const { messages, status, sendMessage } = useWebSocket({
+  const { messages, status, sendMessage, freeTrial } = useWebSocket({
     ticker,
     keys,
     sessionId: initialSessionId,
@@ -77,6 +77,16 @@ export function ChatWindow({ ticker, keys, initialSessionId }: ChatWindowProps) 
           <span className="capitalize">{status}</span>
         </div>
       </div>
+
+      {freeTrial && (
+        <div className="border-b border-border/60 bg-primary/5 px-4 py-1.5 text-center text-[11px] text-muted-foreground">
+          Free trial — up to {freeTrial.queries} queries/day.{" "}
+          <a href="/settings" className="underline hover:text-foreground">
+            Sign in or add your own key
+          </a>{" "}
+          for unlimited access.
+        </div>
+      )}
 
       {/* Messages */}
       <ScrollArea className="flex-1 p-4">

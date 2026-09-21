@@ -232,3 +232,75 @@ class TestAnonChatNoPersistence:
             _drain_until(ws, "response")
 
         assert _row_count(temp_db, "sessions") == 1
+
+
+# ── Anonymous free trial ─────────────────────────────────────────────────────
+
+
+class TestAnonFreeTrial:
+    """Anonymous visitors with no BYOK key may still chat using the
+    designated free-trial model, capped per-IP at ANON_FREE_QUERIES/day."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_quota(self, monkeypatch):
+        from api.rate_limit import _rest_timestamps
+        # Clerk enabled (no token) → ordinary anon env-key resolution is
+        # blocked, so success here can only come from the free-trial carve-out.
+        monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
+        _rest_timestamps.clear()
+        yield
+        _rest_timestamps.clear()
+
+    def test_anon_no_key_uses_free_trial_model(self, client, temp_db, monkeypatch):
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth"}))  # no keys, no user_id
+            ok = _drain_until(ws, "auth_success")
+            assert ok["free_trial"] is True
+            assert ok["free_trial_queries"] == chat.ANON_FREE_QUERIES
+
+            ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+            resp = _drain_until(ws, "response")
+            assert resp["message"] == "Analysis complete."
+
+    def test_anon_free_trial_quota_exhausted(self, client, temp_db, monkeypatch):
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth"}))
+            _drain_until(ws, "auth_success")
+
+            ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+            _drain_until(ws, "response")
+
+            ws.send_text(json.dumps({"type": "query", "message": "hi again"}))
+            err = _drain_until(ws, "error")
+            assert "Free trial limit reached" in err["message"]
+
+    def test_anon_without_operator_key_still_requires_byok(self, client, temp_db, monkeypatch):
+        # No GOOGLE_API_KEY configured → no free trial to fall back to.
+        _patch_agent(monkeypatch)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth"}))
+            err = ws.receive_json()
+            assert err["type"] == "error"
+            assert "API key required" in err["message"]
+
+    def test_anon_requesting_non_trial_model_still_requires_byok(self, client, temp_db, monkeypatch):
+        # The free trial only covers the one designated light model — picking
+        # a different model without a key is still refused.
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "operator-anthropic-key")
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "model_id": "claude-opus-5"}))
+            err = ws.receive_json()
+            assert err["type"] == "error"
+            assert "API key required" in err["message"]

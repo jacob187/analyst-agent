@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 
 from fastapi import Header, HTTPException
 
+from agents.model_registry import get_default_model, get_model
 from api.clerk_auth import is_auth_disabled, is_clerk_enabled, verify_clerk_token
 from api.validators import USER_ID_RE
 
@@ -46,6 +47,37 @@ _PROVIDER_KEY_FIELDS: dict[str, str] = {
     "openai": "openai_api_key",
     "anthropic": "anthropic_api_key",
 }
+
+# Maps provider name → the env var its operator key is read from.
+PROVIDER_ENV_VARS: dict[str, str] = {
+    "google_genai": "GOOGLE_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+}
+
+
+# ── Anonymous free trial ─────────────────────────────────────────────────────
+# A narrow, deliberate carve-out from `_env_keys_allowed`: anonymous visitors
+# may spend the operator's key for ONE designated light model, capped per-IP
+# by the caller (see api/routes/chat.py). This exists so a demo visitor can
+# chat without signing in or bringing a key; it does not change env-key
+# resolution for any other model or route.
+ANON_FREE_QUERIES = int(os.getenv("ANON_FREE_QUERIES", "2"))
+ANON_FREE_WINDOW_SECONDS = int(os.getenv("ANON_FREE_WINDOW_SECONDS", str(24 * 3600)))
+
+
+def free_trial_model_id() -> str:
+    """The model anonymous visitors may use without a key, budget-capped."""
+    return os.getenv("ANON_FREE_MODEL_ID") or get_default_model().id
+
+
+def free_trial_key() -> str | None:
+    """The operator's env key for the free-trial model's provider, if any."""
+    model = get_model(free_trial_model_id())
+    if model is None:
+        return None
+    env_var = PROVIDER_ENV_VARS.get(model.provider)
+    return os.getenv(env_var) if env_var else None
 
 
 _clerk_unconfigured_warned = False

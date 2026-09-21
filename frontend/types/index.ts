@@ -19,6 +19,8 @@ export interface EnvKeysResponse {
   anthropic: boolean;
   sec_header: boolean;
   tavily: boolean;
+  free_trial_model_id: string | null;
+  free_trial_queries: number;
 }
 
 // ─── API Keys ──────────────────────────────────────────────────────────────────
@@ -257,6 +259,8 @@ export interface WsMessage {
   tool?: string;
   step?: number;
   total?: number;
+  free_trial?: boolean;
+  free_trial_queries?: number | null;
 }
 
 // ─── UI State ──────────────────────────────────────────────────────────────────

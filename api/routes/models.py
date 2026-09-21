@@ -5,7 +5,13 @@ import os
 from fastapi import APIRouter, Depends
 
 from agents.model_registry import get_all_models
-from api.dependencies import ApiKeys, get_api_keys
+from api.dependencies import (
+    ANON_FREE_QUERIES,
+    ApiKeys,
+    free_trial_key,
+    free_trial_model_id,
+    get_api_keys,
+)
 
 router = APIRouter(tags=["models"])
 
@@ -32,6 +38,10 @@ async def env_keys(keys: ApiKeys = Depends(get_api_keys)):
     that gated resolution (no provider headers are sent to this endpoint, so an
     env key only resolves when the caller is allowed). SEC_HEADER is a global
     server identity, reported to everyone.
+
+    `free_trial_model_id` is reported to everyone, including anonymous
+    callers, when the operator has configured a key for it — it's the one
+    deliberate exception to the gate above (see `api.dependencies.free_trial_key`).
     """
     return {
         "google": keys.is_operator_paid("google_genai"),
@@ -39,4 +49,6 @@ async def env_keys(keys: ApiKeys = Depends(get_api_keys)):
         "anthropic": keys.is_operator_paid("anthropic"),
         "sec_header": bool(os.getenv("SEC_HEADER")),
         "tavily": bool(keys.tavily_api_key),
+        "free_trial_model_id": free_trial_model_id() if free_trial_key() else None,
+        "free_trial_queries": ANON_FREE_QUERIES,
     }

@@ -55,8 +55,13 @@ class TestEnvKeys:
 
     @pytest.mark.eval_unit
     def test_all_values_are_booleans(self):
+        # free_trial_model_id (str | None) and free_trial_queries (int) are the
+        # deliberate exceptions — everything else stays a plain availability flag.
+        non_bool_fields = {"free_trial_model_id", "free_trial_queries"}
         body = client.get("/env-keys").json()
         for key, value in body.items():
+            if key in non_bool_fields:
+                continue
             assert isinstance(value, bool), f"{key!r} is not a bool"
 
     @pytest.mark.eval_unit

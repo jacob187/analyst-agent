@@ -62,12 +62,23 @@ export function useApiKeys() {
     // SEC_HEADER is a global server identity, not a per-user key, so it's
     // available to everyone.
     const canUseEnvKeys = !!isSignedIn || authDisabled;
+
+    // Anonymous free trial: the backend lends its key for exactly one light
+    // model, capped per-IP. Only counts if the user hasn't picked a different
+    // model in Settings — otherwise the chat window would open and then fail
+    // on WS connect for a model the trial doesn't cover.
+    const usingFreeTrialModel =
+      !keys.model_id || keys.model_id === envKeys?.free_trial_model_id;
+    const canUseFreeTrial =
+      !canUseEnvKeys && !!envKeys?.free_trial_model_id && usingFreeTrialModel;
+
     const hasProviderKey =
       !!keys.google_api_key ||
       !!keys.openai_api_key ||
       !!keys.anthropic_api_key ||
       (canUseEnvKeys &&
-        (!!envKeys?.google || !!envKeys?.openai || !!envKeys?.anthropic));
+        (!!envKeys?.google || !!envKeys?.openai || !!envKeys?.anthropic)) ||
+      canUseFreeTrial;
     const hasSecHeader = !!keys.sec_header || !!envKeys?.sec_header;
     return hasProviderKey && hasSecHeader;
   }
