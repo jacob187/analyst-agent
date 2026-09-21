@@ -60,13 +60,13 @@ class TestGetApiKeys:
             x_openai_api_key="o",
             x_anthropic_api_key="a",
             x_tavily_api_key="tav",
-            x_model_id="gemini-3-flash-preview",
+            x_model_id="gemini-3.6-flash",
         )
         assert result.google_api_key == "g"
         assert result.openai_api_key == "o"
         assert result.anthropic_api_key == "a"
         assert result.tavily_api_key == "tav"
-        assert result.model_id == "gemini-3-flash-preview"
+        assert result.model_id == "gemini-3.6-flash"
 
     @pytest.mark.eval_unit
     @patch.dict("os.environ", {}, clear=True)

@@ -45,9 +45,9 @@ class TestModelsJsonLoading:
 
 class TestGetModel:
     def test_known_model(self):
-        model = get_model("gemini-3-flash-preview")
+        model = get_model("gemini-3.6-flash")
         assert model is not None
-        assert model.id == "gemini-3-flash-preview"
+        assert model.id == "gemini-3.6-flash"
         assert model.provider == "google_genai"
 
     def test_unknown_model_returns_none(self):
@@ -62,7 +62,7 @@ class TestGetDefaultModel:
 
     def test_default_is_gemini_flash(self):
         """Current default — update this test if the default changes."""
-        assert get_default_model().id == "gemini-3-flash-preview"
+        assert get_default_model().id == "gemini-3.6-flash"
 
 
 class TestGetModelsByProvider:
@@ -83,7 +83,7 @@ class TestGetModelsByProvider:
 class TestGetTokenThreshold:
     def test_gemini_flash_threshold(self):
         # 1_000_000 // 4 = 250_000
-        assert get_token_threshold("gemini-3-flash-preview") == 250_000
+        assert get_token_threshold("gemini-3.6-flash") == 250_000
 
     def test_gpt41_mini_threshold(self):
         # 1_000_000 // 4 = 250_000
@@ -104,6 +104,6 @@ class TestGetTokenThreshold:
 
 class TestModelDefImmutability:
     def test_model_is_frozen(self):
-        model = get_model("gemini-3-flash-preview")
+        model = get_model("gemini-3.6-flash")
         with pytest.raises(Exception):
             model.id = "something-else"

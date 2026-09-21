@@ -7,7 +7,7 @@ Usage:
     from agents.llm_factory import create_llm, create_llm_pair
 
     # Single LLM
-    llm = create_llm("gemini-3-flash-preview", api_key="AIza...")
+    llm = create_llm("gemini-3.6-flash", api_key="AIza...")
 
     # Tool-calling LLM + synthesizer pair
     llm, synthesizer = create_llm_pair("gpt-4o-mini", api_key="sk-...")
@@ -40,6 +40,12 @@ _ANTHROPIC_THINKING_BUDGETS: dict[str, int] = {
     "high": 8192,
 }
 
+# Anthropic models that still accept the legacy `{"type": "enabled",
+# "budget_tokens": N}` thinking format (deprecated but functional). Opus 4.7+
+# and every Claude 5 model reject that format outright (400) and require
+# `{"type": "adaptive"}` instead — anything not listed here gets adaptive.
+_ANTHROPIC_LEGACY_BUDGET_MODELS = {"claude-sonnet-4-6"}
+
 
 @dataclass(frozen=True)
 class ThinkingConfig:
@@ -49,7 +55,8 @@ class ThinkingConfig:
         enabled: Whether to enable thinking/reasoning mode.
         level: Intensity level — maps to provider-specific params.
             Google: thinking_level ("low"/"medium"/"high")
-            Anthropic: budget_tokens via _ANTHROPIC_THINKING_BUDGETS
+            Anthropic: budget_tokens via _ANTHROPIC_THINKING_BUDGETS on
+                legacy models, ignored elsewhere (adaptive thinking instead)
             OpenAI: reasoning_effort ("low"/"medium"/"high")
     """
 
@@ -72,13 +79,23 @@ def _build_thinking_kwargs(
         return {"thinking_level": config.level, "include_thoughts": True}
 
     if provider == "anthropic":
-        budget = _ANTHROPIC_THINKING_BUDGETS.get(config.level, 4096)
-        return {"thinking": {"type": "enabled", "budget_tokens": budget}}
+        if model_id in _ANTHROPIC_LEGACY_BUDGET_MODELS:
+            budget = _ANTHROPIC_THINKING_BUDGETS.get(config.level, 4096)
+            return {"thinking": {"type": "enabled", "budget_tokens": budget}}
+        return {"thinking": {"type": "adaptive"}}
 
     if provider == "openai":
         return {"reasoning_effort": config.level}
 
     return {}
+
+
+def _skip_temperature(provider: str, model_id: str) -> bool:
+    """gpt-5 models (excluding gpt-5-chat) reject a non-default temperature —
+    langchain-openai silently drops `temperature=0` for them rather than
+    erroring, so omit it instead of sending a value that's discarded."""
+    model_lower = model_id.lower()
+    return provider == "openai" and model_lower.startswith("gpt-5") and "chat" not in model_lower
 
 
 def create_llm(
@@ -92,7 +109,7 @@ def create_llm(
     Falls back to the default model if model_id isn't in the registry.
 
     Args:
-        model_id: Model ID from models.json (e.g. "gemini-3-flash-preview").
+        model_id: Model ID from models.json (e.g. "gemini-3.6-flash").
         api_key: The API key for the model's provider.
         thinking: Optional thinking/reasoning config. Ignored if the model
             isn't thinking-capable.
@@ -119,10 +136,14 @@ def create_llm(
     # Resolve the provider-specific API key kwarg name
     key_kwarg_name = _PROVIDER_KEY_KWARG.get(model.provider, "api_key")
 
+    temperature_kwargs = (
+        {} if _skip_temperature(model.provider, model.id) else {"temperature": 0}
+    )
+
     return init_chat_model(
         f"{model.provider}:{model.id}",
-        temperature=0,
         **{key_kwarg_name: api_key},
+        **temperature_kwargs,
         **thinking_kwargs,
     )
 

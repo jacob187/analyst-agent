@@ -39,7 +39,7 @@ class TestListModels:
     def test_known_model_present(self):
         models = client.get("/models").json()["models"]
         ids = {m["id"] for m in models}
-        assert "gemini-3-flash-preview" in ids
+        assert "gemini-3.6-flash" in ids
 
 
 class TestEnvKeys:
