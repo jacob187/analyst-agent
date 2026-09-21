@@ -1,8 +1,8 @@
 [
   {
-    "id": "gemini-3-flash-preview",
+    "id": "gemini-3.6-flash",
     "provider": "google_genai",
-    "display_name": "Gemini 3 Flash",
+    "display_name": "Gemini 3.6 Flash",
     "max_context": 1000000,
     "thinking_capable": true,
     "default": true

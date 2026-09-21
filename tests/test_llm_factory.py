@@ -7,6 +7,7 @@ import pytest
 from agents.llm_factory import (
     ThinkingConfig,
     _build_thinking_kwargs,
+    _skip_temperature,
     create_llm,
     create_llm_pair,
 )
@@ -26,7 +27,7 @@ class TestThinkingConfig:
 
 class TestBuildThinkingKwargs:
     def test_none_config_returns_empty(self):
-        assert _build_thinking_kwargs("google_genai", "gemini-3-flash-preview", None) == {}
+        assert _build_thinking_kwargs("google_genai", "gemini-3.6-flash", None) == {}
 
     def test_disabled_config_returns_empty(self):
         config = ThinkingConfig(enabled=False, level="high")
@@ -34,12 +35,12 @@ class TestBuildThinkingKwargs:
 
     def test_google_genai(self):
         config = ThinkingConfig(enabled=True, level="medium")
-        result = _build_thinking_kwargs("google_genai", "gemini-3-flash-preview", config)
+        result = _build_thinking_kwargs("google_genai", "gemini-3.6-flash", config)
         assert result == {"thinking_level": "medium", "include_thoughts": True}
 
     def test_google_genai_low(self):
         config = ThinkingConfig(enabled=True, level="low")
-        result = _build_thinking_kwargs("google_genai", "gemini-3-flash-preview", config)
+        result = _build_thinking_kwargs("google_genai", "gemini-3.6-flash", config)
         assert result == {"thinking_level": "low", "include_thoughts": True}
 
     def test_anthropic(self):
@@ -52,6 +53,13 @@ class TestBuildThinkingKwargs:
         result = _build_thinking_kwargs("anthropic", "claude-sonnet-4-6", config)
         assert result == {"thinking": {"type": "enabled", "budget_tokens": 8192}}
 
+    def test_anthropic_non_legacy_model_uses_adaptive(self):
+        """Opus 4.7+/Claude 5 models reject the legacy budget_tokens format —
+        anything not on the legacy allowlist gets adaptive thinking instead."""
+        config = ThinkingConfig(enabled=True, level="high")
+        result = _build_thinking_kwargs("anthropic", "claude-opus-4-8", config)
+        assert result == {"thinking": {"type": "adaptive"}}
+
     def test_openai(self):
         config = ThinkingConfig(enabled=True, level="medium")
         result = _build_thinking_kwargs("openai", "o3", config)
@@ -62,14 +70,30 @@ class TestBuildThinkingKwargs:
         assert _build_thinking_kwargs("unknown", "some-model", config) == {}
 
 
+class TestSkipTemperature:
+    def test_gpt5_family_skipped(self):
+        assert _skip_temperature("openai", "gpt-5.4") is True
+        assert _skip_temperature("openai", "gpt-5.4-mini") is True
+        assert _skip_temperature("openai", "gpt-5.5") is True
+
+    def test_gpt5_chat_not_skipped(self):
+        assert _skip_temperature("openai", "gpt-5-chat") is False
+
+    def test_non_gpt5_openai_not_skipped(self):
+        assert _skip_temperature("openai", "gpt-4.1-mini") is False
+
+    def test_non_openai_provider_not_skipped(self):
+        assert _skip_temperature("google_genai", "gpt-5.4") is False
+
+
 class TestCreateLlm:
     @patch("langchain.chat_models.init_chat_model")
     def test_google_model(self, mock_init):
         mock_init.return_value = MagicMock()
-        create_llm("gemini-3-flash-preview", "fake-google-key")
+        create_llm("gemini-3.6-flash", "fake-google-key")
 
         mock_init.assert_called_once_with(
-            "google_genai:gemini-3-flash-preview",
+            "google_genai:gemini-3.6-flash",
             temperature=0,
             google_api_key="fake-google-key",
         )
@@ -97,13 +121,25 @@ class TestCreateLlm:
         )
 
     @patch("langchain.chat_models.init_chat_model")
+    def test_gpt5_model_omits_temperature(self, mock_init):
+        """gpt-5 models reject a non-default temperature — omit it rather than
+        send a value langchain-openai silently drops."""
+        mock_init.return_value = MagicMock()
+        create_llm("gpt-5.4", "fake-openai-key")
+
+        mock_init.assert_called_once_with(
+            "openai:gpt-5.4",
+            api_key="fake-openai-key",
+        )
+
+    @patch("langchain.chat_models.init_chat_model")
     def test_google_with_thinking(self, mock_init):
         mock_init.return_value = MagicMock()
         thinking = ThinkingConfig(enabled=True, level="medium")
-        create_llm("gemini-3-flash-preview", "fake-key", thinking=thinking)
+        create_llm("gemini-3.6-flash", "fake-key", thinking=thinking)
 
         mock_init.assert_called_once_with(
-            "google_genai:gemini-3-flash-preview",
+            "google_genai:gemini-3.6-flash",
             temperature=0,
             google_api_key="fake-key",
             thinking_level="medium",
@@ -129,9 +165,9 @@ class TestCreateLlm:
         mock_init.return_value = MagicMock()
         create_llm("nonexistent-model", "fake-key")
 
-        # Should fall back to the default model (gemini-3-flash-preview)
+        # Should fall back to the default model (gemini-3.6-flash)
         call_args = mock_init.call_args
-        assert "google_genai:gemini-3-flash-preview" in call_args[0]
+        assert "google_genai:gemini-3.6-flash" in call_args[0]
 
 
 class TestCreateLlmPair:
@@ -139,7 +175,7 @@ class TestCreateLlmPair:
     def test_thinking_capable_model_returns_two_distinct_llms(self, mock_init):
         """For a thinking-capable model, the pair should be two separate instances."""
         mock_init.side_effect = [MagicMock(name="main"), MagicMock(name="synth")]
-        main, synth = create_llm_pair("gemini-3-flash-preview", "fake-key")
+        main, synth = create_llm_pair("gemini-3.6-flash", "fake-key")
 
         assert main is not synth
         assert mock_init.call_count == 2
