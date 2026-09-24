@@ -435,10 +435,12 @@ class TestFilingsLLMBudget:
         # init_db is async, but TestClient drives the FastAPI app which has
         # init_db in its lifespan. Force the connection open eagerly so
         # increment_llm_usage finds the table on the very first call.
+        # asyncio.run owns its loop: get_event_loop() here picks up whatever
+        # loop the previous test left behind, which may be closed.
         import asyncio as _asyncio
-        _asyncio.get_event_loop().run_until_complete(db_module.init_db())
+        _asyncio.run(db_module.init_db())
         yield
-        _asyncio.get_event_loop().run_until_complete(db_module.close_db())
+        _asyncio.run(db_module.close_db())
 
     def test_byok_bypasses_budget(self, client, mock_filings_deps, budget_db, monkeypatch):
         """Header-supplied key (BYOK) is not charged against the operator's budget."""
