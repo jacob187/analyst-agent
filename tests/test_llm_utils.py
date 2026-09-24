@@ -70,11 +70,13 @@ class TestParseListContent:
         result = parse_llm_response(msg)
         assert result.thinking == ""
 
-    def test_string_elements_in_list(self):
+    def test_string_elements_in_list_are_dropped(self):
         msg = MagicMock()
+        # Only typed dict blocks count — a bare string in a block list has no
+        # type to classify it as text vs thinking, so it's dropped.
         msg.content = ["raw string", {"type": "text", "text": " more text"}]
         result = parse_llm_response(msg)
-        assert result.text == "raw string more text"
+        assert result.text == " more text"
 
     def test_unknown_block_type_ignored(self):
         msg = MagicMock()

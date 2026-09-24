@@ -35,7 +35,9 @@ def parse_llm_response(response) -> LLMResponse:
     Handles three content formats:
     1. str — plain text, no thinking (standard responses)
     2. list[dict] — structured blocks from Gemini with include_thoughts=True
-       Block types: "thinking"/"reasoning" (CoT) and "text" (actual output)
+       Block types: "thinking"/"reasoning" (CoT) and "text" (actual output).
+       Elements that aren't typed dicts (e.g. bare strings) are dropped —
+       there's no type to tell text apart from reasoning.
     3. Anything else — converted to string, no thinking
 
     Works with both raw LangChain AIMessage objects (has `.content`) and
