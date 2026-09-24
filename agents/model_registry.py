@@ -84,11 +84,13 @@ def get_default_model() -> ModelDef:
     return _DEFAULT_MODEL
 
 
-def get_free_tier_model() -> ModelDef:
-    """Return the model anonymous free-trial callers may use.
+def get_free_tier_model() -> ModelDef | None:
+    """Return the model anonymous free-trial callers may use, or None.
 
-    env var ANON_FREE_MODEL_ID overrides models.json. Falls back to the
-    default model if no model is flagged free_tier.
+    env var ANON_FREE_MODEL_ID overrides models.json. Returns None when no
+    model is flagged free_tier — the trial is off. Falling back to the default
+    model instead would silently lend the operator's key for whatever model
+    the default happens to be.
     """
     import os
     env_id = os.getenv("ANON_FREE_MODEL_ID")
@@ -96,7 +98,7 @@ def get_free_tier_model() -> ModelDef:
         model = _MODELS.get(env_id)
         if model:
             return model
-    return _FREE_TIER_MODEL or get_default_model()
+    return _FREE_TIER_MODEL
 
 
 def get_all_models() -> list[ModelDef]:

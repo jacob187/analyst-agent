@@ -647,6 +647,17 @@ class TestFreeTrial:
         assert free_trial_model_id() == "claude-sonnet-5"
 
     @pytest.mark.eval_unit
+    def test_trial_disabled_when_no_model_flagged(self, monkeypatch):
+        # Unflagging free_tier turns the trial off; it must not fall through to
+        # lending the operator's key for the default model.
+        import agents.model_registry as registry
+        monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        monkeypatch.setattr(registry, "_FREE_TIER_MODEL", None)
+        assert free_trial_model_id() is None
+        assert free_trial_key() is None
+
+    @pytest.mark.eval_unit
     def test_no_key_when_operator_has_not_configured_provider(self, monkeypatch):
         monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
         monkeypatch.delenv("GOOGLE_API_KEY", raising=False)

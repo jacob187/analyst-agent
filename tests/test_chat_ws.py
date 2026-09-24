@@ -157,9 +157,11 @@ def temp_db(tmp_path, monkeypatch):
     db_path = tmp_path / "chat.db"
     monkeypatch.setattr(db_module, "DB_PATH", db_path)
     monkeypatch.setattr(db_module, "_db", None)
-    asyncio.get_event_loop().run_until_complete(db_module.init_db())
+    # asyncio.run owns its loop: get_event_loop() here picks up whatever loop
+    # the previous test left behind, which may be closed.
+    asyncio.run(db_module.init_db())
     yield db_path
-    asyncio.get_event_loop().run_until_complete(db_module.close_db())
+    asyncio.run(db_module.close_db())
 
 
 def _patch_agent(monkeypatch):
@@ -237,19 +239,35 @@ class TestAnonChatNoPersistence:
 # ── Anonymous free trial ─────────────────────────────────────────────────────
 
 
+class TestFreeTrialWindowDescription:
+    @pytest.mark.parametrize(
+        "seconds,expected",
+        [
+            (12 * 3600, "12 hours"),
+            (3600, "1 hour"),
+            (48 * 3600, "2 days"),
+            (1800, "30 minutes"),
+            (45, "45 seconds"),
+        ],
+    )
+    def test_renders_the_largest_whole_unit(self, monkeypatch, seconds, expected):
+        monkeypatch.setattr(chat, "ANON_FREE_WINDOW_SECONDS", seconds)
+        assert chat._free_trial_window_description() == expected
+
+
 class TestAnonFreeTrial:
     """Anonymous visitors with no BYOK key may still chat using the
     designated free-trial model, capped per-IP at ANON_FREE_QUERIES/day."""
 
     @pytest.fixture(autouse=True)
     def _isolate_quota(self, monkeypatch):
-        from api.rate_limit import _rest_timestamps
+        from api.rate_limit import clear_rate_limits
         # Clerk enabled (no token) → ordinary anon env-key resolution is
         # blocked, so success here can only come from the free-trial carve-out.
         monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
-        _rest_timestamps.clear()
+        clear_rate_limits()
         yield
-        _rest_timestamps.clear()
+        clear_rate_limits()
 
     def test_anon_no_key_uses_free_trial_model(self, client, temp_db, monkeypatch):
         _patch_agent(monkeypatch)
@@ -297,6 +315,33 @@ class TestAnonFreeTrial:
             err = _drain_until(ws, "error")
             assert "Free trial limit reached" in err["message"]
 
+    def test_forged_forwarded_for_cannot_reset_the_quota(
+        self, client, temp_db, monkeypatch
+    ):
+        # The leftmost X-Forwarded-For entry is whatever the caller sent. If the
+        # quota keyed on it, rotating the header would mint unlimited free
+        # queries on the operator's key.
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
+
+        with client.websocket_connect(
+            "/ws/chat/AAPL", headers={"x-forwarded-for": "1.1.1.1, 9.9.9.9"}
+        ) as ws:
+            ws.send_text(json.dumps({"type": "auth"}))
+            _drain_until(ws, "auth_success")
+            ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+            _drain_until(ws, "response")
+
+        with client.websocket_connect(
+            "/ws/chat/AAPL", headers={"x-forwarded-for": "2.2.2.2, 9.9.9.9"}
+        ) as ws:
+            ws.send_text(json.dumps({"type": "auth"}))
+            _drain_until(ws, "auth_success")
+            ws.send_text(json.dumps({"type": "query", "message": "hi again"}))
+            err = _drain_until(ws, "error")
+            assert "Free trial limit reached" in err["message"]
+
     def test_anon_without_operator_key_still_requires_byok(self, client, temp_db, monkeypatch):
         # No GOOGLE_API_KEY configured → no free trial to fall back to.
         _patch_agent(monkeypatch)
@@ -307,6 +352,57 @@ class TestAnonFreeTrial:
             err = ws.receive_json()
             assert err["type"] == "error"
             assert "API key required" in err["message"]
+
+    def test_default_model_id_env_does_not_disable_the_trial(
+        self, client, temp_db, monkeypatch
+    ):
+        # DEFAULT_MODEL_ID is an operator knob, not a caller's model choice —
+        # setting it must not make the free-trial branch unreachable.
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setenv("DEFAULT_MODEL_ID", "gemini-3.1-pro-preview")
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth"}))
+            ok = _drain_until(ws, "auth_success")
+            assert ok["free_trial"] is True
+            assert ok["model_id"] == chat.free_trial_model_id()
+
+    def test_anon_with_non_google_key_gets_a_model_for_that_provider(
+        self, client, temp_db, monkeypatch
+    ):
+        # They brought an OpenAI key and picked no model: use it, rather than
+        # steering them onto the Google default and refusing for a missing key.
+        _patch_agent(monkeypatch)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "openai_api_key": "byok-key"}))
+            ok = _drain_until(ws, "auth_success")
+            assert ok["free_trial"] is False
+            from agents.model_registry import get_model
+            assert get_model(ok["model_id"]).provider == "openai"
+
+    def test_oversized_query_does_not_burn_a_trial_credit(
+        self, client, temp_db, monkeypatch
+    ):
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth"}))
+            _drain_until(ws, "auth_success")
+
+            too_long = "x" * (chat.MAX_QUERY_LENGTH + 1)
+            ws.send_text(json.dumps({"type": "query", "message": too_long}))
+            err = _drain_until(ws, "error")
+            assert "too long" in err["message"]
+
+            # The rejected message cost nothing — the one credit is still there.
+            ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+            resp = _drain_until(ws, "response")
+            assert resp["message"] == "Analysis complete."
 
     def test_anon_requesting_non_trial_model_still_requires_byok(self, client, temp_db, monkeypatch):
         # The free trial only covers the one designated light model — picking

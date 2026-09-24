@@ -28,10 +28,12 @@ from api.llm_concurrency import (
     LLMConcurrencyExceeded,
     check_and_charge_budget,
 )
-from api.rate_limit import check_rate_limit, check_rest_rate_limit
+from api.rate_limit import check_rate_limit, check_rest_rate_limit, client_ip
 from api.validators import TICKER_RE
 from agents.graph.analyst_graph import LLMTimeoutError
-from agents.model_registry import get_model, get_default_model, get_token_threshold
+from agents.model_registry import (
+    get_all_models, get_model, get_default_model, get_token_threshold,
+)
 from agents.llm_factory import create_llm_pair
 
 logger = logging.getLogger(__name__)
@@ -49,12 +51,13 @@ MAX_QUERY_LENGTH = 4000
 
 
 def _free_trial_window_description() -> str:
-    """Human-readable free-trial cooldown, e.g. '12 hours' or '2 days'."""
-    hours = ANON_FREE_WINDOW_SECONDS // 3600
-    if hours % 24 == 0:
-        days = hours // 24
-        return f"{days} day" + ("s" if days != 1 else "")
-    return f"{hours} hour" + ("s" if hours != 1 else "")
+    """Human-readable free-trial cooldown, e.g. '30 minutes', '12 hours', '2 days'."""
+    seconds = ANON_FREE_WINDOW_SECONDS
+    for unit_seconds, label in ((86400, "day"), (3600, "hour"), (60, "minute")):
+        if seconds >= unit_seconds and seconds % unit_seconds == 0:
+            count = seconds // unit_seconds
+            return f"{count} {label}" + ("s" if count != 1 else "")
+    return f"{seconds} second" + ("s" if seconds != 1 else "")
 
 
 async def _safe_send(websocket: WebSocket, data: dict) -> bool:
@@ -136,24 +139,38 @@ async def chat(websocket: WebSocket, ticker: str):
         # Anonymous (no user_id) is allowed: signed-out visitors may chat with
         # their own BYOK key, ephemerally. Persistence is sign-in-only (below).
         user_id = keys.user_id
-        client_ip = websocket.client.host if websocket.client else "unknown"
+        ip = client_ip(websocket)
 
-        # Resolve model from auth message → registry default. An anonymous
-        # caller with no explicit model choice and no BYOK key of their own
-        # defaults to the free-trial model instead — otherwise they'd land on
-        # the general default, which the free trial doesn't cover, and get
-        # bounced straight to "API key required" without ever seeing the
-        # trial. Anyone who brought a key or is signed in keeps the normal
-        # default.
-        has_any_byok_key = any(
-            [keys.google_api_key, keys.openai_api_key, keys.anthropic_api_key]
-        )
-        if keys.model_id:
-            model_id = keys.model_id
-        elif user_id is None and not has_any_byok_key:
-            model_id = free_trial_model_id()
+        # Resolve the model for this session. An explicit choice wins; failing
+        # that we pick a model whose provider the caller actually has a key
+        # for, so someone who brought only an OpenAI/Anthropic key isn't
+        # steered onto the (Google) default and bounced with "key required".
+        # With no usable key at all, fall through to the free-trial model.
+        #
+        # `keys.model_id` is env-defaulted (DEFAULT_MODEL_ID), so it can't
+        # answer "did this caller pick a model?" — read the auth frame for that
+        # or setting DEFAULT_MODEL_ID would make the trial unreachable.
+        requested_model_id = auth_message.get("model_id")
+        if not isinstance(requested_model_id, str) or not requested_model_id:
+            requested_model_id = None
+
+        fallback_model = get_model(keys.model_id or "") or get_default_model()
+        trial_model_id = free_trial_model_id()
+
+        if requested_model_id:
+            model_id = requested_model_id
+        elif keys.get_provider_key(fallback_model.provider):
+            model_id = fallback_model.id
         else:
-            model_id = get_default_model().id
+            byok_model = next(
+                (m for m in get_all_models() if keys.get_provider_key(m.provider)),
+                None,
+            )
+            if byok_model:
+                model_id = byok_model.id
+            else:
+                model_id = trial_model_id or fallback_model.id
+
         model = get_model(model_id)
         if model is None:
             default = get_default_model()
@@ -167,7 +184,7 @@ async def chat(websocket: WebSocket, ticker: str):
         # one designated light model the operator lends to anon visitors,
         # capped per-IP below. Any other model still requires a key.
         free_trial = False
-        if not api_key and user_id is None and model_id == free_trial_model_id():
+        if not api_key and user_id is None and model_id == trial_model_id:
             trial_key = free_trial_key()
             if trial_key:
                 api_key = trial_key
@@ -282,10 +299,21 @@ async def chat(websocket: WebSocket, ticker: str):
                     break
 
                 if message.get("type") == "query":
-                    if not check_rate_limit(client_ip):
+                    if not check_rate_limit(ip):
                         await websocket.send_json({
                             "type": "error",
                             "message": "Rate limited — please wait before sending more messages"
+                        })
+                        continue
+
+                    # Validate before charging anything — a rejected message
+                    # must not burn a free-trial credit or budget unit.
+                    user_query = message.get("message", "")
+
+                    if len(user_query) > MAX_QUERY_LENGTH:
+                        await _safe_send(websocket, {
+                            "type": "error",
+                            "message": f"Message too long (max {MAX_QUERY_LENGTH} characters).",
                         })
                         continue
 
@@ -300,7 +328,7 @@ async def chat(websocket: WebSocket, ticker: str):
                             continue
                     elif free_trial:
                         if not check_rest_rate_limit(
-                            f"ip:{client_ip}", "anon_free_trial",
+                            f"ip:{ip}", "anon_free_trial",
                             ANON_FREE_QUERIES, ANON_FREE_WINDOW_SECONDS,
                         ):
                             await _safe_send(websocket, {
@@ -312,15 +340,6 @@ async def chat(websocket: WebSocket, ticker: str):
                                 ),
                             })
                             continue
-
-                    user_query = message.get("message", "")
-
-                    if len(user_query) > MAX_QUERY_LENGTH:
-                        await _safe_send(websocket, {
-                            "type": "error",
-                            "message": f"Message too long (max {MAX_QUERY_LENGTH} characters).",
-                        })
-                        continue
 
                     if session_id:
                         asyncio.create_task(save_message(session_id, "user", user_query))

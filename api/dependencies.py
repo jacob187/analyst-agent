@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 
 from fastapi import Header, HTTPException
 
-from agents.model_registry import get_free_tier_model, get_model
+from agents.model_registry import get_free_tier_model
 from api.clerk_auth import is_auth_disabled, is_clerk_enabled, verify_clerk_token
 from api.validators import USER_ID_RE
 
@@ -66,14 +66,18 @@ ANON_FREE_QUERIES = int(os.getenv("ANON_FREE_QUERIES", "3"))
 ANON_FREE_WINDOW_SECONDS = int(os.getenv("ANON_FREE_WINDOW_SECONDS", str(12 * 3600)))
 
 
-def free_trial_model_id() -> str:
-    """The model anonymous visitors may use without a key, budget-capped."""
-    return get_free_tier_model().id
+def free_trial_model_id() -> str | None:
+    """The model anonymous visitors may use without a key, budget-capped.
+
+    None when no model is flagged free_tier — the trial is disabled.
+    """
+    model = get_free_tier_model()
+    return model.id if model else None
 
 
 def free_trial_key() -> str | None:
     """The operator's env key for the free-trial model's provider, if any."""
-    model = get_model(free_trial_model_id())
+    model = get_free_tier_model()
     if model is None:
         return None
     env_var = PROVIDER_ENV_VARS.get(model.provider)
@@ -298,6 +302,10 @@ def resolve_ws_keys(auth_message: dict) -> ApiKeys:
     # the REST path's _verify_user_identity. Clerk-format ids are verified by
     # verify_ws_identity, which the route runs before acting on the identity.
     user_id = _trusted_user_id(_validate_user_id(auth_message.get("user_id")))
+    # The auth frame is untrusted JSON — a non-string model_id would blow up
+    # registry lookups downstream.
+    raw_model_id = auth_message.get("model_id")
+    model_id = raw_model_id if isinstance(raw_model_id, str) else None
     allow_env = _env_keys_allowed(user_id)
     google_key, google_source = _resolve_key(auth_message.get("google_api_key"), "GOOGLE_API_KEY", allow_env)
     openai_key, openai_source = _resolve_key(auth_message.get("openai_api_key"), "OPENAI_API_KEY", allow_env)
@@ -308,7 +316,7 @@ def resolve_ws_keys(auth_message: dict) -> ApiKeys:
         openai_api_key=openai_key,
         anthropic_api_key=anthropic_key,
         tavily_api_key=tavily_key,
-        model_id=auth_message.get("model_id") or os.getenv("DEFAULT_MODEL_ID"),
+        model_id=model_id or os.getenv("DEFAULT_MODEL_ID"),
         user_id=user_id,
         key_sources=_build_key_sources(google_source, openai_source, anthropic_source),
     )

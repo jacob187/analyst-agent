@@ -58,11 +58,13 @@ class TestGetFreeTierModel:
         monkeypatch.setenv("ANON_FREE_MODEL_ID", "nonexistent-model-xyz")
         assert get_free_tier_model().id == "gemini-3.1-flash-lite"
 
-    def test_falls_back_to_default_when_no_model_flagged(self, monkeypatch):
+    def test_returns_none_when_no_model_flagged(self, monkeypatch):
+        # Fails closed: unflagging the free-tier model disables the trial rather
+        # than re-pointing the operator's key at whatever the default model is.
         import agents.model_registry as registry
         monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
         monkeypatch.setattr(registry, "_FREE_TIER_MODEL", None)
-        assert get_free_tier_model().id == get_default_model().id
+        assert get_free_tier_model() is None
 
     def test_max_context_is_positive(self):
         for model in get_all_models():
@@ -115,9 +117,9 @@ class TestGetTokenThreshold:
         # 1_000_000 // 4 = 250_000
         assert get_token_threshold("gpt-4.1-mini") == 250_000
 
-    def test_o4_mini_threshold(self):
-        # 200_000 // 4 = 50_000
-        assert get_token_threshold("o4-mini") == 50_000
+    def test_gpt54_mini_threshold(self):
+        # 400_000 // 4 = 100_000
+        assert get_token_threshold("gpt-5.4-mini") == 100_000
 
     def test_unknown_model_returns_fallback(self):
         assert get_token_threshold("nonexistent-model") == 30_000
