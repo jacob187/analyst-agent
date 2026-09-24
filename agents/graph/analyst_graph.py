@@ -6,9 +6,9 @@ Architecture:
 - Complex queries → Planner → Step Executor → Synthesizer
 
 Streaming:
-- stream_sync() yields events as the graph executes (node transitions,
+- stream() yields events as the graph executes (node transitions,
   tool calls, thinking blocks, tokens, final response)
-- invoke() remains unchanged for backward compatibility
+- invoke() runs the graph to completion and returns only the final response
 """
 
 import asyncio
@@ -660,10 +660,9 @@ class PlanningAgent:
     """
     Wrapper that provides a consistent interface for the planning workflow.
 
-    Three execution modes:
-    - invoke(): blocks until done, returns final result (for tests, simple callers)
-    - stream(): async generator using astream() — preferred for async handlers (FastAPI)
-    - stream_sync(): sync generator using stream() — for testing with mocked workflows
+    Two execution modes:
+    - invoke(): runs to completion, returns the final result
+    - stream(): async generator yielding events as the graph executes
     """
 
     # Human-readable descriptions for each graph node
@@ -685,7 +684,7 @@ class PlanningAgent:
         self.ticker = ticker
 
     def _build_initial_state(self, messages: List[BaseMessage]) -> AnalysisState:
-        """Build the initial state dict. Shared by invoke() and stream_sync()."""
+        """Build the initial state dict. Shared by invoke() and stream()."""
         return {
             "messages": messages,
             "ticker": self.ticker,
@@ -697,9 +696,9 @@ class PlanningAgent:
             "final_response": "",
         }
 
-    def invoke(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    async def invoke(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Process a query through the planning workflow (blocking).
+        Process a query through the planning workflow, returning only the result.
 
         Args:
             inputs: Dict with "messages" key containing conversation history
@@ -710,7 +709,7 @@ class PlanningAgent:
         messages = inputs.get("messages", [])
         initial_state = self._build_initial_state(messages)
 
-        final_state = self.workflow.invoke(initial_state)
+        final_state = await self.workflow.ainvoke(initial_state)
 
         response = final_state.get("final_response", "")
         if response:
@@ -748,20 +747,24 @@ class PlanningAgent:
                 "total": total,
             }
 
-    def stream_sync(self, inputs: Dict[str, Any]) -> Generator[Dict[str, Any], None, None]:
+    async def stream(
+        self,
+        inputs: Dict[str, Any],
+        config: Optional[Dict[str, Any]] = None,
+    ):
         """
-        Yield streaming events as the graph executes.
+        Async generator yielding streaming events via LangGraph's native astream().
 
-        Uses workflow.astream() driven by an internal event loop so the sync
-        generator surface can dispatch async nodes (the worker became async
-        as part of Phase 2 hardening so the Tavily polling tool no longer
-        pins a thread pool slot for 60s). Events are drained eagerly then
-        yielded — real-time streaming semantics are preserved by the async
-        `stream()` method below, which is what production uses.
+        Subscribes to two stream modes:
+        - "updates": {node_name: state_delta} after each node completes →
+          node, tool and response events.
+        - "custom": whatever the synthesizer writes through get_stream_writer()
+          → thinking and token events. Without this mode the writer has no
+          subscriber, so the synthesizer falls back to a single ainvoke and the
+          client never sees partial output.
 
-        Stream modes:
-        - "updates": emitted after each node completes → we yield node/tool events
-        - "custom": emitted by get_stream_writer() inside nodes → thinking/token events
+        ``config`` is a LangChain RunnableConfig forwarded to the graph. Pass
+        ``metadata={"session_id": ...}`` to group runs into a LangSmith thread.
 
         Events yielded:
         - {"type": "node",     "node": str, "message": str}
@@ -772,83 +775,15 @@ class PlanningAgent:
         """
         messages = inputs.get("messages", [])
         initial_state = self._build_initial_state(messages)
-
-        # Drive the async stream one step at a time on a private event loop so
-        # we preserve real-time emission (downstream UX depends on tool events
-        # arriving as workers complete, not in a single batch). asyncio.run
-        # would drain the generator before yielding anything.
-        loop = asyncio.new_event_loop()
-
-        def _step_chunks():
-            async_iter = self.workflow.astream(
-                initial_state, stream_mode=["updates", "custom"]
-            ).__aiter__()
-            try:
-                while True:
-                    try:
-                        yield loop.run_until_complete(async_iter.__anext__())
-                    except StopAsyncIteration:
-                        return
-            finally:
-                loop.close()
-
-        # Track the plan so worker-update deltas can be mapped back to step metadata
         current_plan: Optional[QueryPlan] = None
 
-        for mode, chunk in _step_chunks():
-            if mode == "custom":
-                # Events from get_stream_writer() (thinking, tokens)
-                yield chunk
-
-            elif mode == "updates":
-                # Node completion events: chunk is {node_name: state_delta}
-                for node_name, state_update in chunk.items():
-                    yield {
-                        "type": "node",
-                        "node": node_name,
-                        "message": self._NODE_MESSAGES.get(
-                            node_name, f"Running {node_name}..."
-                        ),
-                    }
-
-                    # Track the plan so we can look up tool names later
-                    plan_update = state_update.get("plan")
-                    if plan_update is not None:
-                        current_plan = plan_update
-
-                    # Per-step UX: each Send-fanned worker emission becomes
-                    # one tool event tagged with its step's metadata.
-                    if node_name == "worker":
-                        yield from self._worker_tool_events(state_update, current_plan)
-
-                    # Emit final response (from react_agent or synthesizer)
-                    final = state_update.get("final_response")
-                    if final:
-                        yield {"type": "response", "message": extract_text(final)}
-
-    async def stream(
-        self,
-        inputs: Dict[str, Any],
-        config: Optional[Dict[str, Any]] = None,
-    ):
-        """
-        Async generator yielding streaming events via LangGraph's native astream().
-
-        This is the preferred method for async handlers (FastAPI WebSocket).
-        Uses astream(stream_mode="updates") which yields {node_name: state_delta}
-        after each node completes. Custom events (thinking/tokens) are emitted
-        via get_stream_writer() inside the synthesizer when available.
-
-        ``config`` is a LangChain RunnableConfig forwarded to the graph. Pass
-        ``metadata={"session_id": ...}`` to group runs into a LangSmith thread.
-        """
-        messages = inputs.get("messages", [])
-        initial_state = self._build_initial_state(messages)
-        current_plan: Optional[QueryPlan] = None
-
-        async for chunk in self.workflow.astream(
-            initial_state, stream_mode="updates", config=config
+        async for mode, chunk in self.workflow.astream(
+            initial_state, stream_mode=["updates", "custom"], config=config
         ):
+            if mode == "custom":
+                yield chunk
+                continue
+
             # chunk is {node_name: state_delta}
             for node_name, state_update in chunk.items():
                 yield {
@@ -893,7 +828,7 @@ def create_planning_agent(
         user_id: Anonymous user ID for scoping briefing queries
 
     Returns:
-        PlanningAgent instance with invoke() and stream_sync() methods
+        PlanningAgent instance with invoke() and stream() methods
     """
     workflow = create_planning_workflow(llm, ticker, tavily_api_key, synthesizer_llm, user_id=user_id)
     return PlanningAgent(workflow, ticker)

@@ -1,20 +1,20 @@
 """Tests for streaming functionality in analyst_graph.py.
 
 Marker: eval_unit — NO API keys needed. These test the streaming logic
-by mocking the LLM and workflow, verifying that stream_sync() yields
+by mocking the LLM and workflow, verifying that stream() yields
 the correct events in the correct order.
 
 Tests cover:
 - _process_streaming_chunk: parsing string vs list content from LLM chunks
-- stream_sync: node events, tool events, response events from graph streaming
+- stream: node events, tool events, response events from graph streaming
 - Per-step streaming: workers emit one tool event each via Send fan-out
-- Backward compat: invoke() still works after the refactor
+- invoke(): runs the graph to completion and returns the final message
 """
 
 import time
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from dataclasses import dataclass
 
 
@@ -183,18 +183,16 @@ class TestProcessStreamingChunk:
 
 
 # ---------------------------------------------------------------------------
-# PlanningAgent.stream_sync tests
+# PlanningAgent.stream tests
 # ---------------------------------------------------------------------------
 
 
-class TestStreamSync:
-    """stream_sync() yields structured events from the graph execution."""
+class TestStream:
+    """stream() yields structured events from the graph execution."""
 
     @pytest.mark.eval_unit
-    def test_simple_query_yields_node_and_response(self):
+    async def test_simple_query_yields_node_and_response(self):
         """A simple query should yield router + react_agent node events and a response."""
-        # Mock workflow.astream — stream_sync drives the async surface internally
-        # because the worker node became `async def` as part of Phase 2 hardening.
         items = [
             ("updates", {"router": {"query_complexity": "simple"}}),
             ("updates", {"react_agent": {"final_response": "AAPL is at $185"}}),
@@ -203,7 +201,7 @@ class TestStreamSync:
         mock_workflow.astream.side_effect = lambda *a, **kw: _async_iter(items)
 
         agent = PlanningAgent(mock_workflow, "AAPL")
-        events = list(agent.stream_sync({"messages": [HumanMessage(content="price?")]}))
+        events = [ev async for ev in agent.stream({"messages": [HumanMessage(content="price?")]})]
 
         # Should have: router node, react_agent node, response
         types = [e["type"] for e in events]
@@ -215,7 +213,7 @@ class TestStreamSync:
         assert response_events[0]["message"] == "AAPL is at $185"
 
     @pytest.mark.eval_unit
-    def test_complex_query_yields_tool_events(self):
+    async def test_complex_query_yields_tool_events(self):
         """A complex query should yield one tool event per worker emission.
 
         With Send-based fan-out, each worker is its own LangGraph node
@@ -236,7 +234,7 @@ class TestStreamSync:
         mock_workflow.astream.side_effect = lambda *a, **kw: _async_iter(items)
 
         agent = PlanningAgent(mock_workflow, "AAPL")
-        events = list(agent.stream_sync({"messages": [HumanMessage(content="analyze risks")]}))
+        events = [ev async for ev in agent.stream({"messages": [HumanMessage(content="analyze risks")]})]
 
         tool_events = [e for e in events if e["type"] == "tool"]
         assert len(tool_events) == 2
@@ -248,7 +246,7 @@ class TestStreamSync:
         assert tool_events[1]["step"] == 2
 
     @pytest.mark.eval_unit
-    def test_custom_events_passed_through(self):
+    async def test_custom_events_passed_through(self):
         """Custom events from get_stream_writer (thinking/tokens) should be yielded as-is."""
         items = [
             ("updates", {"router": {"query_complexity": "simple"}}),
@@ -260,7 +258,7 @@ class TestStreamSync:
         mock_workflow.astream.side_effect = lambda *a, **kw: _async_iter(items)
 
         agent = PlanningAgent(mock_workflow, "AAPL")
-        events = list(agent.stream_sync({"messages": [HumanMessage(content="analyze")]}))
+        events = [ev async for ev in agent.stream({"messages": [HumanMessage(content="analyze")]})]
 
         thinking = [e for e in events if e["type"] == "thinking"]
         tokens = [e for e in events if e["type"] == "token"]
@@ -271,7 +269,7 @@ class TestStreamSync:
         assert tokens[0]["message"] == "Apple"
 
     @pytest.mark.eval_unit
-    def test_node_messages_are_descriptive(self):
+    async def test_node_messages_are_descriptive(self):
         """Node events should include human-readable status messages."""
         items = [
             ("updates", {"router": {"query_complexity": "simple"}}),
@@ -281,7 +279,7 @@ class TestStreamSync:
         mock_workflow.astream.side_effect = lambda *a, **kw: _async_iter(items)
 
         agent = PlanningAgent(mock_workflow, "AAPL")
-        events = list(agent.stream_sync({"messages": [HumanMessage(content="test")]}))
+        events = [ev async for ev in agent.stream({"messages": [HumanMessage(content="test")]})]
 
         node_events = [e for e in events if e["type"] == "node"]
         assert any("Classifying" in e["message"] for e in node_events)
@@ -295,7 +293,7 @@ class TestStreamSync:
 
 def _make_streaming_workflow(tools_dict, plan):
     """Compile a minimal StateGraph with the real Send fan-out, so
-    stream_sync() exercises actual LangGraph streaming semantics."""
+    stream() exercises actual LangGraph streaming semantics."""
     from langgraph.graph import StateGraph, END
 
     graph = StateGraph(AnalysisState)
@@ -314,10 +312,10 @@ def _make_streaming_workflow(tools_dict, plan):
 
 class TestPerStepStreaming:
     """Send-based fan-out emits one updates chunk per worker as it completes,
-    so stream_sync() should yield one tool event per step."""
+    so stream() should yield one tool event per step."""
 
     @pytest.mark.eval_unit
-    def test_worker_events_stream_per_step(self):
+    async def test_worker_events_stream_per_step(self):
         """N-step plan → N tool events, one per worker emission."""
         tools_dict = {
             "tool_a": Tool.from_function(name="tool_a", description="a", func=lambda q="": "ra"),
@@ -337,7 +335,7 @@ class TestPerStepStreaming:
         workflow = _make_streaming_workflow(tools_dict, plan)
         agent = PlanningAgent(workflow, "TEST")
 
-        events = list(agent.stream_sync({"messages": [HumanMessage(content="q")]}))
+        events = [ev async for ev in agent.stream({"messages": [HumanMessage(content="q")]})]
 
         tool_events = [e for e in events if e["type"] == "tool"]
         assert len(tool_events) == 3, f"Expected 3 tool events, got {len(tool_events)}: {tool_events}"
@@ -346,7 +344,7 @@ class TestPerStepStreaming:
         assert all(e["node"] == "worker" for e in tool_events)
 
     @pytest.mark.eval_unit
-    def test_worker_events_carry_correct_step_metadata(self):
+    async def test_worker_events_carry_correct_step_metadata(self):
         """Each tool event carries the right tool/action for its step."""
         tools_dict = {
             "tool_a": Tool.from_function(name="tool_a", description="a", func=lambda q="": "ra"),
@@ -364,7 +362,7 @@ class TestPerStepStreaming:
         workflow = _make_streaming_workflow(tools_dict, plan)
         agent = PlanningAgent(workflow, "TEST")
 
-        events = list(agent.stream_sync({"messages": [HumanMessage(content="q")]}))
+        events = [ev async for ev in agent.stream({"messages": [HumanMessage(content="q")]})]
         tool_events = sorted(
             (e for e in events if e["type"] == "tool"), key=lambda e: e["step"]
         )
@@ -375,7 +373,7 @@ class TestPerStepStreaming:
         assert tool_events[1]["action"] == "Get prices"
 
     @pytest.mark.eval_unit
-    def test_worker_events_arrive_as_workers_complete(self):
+    async def test_worker_events_arrive_as_workers_complete(self):
         """Workers running at staggered speeds emit their tool events at
         staggered times — the user sees per-step UX, not a batch after the
         slowest worker."""
@@ -407,7 +405,7 @@ class TestPerStepStreaming:
 
         events = []
         start = time.monotonic()
-        for ev in agent.stream_sync({"messages": [HumanMessage(content="q")]}):
+        async for ev in agent.stream({"messages": [HumanMessage(content="q")]}):
             events.append((time.monotonic() - start, ev))
             if ev.get("type") == "tool" and not first_event_at:
                 first_event_at.append(time.monotonic() - start)
@@ -428,36 +426,36 @@ class TestPerStepStreaming:
 # ---------------------------------------------------------------------------
 
 
-class TestInvokeBackwardCompat:
-    """invoke() should work exactly as before the streaming refactor."""
+class TestInvoke:
+    """invoke() runs the graph to completion and wraps the result in messages."""
 
     @pytest.mark.eval_unit
-    def test_invoke_returns_messages_dict(self):
+    async def test_invoke_returns_messages_dict(self):
         """invoke() should return {"messages": [...]} with the response appended."""
         mock_workflow = MagicMock()
-        mock_workflow.invoke.return_value = {
+        mock_workflow.ainvoke = AsyncMock(return_value={
             "final_response": "AAPL is trading at $185",
             "messages": [HumanMessage(content="price?")],
-        }
+        })
 
         agent = PlanningAgent(mock_workflow, "AAPL")
-        result = agent.invoke({"messages": [HumanMessage(content="price?")]})
+        result = await agent.invoke({"messages": [HumanMessage(content="price?")]})
 
         assert "messages" in result
         assert isinstance(result["messages"][-1], AIMessage)
         assert result["messages"][-1].content == "AAPL is trading at $185"
 
     @pytest.mark.eval_unit
-    def test_invoke_with_empty_response(self):
+    async def test_invoke_with_empty_response(self):
         """invoke() with no final_response should return messages unchanged."""
         mock_workflow = MagicMock()
-        mock_workflow.invoke.return_value = {
+        mock_workflow.ainvoke = AsyncMock(return_value={
             "final_response": "",
             "messages": [HumanMessage(content="test")],
-        }
+        })
 
         agent = PlanningAgent(mock_workflow, "AAPL")
-        result = agent.invoke({"messages": [HumanMessage(content="test")]})
+        result = await agent.invoke({"messages": [HumanMessage(content="test")]})
 
         assert "messages" in result
         assert len(result["messages"]) == 1  # No AIMessage added

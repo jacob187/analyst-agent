@@ -24,7 +24,7 @@ class QualityScores(BaseModel):
         description="1-5: How relevant is the response to the query?"
     )
     accuracy: int = Field(
-        description="1-5: How accurate is the financial data presented?"
+        description="1-5: Is the financial data internally consistent and correctly presented?"
     )
     completeness: int = Field(
         description="1-5: How completely does the response address all parts of the query?"
@@ -39,9 +39,16 @@ JUDGE_PROMPT = """You are evaluating an AI financial analyst's response.
 Query: {query}
 Response: {response}
 
+The response was produced from live market and SEC data fetched just now. You
+cannot verify those figures — your own knowledge of prices, ratios and filing
+dates is older than the data being scored. Do NOT mark a figure wrong because
+it differs from what you remember; judge only what you can see in the text.
+
 Score the response on three dimensions (1-5 each):
 - relevance: Does the response address the query? (1=off-topic, 5=perfectly targeted)
-- accuracy: Is the financial data plausible and correctly presented? (1=wrong, 5=accurate)
+- accuracy: Are the figures internally consistent, correctly labelled, and in a
+  sane range for this kind of metric? (1=self-contradictory or nonsensical,
+  5=coherent and well presented)
 - completeness: Does it cover all aspects of the query? (1=partial, 5=thorough)
 
 Provide brief reasoning for your scores."""
@@ -62,10 +69,10 @@ def _judge_response(llm, query: str, response: str) -> QualityScores:
 class TestResponseQuality:
     """LLM-as-judge scoring for agent responses."""
 
-    def test_simple_query_quality(self, agent, llm):
+    async def test_simple_query_quality(self, agent, llm):
         """Simple stock info query should score >= 3 on relevance and accuracy."""
         query = "What is Apple's current stock price and P/E ratio?"
-        result = agent.invoke({
+        result = await agent.invoke({
             "messages": [HumanMessage(content=query)]
         })
         response = result["messages"][-1].content
@@ -79,10 +86,10 @@ class TestResponseQuality:
             f"Accuracy {scores.accuracy}/5 too low. {scores.reasoning}"
         )
 
-    def test_complex_query_quality(self, agent, llm):
+    async def test_complex_query_quality(self, agent, llm):
         """Complex multi-source query should score >= 3 on relevance and completeness."""
         query = "Analyze Apple's risk factors and financial health from their SEC filings"
-        result = agent.invoke({
+        result = await agent.invoke({
             "messages": [HumanMessage(content=query)]
         })
         response = result["messages"][-1].content
@@ -96,7 +103,7 @@ class TestResponseQuality:
             f"Completeness {scores.completeness}/5 too low. {scores.reasoning}"
         )
 
-    def test_golden_query_key_terms(self, agent, llm, golden_queries):
+    async def test_golden_query_key_terms(self, agent, llm, golden_queries):
         """Golden queries should mention all must_mention terms in response.
 
         This is a hard content check — the must_mention terms are fundamental
@@ -104,7 +111,7 @@ class TestResponseQuality:
         We use case-insensitive matching.
         """
         for case in golden_queries:
-            result = agent.invoke({
+            result = await agent.invoke({
                 "messages": [HumanMessage(content=case["query"])]
             })
             response = result["messages"][-1].content.lower()

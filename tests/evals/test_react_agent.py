@@ -16,13 +16,13 @@ from langchain_core.messages import HumanMessage
 class TestReactAgent:
     """Test simple query end-to-end through the full PlanningAgent."""
 
-    def test_stock_price_query(self, agent):
+    async def test_stock_price_query(self, agent):
         """A stock price query should return a response with price data.
 
         The ReAct agent should pick get_stock_info or get_stock_price_history
         and format a response containing a dollar sign or the word 'price'.
         """
-        result = agent.invoke({
+        result = await agent.invoke({
             "messages": [HumanMessage(content="What is Apple's current stock price?")]
         })
 
@@ -32,9 +32,9 @@ class TestReactAgent:
             f"Response doesn't mention price: {response[:300]}"
         )
 
-    def test_pe_ratio_query(self, agent):
+    async def test_pe_ratio_query(self, agent):
         """A P/E ratio query should mention 'p/e' in the response."""
-        result = agent.invoke({
+        result = await agent.invoke({
             "messages": [HumanMessage(content="What is AAPL's P/E ratio?")]
         })
 
@@ -44,14 +44,14 @@ class TestReactAgent:
             f"Response doesn't mention P/E: {response[:300]}"
         )
 
-    def test_risk_factors_query(self, agent):
+    async def test_risk_factors_query(self, agent):
         """A risk factors query should return substantial content (>200 chars).
 
         Risk factors are complex SEC filing data. A short or generic response
         (like 'Apple has some risks') indicates the agent didn't call the
         tool or the tool failed silently.
         """
-        result = agent.invoke({
+        result = await agent.invoke({
             "messages": [HumanMessage(content="What are the main risk factors for Apple?")]
         })
 
