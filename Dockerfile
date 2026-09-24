@@ -17,4 +17,7 @@ COPY api/ api/
 
 EXPOSE 8000
 
-CMD ["uv", "run", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]
+# No --forwarded-allow-ips: trusting every peer makes uvicorn rewrite the
+# client address to the leftmost X-Forwarded-For entry, which the caller sends.
+# Per-IP limits resolve the address via api.rate_limit.client_ip instead.
+CMD ["uv", "run", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]

@@ -74,13 +74,11 @@ def _reset_llm_semaphore():
 def _reset_rate_limit_state():
     """Clear in-memory rate-limit caches between tests so REST tests that
     hit the same endpoint repeatedly don't trip each other's quotas."""
-    from api.rate_limit import _rest_timestamps, _timestamps
+    from api.rate_limit import clear_rate_limits
 
-    _rest_timestamps.clear()
-    _timestamps.clear()
+    clear_rate_limits()
     yield
-    _rest_timestamps.clear()
-    _timestamps.clear()
+    clear_rate_limits()
 
 
 # ---------------------------------------------------------------------------

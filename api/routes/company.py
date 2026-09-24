@@ -25,7 +25,7 @@ from api.llm_concurrency import (
     check_and_charge_budget,
     llm_slot,
 )
-from api.rate_limit import check_rest_rate_limit, rate_limit_key
+from api.rate_limit import check_rest_rate_limit, client_ip, rate_limit_key
 from api.validators import TICKER_RE
 
 logger = logging.getLogger("analyst.filings")
@@ -56,15 +56,15 @@ _MAX_CONCURRENT_STREAMS = 2
 _stream_semaphores: TTLCache = TTLCache(maxsize=4096, ttl=600)
 
 
-def _get_stream_semaphore(client_ip: str) -> asyncio.Semaphore:
+def _get_stream_semaphore(ip: str) -> asyncio.Semaphore:
     """Return the per-IP stream semaphore, creating one on first sight.
 
     Wraps the TTLCache lookup so callers don't repeat the get-or-create dance.
     """
-    sem = _stream_semaphores.get(client_ip)
+    sem = _stream_semaphores.get(ip)
     if sem is None:
         sem = asyncio.Semaphore(_MAX_CONCURRENT_STREAMS)
-        _stream_semaphores[client_ip] = sem
+        _stream_semaphores[ip] = sem
     return sem
 
 
@@ -596,9 +596,9 @@ async def get_company_filings(
     if not TICKER_RE.match(ticker.upper()):
         raise HTTPException(status_code=422, detail="Invalid ticker symbol")
 
-    client_ip = request.client.host if request.client else "unknown"
+    ip = client_ip(request)
     if not check_rest_rate_limit(
-        rate_limit_key(keys.user_id, client_ip),
+        rate_limit_key(keys.user_id, ip),
         bucket="filings",
         max_calls=10,
         window_seconds=3600,
@@ -712,8 +712,8 @@ async def stream_company_filings(
 
     # Per-IP concurrency guard — prevents a single client from opening
     # many concurrent streams and exhausting the thread pool or API credits.
-    client_ip = request.client.host if request.client else "unknown"
-    semaphore = _get_stream_semaphore(client_ip)
+    ip = client_ip(request)
+    semaphore = _get_stream_semaphore(ip)
     if semaphore.locked():
         raise HTTPException(
             status_code=429,
@@ -722,7 +722,7 @@ async def stream_company_filings(
 
     # Hourly volume cap, complementary to the concurrency cap above.
     if not check_rest_rate_limit(
-        rate_limit_key(keys.user_id, client_ip),
+        rate_limit_key(keys.user_id, ip),
         bucket="filings_stream",
         max_calls=10,
         window_seconds=3600,
