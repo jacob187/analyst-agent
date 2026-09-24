@@ -7,7 +7,6 @@ import pytest
 from agents.llm_factory import (
     ThinkingConfig,
     _build_thinking_kwargs,
-    _skip_temperature,
     create_llm,
     create_llm_pair,
 )
@@ -70,22 +69,6 @@ class TestBuildThinkingKwargs:
         assert _build_thinking_kwargs("unknown", "some-model", config) == {}
 
 
-class TestSkipTemperature:
-    def test_gpt5_family_skipped(self):
-        assert _skip_temperature("openai", "gpt-5.4") is True
-        assert _skip_temperature("openai", "gpt-5.4-mini") is True
-        assert _skip_temperature("openai", "gpt-5.5") is True
-
-    def test_gpt5_chat_not_skipped(self):
-        assert _skip_temperature("openai", "gpt-5-chat") is False
-
-    def test_non_gpt5_openai_not_skipped(self):
-        assert _skip_temperature("openai", "gpt-4.1-mini") is False
-
-    def test_non_openai_provider_not_skipped(self):
-        assert _skip_temperature("google_genai", "gpt-5.4") is False
-
-
 class TestCreateLlm:
     @patch("langchain.chat_models.init_chat_model")
     def test_google_model(self, mock_init):
@@ -121,14 +104,16 @@ class TestCreateLlm:
         )
 
     @patch("langchain.chat_models.init_chat_model")
-    def test_gpt5_model_omits_temperature(self, mock_init):
-        """gpt-5 models reject a non-default temperature — omit it rather than
-        send a value langchain-openai silently drops."""
+    def test_gpt5_model_passes_temperature(self, mock_init):
+        """gpt-5 (non-chat) rejects a non-default temperature, but dropping it
+        is langchain-openai's job — ChatOpenAI.validate_temperature pops it, and
+        the responses-API payload builder pops it again."""
         mock_init.return_value = MagicMock()
         create_llm("gpt-5.4", "fake-openai-key")
 
         mock_init.assert_called_once_with(
             "openai:gpt-5.4",
+            temperature=0,
             api_key="fake-openai-key",
         )
 

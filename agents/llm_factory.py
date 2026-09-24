@@ -90,14 +90,6 @@ def _build_thinking_kwargs(
     return {}
 
 
-def _skip_temperature(provider: str, model_id: str) -> bool:
-    """gpt-5 models (excluding gpt-5-chat) reject a non-default temperature —
-    langchain-openai silently drops `temperature=0` for them rather than
-    erroring, so omit it instead of sending a value that's discarded."""
-    model_lower = model_id.lower()
-    return provider == "openai" and model_lower.startswith("gpt-5") and "chat" not in model_lower
-
-
 def create_llm(
     model_id: str,
     api_key: str,
@@ -136,14 +128,10 @@ def create_llm(
     # Resolve the provider-specific API key kwarg name
     key_kwarg_name = _PROVIDER_KEY_KWARG.get(model.provider, "api_key")
 
-    temperature_kwargs = (
-        {} if _skip_temperature(model.provider, model.id) else {"temperature": 0}
-    )
-
     return init_chat_model(
         f"{model.provider}:{model.id}",
         **{key_kwarg_name: api_key},
-        **temperature_kwargs,
+        temperature=0,
         **thinking_kwargs,
     )
 
