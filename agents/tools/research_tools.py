@@ -5,7 +5,7 @@ import hashlib
 from concurrent.futures import (
     ThreadPoolExecutor, TimeoutError as FuturesTimeout,
 )
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from cachetools import TTLCache
 from langchain_core.tools import Tool
@@ -184,7 +184,7 @@ def _tool_tavily_research(
     return asyncio.run(_tool_tavily_research_async(ticker, topic, tavily_api_key))
 
 
-def _tool_company_news(ticker: str, tavily_api_key: str) -> str:
+def _tool_company_news(ticker: str, tavily_api_key: str, search_depth: str = "advanced") -> str:
     """
     Get recent news and developments for a company.
 
@@ -205,7 +205,7 @@ def _tool_company_news(ticker: str, tavily_api_key: str) -> str:
             search = TavilySearch(
                 tavily_api_key=tavily_api_key,
                 max_results=7,
-                search_depth="advanced",
+                search_depth=search_depth,
                 include_answer=True,
                 topic="news",
                 time_range=time_range,
@@ -247,7 +247,7 @@ def _tool_company_news(ticker: str, tavily_api_key: str) -> str:
         return f"Failed to retrieve news: {e}"
 
 
-def _tool_competitor_analysis(ticker: str, tavily_api_key: str) -> str:
+def _tool_competitor_analysis(ticker: str, tavily_api_key: str, search_depth: str = "advanced") -> str:
     """
     Research competitors and market positioning for a company.
 
@@ -259,7 +259,7 @@ def _tool_competitor_analysis(ticker: str, tavily_api_key: str) -> str:
         search = TavilySearch(
             tavily_api_key=tavily_api_key,
             max_results=10,
-            search_depth="advanced",
+            search_depth=search_depth,
             include_answer=True,
         )
 
@@ -300,7 +300,7 @@ def _tool_competitor_analysis(ticker: str, tavily_api_key: str) -> str:
         return f"Failed to analyze competitors: {e}"
 
 
-def _tool_industry_trends(ticker: str, tavily_api_key: str) -> str:
+def _tool_industry_trends(ticker: str, tavily_api_key: str, search_depth: str = "advanced") -> str:
     """
     Research industry trends and outlook relevant to the company.
 
@@ -312,7 +312,7 @@ def _tool_industry_trends(ticker: str, tavily_api_key: str) -> str:
         search = TavilySearch(
             tavily_api_key=tavily_api_key,
             max_results=8,
-            search_depth="advanced",
+            search_depth=search_depth,
             include_answer=True,
         )
 
@@ -353,64 +353,117 @@ def _tool_industry_trends(ticker: str, tavily_api_key: str) -> str:
         return f"Failed to analyze industry trends: {e}"
 
 
-def create_research_tools(ticker: str, tavily_api_key: str) -> list[Tool]:
+TRIAL_SEARCH_EXHAUSTED = (
+    "Web research is unavailable: the free trial's daily search limit is reached. "
+    "Answer from SEC filings and market data instead."
+)
+
+
+async def _metered_search(
+    ticker: str,
+    name: str,
+    query: str,
+    func: Callable[[str], str],
+    search_budget: Callable[[], Awaitable[bool]],
+) -> str:
+    # Cache before charging so repeat demo questions (same ticker + tool +
+    # query) cost neither a Tavily credit nor a unit of the trial allowance.
+    cache_key = _get_cache_key(ticker, f"trial:{name}:{query}")
+    if cache_key in _research_cache:
+        return _research_cache[cache_key]
+    if not await search_budget():
+        return TRIAL_SEARCH_EXHAUSTED
+    result = await asyncio.to_thread(func, query)
+    # Error strings aren't cached — that would pin a transient failure for the TTL.
+    if not result.startswith(("Failed", "News retrieval timed out")):
+        _research_cache[cache_key] = result
+    return result
+
+
+def create_research_tools(
+    ticker: str,
+    tavily_api_key: str,
+    search_budget: Callable[[], Awaitable[bool]] | None = None,
+) -> list[Tool]:
     """
     Create Tavily research tools bound to a specific ticker.
 
     Args:
         ticker: Company ticker symbol
         tavily_api_key: Tavily API key
+        search_budget: Free-trial mode. Awaited before each uncached search;
+            False means today's allowance is spent. Every search drops to
+            "basic" depth (1 credit instead of 2), and deep_research — 4-250
+            credits per call — is served by a basic web search under the same
+            name, so plans that reference it still resolve. Tools become
+            async-only, so nothing can bypass the meter via sync invoke.
 
     Returns:
         List of LangChain Tool objects for research
     """
-    tools: list[Tool] = [
-        Tool.from_function(
-            name="web_search",
-            description=(
-                "Search the web for current information about the company. "
-                "Use this for general queries, recent events, or fact-checking. "
-                "Input should be a search query string."
-            ),
-            func=lambda query: _tool_tavily_search(ticker, query, tavily_api_key),
+    depth = "basic" if search_budget else "advanced"
+    funcs: dict[str, Callable[[str], str]] = {
+        "web_search": lambda query: _tool_tavily_search(ticker, query, tavily_api_key, depth),
+        "deep_research": (
+            (lambda topic: _tool_tavily_search(ticker, topic, tavily_api_key, depth))
+            if search_budget
+            else (lambda topic: _tool_tavily_research(ticker, topic, tavily_api_key))
         ),
-        Tool.from_function(
-            name="deep_research",
-            description=(
-                "Perform comprehensive deep research on a specific topic about the company. "
-                "Use this for in-depth analysis, complex questions, or topics requiring multiple sources. "
-                "Input should be the research topic."
-            ),
-            func=lambda topic: _tool_tavily_research(ticker, topic, tavily_api_key),
-            coroutine=lambda topic: _tool_tavily_research_async(ticker, topic, tavily_api_key),
+        "get_company_news": lambda query="": _tool_company_news(ticker, tavily_api_key, depth),
+        "analyze_competitors": lambda query="": _tool_competitor_analysis(ticker, tavily_api_key, depth),
+        "get_industry_trends": lambda query="": _tool_industry_trends(ticker, tavily_api_key, depth),
+    }
+    descriptions = {
+        "web_search": (
+            "Search the web for current information about the company. "
+            "Use this for general queries, recent events, or fact-checking. "
+            "Input should be a search query string."
         ),
-        Tool.from_function(
-            name="get_company_news",
-            description=(
-                "Get the latest news and developments for the company. "
-                "Returns recent headlines, news summaries, and source links."
-            ),
-            func=lambda query="": _tool_company_news(ticker, tavily_api_key),
+        "deep_research": (
+            "Perform comprehensive deep research on a specific topic about the company. "
+            "Use this for in-depth analysis, complex questions, or topics requiring multiple sources. "
+            "Input should be the research topic."
         ),
-        Tool.from_function(
-            name="analyze_competitors",
-            description=(
-                "Research and analyze the company's competitors and market positioning. "
-                "Returns competitive landscape analysis and market share information."
-            ),
-            func=lambda query="": _tool_competitor_analysis(ticker, tavily_api_key),
+        "get_company_news": (
+            "Get the latest news and developments for the company. "
+            "Returns recent headlines, news summaries, and source links."
         ),
-        Tool.from_function(
-            name="get_industry_trends",
-            description=(
-                "Research industry trends, outlook, and forecasts relevant to the company. "
-                "Returns analysis of market trends and industry developments."
-            ),
-            func=lambda query="": _tool_industry_trends(ticker, tavily_api_key),
+        "analyze_competitors": (
+            "Research and analyze the company's competitors and market positioning. "
+            "Returns competitive landscape analysis and market share information."
         ),
-    ]
+        "get_industry_trends": (
+            "Research industry trends, outlook, and forecasts relevant to the company. "
+            "Returns analysis of market trends and industry developments."
+        ),
+    }
 
-    return tools
+    if search_budget:
+        return [
+            Tool.from_function(
+                name=name,
+                description=descriptions[name],
+                func=None,
+                coroutine=lambda query="", name=name, func=func: _metered_search(
+                    ticker, name, query, func, search_budget
+                ),
+            )
+            for name, func in funcs.items()
+        ]
+
+    return [
+        Tool.from_function(
+            name=name,
+            description=descriptions[name],
+            func=func,
+            coroutine=(
+                (lambda topic: _tool_tavily_research_async(ticker, topic, tavily_api_key))
+                if name == "deep_research"
+                else None
+            ),
+        )
+        for name, func in funcs.items()
+    ]
 
 
 def clear_research_cache() -> None:

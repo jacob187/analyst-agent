@@ -240,25 +240,19 @@ class TestAnonChatNoPersistence:
 # ── Anonymous free trial ─────────────────────────────────────────────────────
 
 
-class TestFreeTrialWindowDescription:
-    @pytest.mark.parametrize(
-        "seconds,expected",
-        [
-            (12 * 3600, "12 hours"),
-            (3600, "1 hour"),
-            (48 * 3600, "2 days"),
-            (1800, "30 minutes"),
-            (45, "45 seconds"),
-        ],
-    )
-    def test_renders_the_largest_whole_unit(self, monkeypatch, seconds, expected):
-        monkeypatch.setattr(chat, "ANON_FREE_WINDOW_SECONDS", seconds)
-        assert chat._free_trial_window_description() == expected
+def _trial_query(ws):
+    """Send one query; return its terminal event (served → response, refused → error)."""
+    ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+    while True:
+        ev = ws.receive_json()
+        if ev["type"] in ("response", "error"):
+            return ev
 
 
 class TestAnonFreeTrial:
     """Anonymous visitors with no BYOK key may still chat using the
-    designated free-trial model, capped per-IP at ANON_FREE_QUERIES/day."""
+    designated free-trial model, capped per-IP at ANON_FREE_QUERIES per UTC
+    day and globally at ANON_FREE_DAILY_CAP."""
 
     @pytest.fixture(autouse=True)
     def _isolate_quota(self, monkeypatch):
@@ -453,3 +447,230 @@ class TestAnonFreeTrial:
             err = ws.receive_json()
             assert err["type"] == "error"
             assert "API key required" in err["message"]
+
+    # ── Durable per-IP quota + global daily cap ──────────────────────────────
+
+    def test_per_ip_quota_survives_a_restart(self, client, temp_db, monkeypatch):
+        # The quota lives in SQLite, not process memory — a deploy/restart
+        # (in-memory limiters wiped, DB connection reopened) must not hand the
+        # same IP a fresh allowance.
+        import api.db as db_module
+        from api.rate_limit import clear_rate_limits
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth"}))
+            _drain_until(ws, "auth_success")
+            assert _trial_query(ws)["type"] == "response"
+
+        clear_rate_limits()
+        asyncio.run(db_module.close_db())
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth"}))
+            _drain_until(ws, "auth_success")
+            err = _trial_query(ws)
+            assert err["type"] == "error"
+            assert "Free trial limit reached" in err["message"]
+
+    def test_per_ip_quota_resets_at_utc_midnight(self, client, temp_db, monkeypatch):
+        import api.db as db_module
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
+        monkeypatch.setattr(db_module, "_today_utc", lambda: "2026-09-24")
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth"}))
+            _drain_until(ws, "auth_success")
+            assert _trial_query(ws)["type"] == "response"
+            assert _trial_query(ws)["type"] == "error"
+
+            monkeypatch.setattr(db_module, "_today_utc", lambda: "2026-09-25")
+            assert _trial_query(ws)["type"] == "response"
+
+    def test_global_cap_refuses_other_ips(self, client, temp_db, monkeypatch):
+        # Both visitors connect while the trial is open; once the first spends
+        # the last global credit, the second is refused mid-session even though
+        # their own per-IP quota is untouched.
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setattr(chat, "ANON_FREE_DAILY_CAP", 1)
+
+        with client.websocket_connect(
+            "/ws/chat/AAPL", headers={"x-forwarded-for": "1.1.1.1"}
+        ) as ws_a, client.websocket_connect(
+            "/ws/chat/AAPL", headers={"x-forwarded-for": "2.2.2.2"}
+        ) as ws_b:
+            ws_a.send_text(json.dumps({"type": "auth"}))
+            _drain_until(ws_a, "auth_success")
+            ws_b.send_text(json.dumps({"type": "auth"}))
+            _drain_until(ws_b, "auth_success")
+
+            assert _trial_query(ws_a)["type"] == "response"
+            err = _trial_query(ws_b)
+            assert err["type"] == "error"
+            assert err["message"] == chat.FREE_TRIAL_AT_CAPACITY
+
+    def test_exhausted_ip_does_not_drain_the_global_cap(self, client, temp_db, monkeypatch):
+        # Refused per-IP queries must not count toward the global cap, or one
+        # visitor hammering "send" could lock everyone else out.
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
+        monkeypatch.setattr(chat, "ANON_FREE_DAILY_CAP", 2)
+
+        with client.websocket_connect(
+            "/ws/chat/AAPL", headers={"x-forwarded-for": "1.1.1.1"}
+        ) as ws:
+            ws.send_text(json.dumps({"type": "auth"}))
+            _drain_until(ws, "auth_success")
+            assert _trial_query(ws)["type"] == "response"
+            for _ in range(3):
+                assert "Free trial limit reached" in _trial_query(ws)["message"]
+
+        with client.websocket_connect(
+            "/ws/chat/AAPL", headers={"x-forwarded-for": "2.2.2.2"}
+        ) as ws:
+            ws.send_text(json.dumps({"type": "auth"}))
+            _drain_until(ws, "auth_success")
+            assert _trial_query(ws)["type"] == "response"
+
+    def test_connect_refused_once_global_cap_is_spent(self, client, temp_db, monkeypatch):
+        import api.db as db_module
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setattr(chat, "ANON_FREE_DAILY_CAP", 1)
+        asyncio.run(db_module.increment_llm_usage(chat.FREE_TRIAL_GLOBAL_USAGE_KEY))
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth"}))
+            err = ws.receive_json()
+            assert err["type"] == "error"
+            assert err["message"] == chat.FREE_TRIAL_AT_CAPACITY
+
+    def test_global_cap_does_not_affect_byok(self, client, temp_db, monkeypatch):
+        import api.db as db_module
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setattr(chat, "ANON_FREE_DAILY_CAP", 1)
+        asyncio.run(db_module.increment_llm_usage(chat.FREE_TRIAL_GLOBAL_USAGE_KEY))
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "google_api_key": "byok-key"}))
+            ok = _drain_until(ws, "auth_success")
+            assert ok["free_trial"] is False
+            assert _trial_query(ws)["type"] == "response"
+
+    def test_quota_rows_do_not_store_raw_ips(self, client, temp_db, monkeypatch):
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+
+        with client.websocket_connect(
+            "/ws/chat/AAPL", headers={"x-forwarded-for": "203.0.113.7"}
+        ) as ws:
+            ws.send_text(json.dumps({"type": "auth"}))
+            _drain_until(ws, "auth_success")
+            _trial_query(ws)
+
+        conn = sqlite3.connect(temp_db)
+        try:
+            ids = [r[0] for r in conn.execute("SELECT user_id FROM user_llm_usage")]
+        finally:
+            conn.close()
+        assert chat.FREE_TRIAL_GLOBAL_USAGE_KEY in ids
+        assert len(ids) == 2
+        assert not any("203.0.113.7" in i for i in ids)
+
+    # ── Metered web search for trial sessions ────────────────────────────────
+
+    @staticmethod
+    def _capture_agent_kwargs(monkeypatch):
+        captured = {}
+        monkeypatch.setattr(chat, "create_llm_pair", lambda *a, **k: (MagicMock(), MagicMock()))
+
+        def fake_agent(*a, **k):
+            captured.update(k)
+            return _FakeAgent()
+
+        monkeypatch.setattr("agents.graph.analyst_graph.create_sec_qa_agent", fake_agent)
+        return captured
+
+    def test_trial_borrows_operator_tavily_key_with_a_meter(self, client, temp_db, monkeypatch):
+        captured = self._capture_agent_kwargs(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setenv("TAVILY_API_KEY", "operator-tavily")
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth"}))
+            ok = _drain_until(ws, "auth_success")
+            assert "Web research enabled" in ok["message"]
+            _drain_until(ws, "system")
+
+        assert captured["tavily_api_key"] == "operator-tavily"
+        assert captured["search_budget"] is not None
+
+    def test_trial_search_meter_enforces_the_daily_cap(self, client, temp_db, monkeypatch):
+        captured = self._capture_agent_kwargs(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setenv("TAVILY_API_KEY", "operator-tavily")
+        monkeypatch.setattr(chat, "ANON_FREE_SEARCH_DAILY_CAP", 2)
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth"}))
+            _drain_until(ws, "system")
+
+        budget = captured["search_budget"]
+        assert [asyncio.run(budget()) for _ in range(3)] == [True, True, False]
+
+    def test_trial_gets_no_search_once_daily_allowance_is_spent(
+        self, client, temp_db, monkeypatch
+    ):
+        # Don't lend the key at all — the planner should be told research is
+        # unavailable rather than plan steps that can only fail.
+        import api.db as db_module
+        captured = self._capture_agent_kwargs(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setenv("TAVILY_API_KEY", "operator-tavily")
+        monkeypatch.setattr(chat, "ANON_FREE_SEARCH_DAILY_CAP", 1)
+        asyncio.run(db_module.increment_llm_usage(chat.FREE_TRIAL_SEARCH_USAGE_KEY))
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth"}))
+            ok = _drain_until(ws, "auth_success")
+            assert "Web research disabled" in ok["message"]
+            _drain_until(ws, "system")
+
+        assert captured["tavily_api_key"] is None
+        assert captured["search_budget"] is None
+
+    def test_anon_byok_does_not_borrow_operator_tavily(self, client, temp_db, monkeypatch):
+        # The Tavily lend is part of the free trial only — an anonymous BYOK
+        # user (not on the trial) still needs their own Tavily key.
+        captured = self._capture_agent_kwargs(monkeypatch)
+        monkeypatch.setenv("TAVILY_API_KEY", "operator-tavily")
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "google_api_key": "byok-key"}))
+            ok = _drain_until(ws, "auth_success")
+            assert ok["free_trial"] is False
+            assert "Web research disabled" in ok["message"]
+            _drain_until(ws, "system")
+
+        assert captured["tavily_api_key"] is None
+
+    def test_trial_user_with_own_tavily_key_is_not_metered(self, client, temp_db, monkeypatch):
+        captured = self._capture_agent_kwargs(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setenv("TAVILY_API_KEY", "operator-tavily")
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "tavily_api_key": "their-tavily"}))
+            ok = _drain_until(ws, "auth_success")
+            assert ok["free_trial"] is True
+            _drain_until(ws, "system")
+
+        assert captured["tavily_api_key"] == "their-tavily"
+        assert captured["search_budget"] is None

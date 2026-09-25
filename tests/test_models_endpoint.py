@@ -1,13 +1,27 @@
 """Tests for GET /models and GET /env-keys endpoints."""
 
+import asyncio
+
 import pytest
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 
+import api.db as db_module
 from api.main import app
+from api.routes import models as models_route
 
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def temp_db(tmp_path, monkeypatch):
+    """/env-keys reads today's free-trial usage — keep it off the dev DB."""
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "models.db")
+    monkeypatch.setattr(db_module, "_db", None)
+    asyncio.run(db_module.init_db())
+    yield
+    asyncio.run(db_module.close_db())
 
 _REQUIRED_MODEL_FIELDS = {"id", "provider", "display_name", "max_context", "thinking_capable", "default"}
 
@@ -75,3 +89,24 @@ class TestEnvKeys:
     def test_reflects_env_var_absent(self):
         resp = client.get("/env-keys")
         assert resp.json()["google"] is False
+
+
+class TestEnvKeysFreeTrial:
+    @pytest.mark.eval_unit
+    def test_trial_advertised_while_global_cap_has_room(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        body = client.get("/env-keys").json()
+        assert body["free_trial_model_id"] == models_route.free_trial_model_id()
+
+    @pytest.mark.eval_unit
+    def test_trial_hidden_once_global_cap_is_spent(self, monkeypatch):
+        # Otherwise the frontend lets anon into a chat that can only error.
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setattr(models_route, "ANON_FREE_DAILY_CAP", 1)
+        asyncio.run(db_module.increment_llm_usage(models_route.FREE_TRIAL_GLOBAL_USAGE_KEY))
+        assert client.get("/env-keys").json()["free_trial_model_id"] is None
+
+    @pytest.mark.eval_unit
+    def test_trial_hidden_without_operator_key(self, monkeypatch):
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        assert client.get("/env-keys").json()["free_trial_model_id"] is None

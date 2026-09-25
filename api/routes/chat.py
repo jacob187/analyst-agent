@@ -1,6 +1,7 @@
 """WebSocket chat endpoint — real-time agent interaction."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -11,13 +12,17 @@ from langchain_core.messages import HumanMessage, AIMessage
 from api.db import (
     get_or_create_session, get_session,
     save_message, get_session_messages,
+    get_llm_usage, increment_llm_usage,
 )
 from api.memory import (
     estimate_tokens_incremental, compress_history, build_context_from_session,
 )
 from api.dependencies import (
+    ANON_FREE_DAILY_CAP,
     ANON_FREE_QUERIES,
-    ANON_FREE_WINDOW_SECONDS,
+    ANON_FREE_SEARCH_DAILY_CAP,
+    FREE_TRIAL_GLOBAL_USAGE_KEY,
+    FREE_TRIAL_SEARCH_USAGE_KEY,
     free_trial_key,
     free_trial_model_id,
     resolve_ws_keys,
@@ -28,7 +33,7 @@ from api.llm_concurrency import (
     LLMConcurrencyExceeded,
     check_and_charge_budget,
 )
-from api.rate_limit import check_rate_limit, check_rest_rate_limit, client_ip
+from api.rate_limit import check_rate_limit, client_ip
 from api.validators import TICKER_RE
 from agents.graph.analyst_graph import LLMTimeoutError
 from agents.model_registry import (
@@ -49,15 +54,10 @@ WS_SEND_TIMEOUT_SECONDS = float(os.getenv("WS_SEND_TIMEOUT_SECONDS", "10"))
 
 MAX_QUERY_LENGTH = 4000
 
-
-def _free_trial_window_description() -> str:
-    """Human-readable free-trial cooldown, e.g. '30 minutes', '12 hours', '2 days'."""
-    seconds = ANON_FREE_WINDOW_SECONDS
-    for unit_seconds, label in ((86400, "day"), (3600, "hour"), (60, "minute")):
-        if seconds >= unit_seconds and seconds % unit_seconds == 0:
-            count = seconds // unit_seconds
-            return f"{count} {label}" + ("s" if count != 1 else "")
-    return f"{seconds} second" + ("s" if seconds != 1 else "")
+FREE_TRIAL_AT_CAPACITY = (
+    "The free trial is at capacity for today. "
+    "Sign in or add your own API key in Settings to continue."
+)
 
 
 async def _safe_send(websocket: WebSocket, data: dict) -> bool:
@@ -182,11 +182,15 @@ async def chat(websocket: WebSocket, ticker: str):
 
         # Anonymous free trial: no BYOK key, but the requested model is the
         # one designated light model the operator lends to anon visitors,
-        # capped per-IP below. Any other model still requires a key.
+        # capped per-IP and globally below. Any other model still requires a key.
         free_trial = False
         if not api_key and user_id is None and model_id == trial_model_id:
             trial_key = free_trial_key()
             if trial_key:
+                if await get_llm_usage(FREE_TRIAL_GLOBAL_USAGE_KEY) >= ANON_FREE_DAILY_CAP:
+                    await websocket.send_json({"type": "error", "message": FREE_TRIAL_AT_CAPACITY})
+                    await websocket.close()
+                    return
                 api_key = trial_key
                 free_trial = True
 
@@ -203,6 +207,23 @@ async def chat(websocket: WebSocket, ticker: str):
         # message draws against the per-user daily budget. The model is fixed
         # for the session, so resolve once and reuse on every message.
         operator_paid = keys.is_operator_paid(model.provider)
+
+        # Free-trial sessions also borrow the operator's Tavily key, metered
+        # globally per search (see create_research_tools). If today's search
+        # allowance is already spent, don't lend it — the planner is then told
+        # research is unavailable instead of planning steps that would fail.
+        tavily_api_key = keys.tavily_api_key
+        trial_search = bool(
+            free_trial
+            and not tavily_api_key
+            and os.getenv("TAVILY_API_KEY")
+            and await get_llm_usage(FREE_TRIAL_SEARCH_USAGE_KEY) < ANON_FREE_SEARCH_DAILY_CAP
+        )
+        if trial_search:
+            tavily_api_key = os.getenv("TAVILY_API_KEY")
+
+        async def charge_trial_search() -> bool:
+            return await increment_llm_usage(FREE_TRIAL_SEARCH_USAGE_KEY) <= ANON_FREE_SEARCH_DAILY_CAP
 
         # Persistence is sign-in-only. Anonymous users (BYOK) get an ephemeral,
         # in-memory conversation — no session row, no saved messages.
@@ -232,7 +253,7 @@ async def chat(websocket: WebSocket, ticker: str):
             all_messages = []
             conversation_history = []
 
-        research_status = "Web research enabled" if keys.tavily_api_key else "Web research disabled (no Tavily API key)"
+        research_status = "Web research enabled" if tavily_api_key else "Web research disabled (no Tavily API key)"
         await websocket.send_json({
             "type": "auth_success",
             "message": f"Connected to {ticker} using {model.display_name}. {research_status}. Ready to analyze.",
@@ -241,7 +262,6 @@ async def chat(websocket: WebSocket, ticker: str):
             "model_id": model_id,
             "free_trial": free_trial,
             "free_trial_queries": ANON_FREE_QUERIES if free_trial else None,
-            "free_trial_window": _free_trial_window_description() if free_trial else None,
         })
 
         # Initialise agent
@@ -252,12 +272,13 @@ async def chat(websocket: WebSocket, ticker: str):
 
             agent = create_sec_qa_agent(
                 ticker, llm,
-                tavily_api_key=keys.tavily_api_key,
+                tavily_api_key=tavily_api_key,
                 synthesizer_llm=synthesizer_llm,
                 user_id=user_id,
+                search_budget=charge_trial_search if trial_search else None,
             )
 
-            tools_count = "16 tools" if keys.tavily_api_key else "11 tools"
+            tools_count = "16 tools" if tavily_api_key else "11 tools"
             await websocket.send_json({
                 "type": "system",
                 "message": f"Planning agent initialized for {ticker} with {tools_count}. Complex queries will be auto-decomposed."
@@ -327,18 +348,27 @@ async def chat(websocket: WebSocket, ticker: str):
                             })
                             continue
                     elif free_trial:
-                        if not check_rest_rate_limit(
-                            f"ip:{ip}", "anon_free_trial",
-                            ANON_FREE_QUERIES, ANON_FREE_WINDOW_SECONDS,
-                        ):
+                        # Per-IP first so an exhausted IP can't keep draining
+                        # the global cap. Both reset at the same UTC midnight,
+                        # so an IP credit charged here when the global check
+                        # then refuses was unusable today anyway. IP is hashed
+                        # since usage rows are never pruned.
+                        ip_key = f"anon_trial:ip:{hashlib.sha256(ip.encode()).hexdigest()[:16]}"
+                        if await increment_llm_usage(ip_key) > ANON_FREE_QUERIES:
                             logger.info("Free trial quota exhausted: ip=%s ticker=%s", ip, ticker)
                             await _safe_send(websocket, {
                                 "type": "error",
                                 "message": (
                                     f"Free trial limit reached ({ANON_FREE_QUERIES} queries "
-                                    f"per {_free_trial_window_description()}). "
-                                    "Sign in or add your own API key in Settings to continue."
+                                    "per day). Sign in or add your own API key in Settings "
+                                    "to continue."
                                 ),
+                            })
+                            continue
+                        if await increment_llm_usage(FREE_TRIAL_GLOBAL_USAGE_KEY) > ANON_FREE_DAILY_CAP:
+                            logger.warning("Free trial global daily cap reached: ticker=%s", ticker)
+                            await _safe_send(websocket, {
+                                "type": "error", "message": FREE_TRIAL_AT_CAPACITY,
                             })
                             continue
                         logger.info(

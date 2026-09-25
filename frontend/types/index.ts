@@ -261,7 +261,6 @@ export interface WsMessage {
   total?: number;
   free_trial?: boolean;
   free_trial_queries?: number | null;
-  free_trial_window?: string | null;
 }
 
 // ─── UI State ──────────────────────────────────────────────────────────────────

@@ -5,8 +5,11 @@ import os
 from fastapi import APIRouter, Depends
 
 from agents.model_registry import get_all_models
+from api.db import get_llm_usage
 from api.dependencies import (
+    ANON_FREE_DAILY_CAP,
     ANON_FREE_QUERIES,
+    FREE_TRIAL_GLOBAL_USAGE_KEY,
     ApiKeys,
     free_trial_key,
     free_trial_model_id,
@@ -40,15 +43,19 @@ async def env_keys(keys: ApiKeys = Depends(get_api_keys)):
     server identity, reported to everyone.
 
     `free_trial_model_id` is reported to everyone, including anonymous
-    callers, when the operator has configured a key for it — it's the one
-    deliberate exception to the gate above (see `api.dependencies.free_trial_key`).
+    callers, when the operator has configured a key for it and today's global
+    trial cap isn't spent — it's the one deliberate exception to the gate
+    above (see `api.dependencies.free_trial_key`).
     """
+    trial_open = bool(free_trial_key()) and (
+        await get_llm_usage(FREE_TRIAL_GLOBAL_USAGE_KEY) < ANON_FREE_DAILY_CAP
+    )
     return {
         "google": keys.is_operator_paid("google_genai"),
         "openai": keys.is_operator_paid("openai"),
         "anthropic": keys.is_operator_paid("anthropic"),
         "sec_header": bool(os.getenv("SEC_HEADER")),
         "tavily": bool(keys.tavily_api_key),
-        "free_trial_model_id": free_trial_model_id() if free_trial_key() else None,
+        "free_trial_model_id": free_trial_model_id() if trial_open else None,
         "free_trial_queries": ANON_FREE_QUERIES,
     }

@@ -15,7 +15,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import Dict, Any, TypedDict, Annotated, Optional, List, Literal, Generator, Union
+from typing import Dict, Any, TypedDict, Annotated, Optional, List, Literal, Generator, Union, Awaitable, Callable
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from langgraph.graph import StateGraph, END
@@ -177,7 +177,13 @@ def _get_latest_query(messages: List[BaseMessage]) -> str:
     return ""
 
 
-def _create_tools(ticker: str, llm: BaseChatModel, tavily_api_key: Optional[str] = None, user_id: str | None = None):
+def _create_tools(
+    ticker: str,
+    llm: BaseChatModel,
+    tavily_api_key: Optional[str] = None,
+    user_id: str | None = None,
+    search_budget: Optional[Callable[[], Awaitable[bool]]] = None,
+):
     """Create all available tools for the ticker."""
     from agents.tools.sec_tools import create_sec_tools
     from agents.tools.stock_tools import create_stock_tools
@@ -190,7 +196,7 @@ def _create_tools(ticker: str, llm: BaseChatModel, tavily_api_key: Optional[str]
     if tavily_api_key:
         from agents.tools.research_tools import create_research_tools
 
-        research_tools = create_research_tools(ticker, tavily_api_key)
+        research_tools = create_research_tools(ticker, tavily_api_key, search_budget)
         tools.extend(research_tools)
 
     # Briefing history tools (always available — returns "no history" if DB is empty)
@@ -340,9 +346,9 @@ def create_worker_node(tools_dict: Dict[str, Any]):
     Async dispatch: the worker is `async def` and calls `tool.ainvoke(...)`.
     LangChain `Tool` auto-bridges sync `func=` callables to a thread pool, so
     purely-sync tools (SEC, stock, market, briefing) keep working unchanged.
-    Tools that register an async `coroutine=` — currently `deep_research` —
-    run on the event loop and stop pinning a worker thread during their poll
-    loop.
+    Tools that register an async `coroutine=` — `deep_research`, and every
+    research tool in free-trial mode (to await the search meter) — run on the
+    event loop.
 
     Tracing context (LangChain run ids) is propagated automatically by
     LangGraph's runtime across Send invocations — no manual `contextvars`
@@ -589,6 +595,7 @@ def create_planning_workflow(
     tavily_api_key: Optional[str] = None,
     synthesizer_llm: Optional[BaseChatModel] = None,
     user_id: str | None = None,
+    search_budget: Optional[Callable[[], Awaitable[bool]]] = None,
 ) -> StateGraph:
     """
     Create the unified LangGraph workflow with planning capabilities.
@@ -608,7 +615,7 @@ def create_planning_workflow(
              Falls back to `llm` if not provided.
     """
     # Create tools and planner
-    tools = _create_tools(ticker, llm, tavily_api_key, user_id=user_id)
+    tools = _create_tools(ticker, llm, tavily_api_key, user_id=user_id, search_budget=search_budget)
     tools_dict = _build_tools_dict(tools)
     has_research = tavily_api_key is not None
 
@@ -814,6 +821,7 @@ def create_planning_agent(
     tavily_api_key: Optional[str] = None,
     synthesizer_llm: Optional[BaseChatModel] = None,
     user_id: str | None = None,
+    search_budget: Optional[Callable[[], Awaitable[bool]]] = None,
 ) -> PlanningAgent:
     """
     Create a planning-enabled agent for financial analysis.
@@ -826,11 +834,14 @@ def create_planning_agent(
              Gemini's thought signatures conflict with tool calls, so thinking
              must be isolated to the synthesizer which doesn't call tools.
         user_id: Anonymous user ID for scoping briefing queries
+        search_budget: Free-trial search meter — see `create_research_tools`
 
     Returns:
         PlanningAgent instance with invoke() and stream() methods
     """
-    workflow = create_planning_workflow(llm, ticker, tavily_api_key, synthesizer_llm, user_id=user_id)
+    workflow = create_planning_workflow(
+        llm, ticker, tavily_api_key, synthesizer_llm, user_id=user_id, search_budget=search_budget
+    )
     return PlanningAgent(workflow, ticker)
 
 
@@ -845,6 +856,7 @@ def create_sec_qa_agent(
     tavily_api_key: Optional[str] = None,
     synthesizer_llm: Optional[BaseChatModel] = None,
     user_id: str | None = None,
+    search_budget: Optional[Callable[[], Awaitable[bool]]] = None,
 ) -> PlanningAgent:
     """
     Create a Q&A agent with planning capabilities.
@@ -852,4 +864,6 @@ def create_sec_qa_agent(
     This maintains backward compatibility with existing code while
     providing the new planning functionality.
     """
-    return create_planning_agent(ticker, llm, tavily_api_key, synthesizer_llm, user_id=user_id)
+    return create_planning_agent(
+        ticker, llm, tavily_api_key, synthesizer_llm, user_id=user_id, search_budget=search_budget
+    )

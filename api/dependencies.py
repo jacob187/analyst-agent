@@ -58,12 +58,22 @@ PROVIDER_ENV_VARS: dict[str, str] = {
 
 # ── Anonymous free trial ─────────────────────────────────────────────────────
 # A narrow, deliberate carve-out from `_env_keys_allowed`: anonymous visitors
-# may spend the operator's key for ONE designated light model, capped per-IP
-# by the caller (see api/routes/chat.py). This exists so a demo visitor can
-# chat without signing in or bringing a key; it does not change env-key
-# resolution for any other model or route.
+# may spend the operator's key for ONE designated light model. The caller
+# (api/routes/chat.py) caps it per IP per UTC day, plus a global daily cap
+# across all anonymous traffic that bounds the operator's worst-case bill.
+# Both counters live in `user_llm_usage` so they survive restarts/deploys.
+# This exists so a demo visitor can chat without signing in or bringing a
+# key; it does not change env-key resolution for any other model or route.
 ANON_FREE_QUERIES = int(os.getenv("ANON_FREE_QUERIES", "3"))
-ANON_FREE_WINDOW_SECONDS = int(os.getenv("ANON_FREE_WINDOW_SECONDS", str(12 * 3600)))
+ANON_FREE_DAILY_CAP = int(os.getenv("ANON_FREE_DAILY_CAP", "200"))
+# Trial sessions also borrow the operator's Tavily key, metered per search.
+# 25 keeps a month inside Tavily's 1,000 free credits: basic searches are 1
+# credit, but get_company_news can make 2 calls (day → week fallback).
+ANON_FREE_SEARCH_DAILY_CAP = int(os.getenv("ANON_FREE_SEARCH_DAILY_CAP", "25"))
+# Pseudo user ids for `user_llm_usage` — can't collide with Clerk `user_...`
+# ids or UUIDs.
+FREE_TRIAL_GLOBAL_USAGE_KEY = "anon_trial:global"
+FREE_TRIAL_SEARCH_USAGE_KEY = "anon_trial:search"
 
 
 def free_trial_model_id() -> str | None:

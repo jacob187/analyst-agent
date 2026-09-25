@@ -157,3 +157,127 @@ async def test_deep_research_tool_dispatches_async_coroutine(monkeypatch, _fast_
     # running loop.
     result = await deep_research.ainvoke("supply chain")
     assert "Synthesized research body." in result
+
+
+# ── Free-trial metering ──────────────────────────────────────────────────────
+
+
+class _RecordingTavilySearch:
+    """Stands in for TavilySearch at the network boundary: records constructor
+    kwargs and every query, returns a Tavily-shaped result dict."""
+
+    instances: list[dict] = []
+    queries: list[str] = []
+    result: dict = {"answer": "Summary text.", "results": [{"title": "T", "url": "https://x"}]}
+
+    def __init__(self, **kwargs):
+        _RecordingTavilySearch.instances.append(kwargs)
+
+    def invoke(self, payload):
+        _RecordingTavilySearch.queries.append(payload["query"])
+        return _RecordingTavilySearch.result
+
+
+class _Budget:
+    def __init__(self, allowance: int):
+        self.allowance = allowance
+        self.calls = 0
+
+    async def __call__(self) -> bool:
+        self.calls += 1
+        return self.calls <= self.allowance
+
+
+@pytest.fixture
+def recording_search(monkeypatch):
+    _RecordingTavilySearch.instances = []
+    _RecordingTavilySearch.queries = []
+    _RecordingTavilySearch.result = {
+        "answer": "Summary text.", "results": [{"title": "T", "url": "https://x"}],
+    }
+    monkeypatch.setattr(research_tools, "TavilySearch", _RecordingTavilySearch)
+
+    def no_deep_research(*args, **kwargs):
+        raise AssertionError("trial mode must never call the deep-research endpoint")
+
+    monkeypatch.setattr(research_tools, "TavilyClient", no_deep_research)
+    return _RecordingTavilySearch
+
+
+def _trial_tools(budget):
+    return {
+        t.name: t for t in research_tools.create_research_tools("AAPL", "fake-key", budget)
+    }
+
+
+@pytest.mark.asyncio
+async def test_trial_searches_use_basic_depth(recording_search):
+    tools = _trial_tools(_Budget(10))
+    for name in ("web_search", "get_company_news", "analyze_competitors", "get_industry_trends"):
+        await tools[name].ainvoke("q")
+    assert recording_search.instances
+    assert {kw["search_depth"] for kw in recording_search.instances} == {"basic"}
+
+
+@pytest.mark.asyncio
+async def test_trial_deep_research_is_a_basic_web_search(recording_search):
+    budget = _Budget(10)
+    out = await _trial_tools(budget)["deep_research"].ainvoke("supply chain")
+    assert "Summary text." in out
+    assert recording_search.instances[0]["search_depth"] == "basic"
+    assert budget.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_trial_search_refused_when_budget_is_spent(recording_search):
+    out = await _trial_tools(_Budget(0))["web_search"].ainvoke("q")
+    assert out == research_tools.TRIAL_SEARCH_EXHAUSTED
+    assert recording_search.instances == []
+
+
+@pytest.mark.asyncio
+async def test_trial_repeat_search_is_cached_and_not_charged(recording_search):
+    budget = _Budget(10)
+    tools = _trial_tools(budget)
+    first = await tools["web_search"].ainvoke("q")
+    second = await tools["web_search"].ainvoke("q")
+    assert first == second
+    assert budget.calls == 1
+    assert len(recording_search.queries) == 1
+
+
+@pytest.mark.asyncio
+async def test_trial_cache_is_keyed_by_tool(recording_search):
+    # Same query string, different tool → different Tavily call.
+    budget = _Budget(10)
+    tools = _trial_tools(budget)
+    await tools["analyze_competitors"].ainvoke("")
+    await tools["get_industry_trends"].ainvoke("")
+    assert budget.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_trial_failed_search_is_not_cached(recording_search, monkeypatch):
+    def failing(**kwargs):
+        raise RuntimeError("tavily down")
+
+    monkeypatch.setattr(research_tools, "TavilySearch", failing)
+    budget = _Budget(10)
+    tools = _trial_tools(budget)
+    assert (await tools["web_search"].ainvoke("q")).startswith("Failed")
+
+    monkeypatch.setattr(research_tools, "TavilySearch", _RecordingTavilySearch)
+    assert "Summary text." in await tools["web_search"].ainvoke("q")
+    assert budget.calls == 2
+
+
+def test_trial_tools_reject_sync_invoke(recording_search):
+    # A sync path would skip the async meter entirely.
+    with pytest.raises(NotImplementedError):
+        _trial_tools(_Budget(10))["web_search"].invoke("q")
+
+
+def test_non_trial_tools_keep_advanced_depth(recording_search):
+    tools = {t.name: t for t in research_tools.create_research_tools("AAPL", "fake-key")}
+    tools["web_search"].invoke("q")
+    assert recording_search.instances[0]["search_depth"] == "advanced"

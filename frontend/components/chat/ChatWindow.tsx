@@ -9,6 +9,37 @@ import { useWebSocket } from "@/hooks/useWebSocket";
 import { cn } from "@/lib/utils";
 import type { ApiKeys } from "@/types";
 
+// Each chains several tool families (SEC filings, stock/technicals, market
+// macro) so the planner decomposes it into steps. No Tavily tools — trial
+// visitors don't get web research.
+const DEMO_PROMPTS = [
+  {
+    label: "Risks vs. balance sheet",
+    query:
+      "What are the biggest risk factors in the latest 10-K, how exposed is the balance sheet to them, and how is the stock's technical trend pricing that risk?",
+  },
+  {
+    label: "8-K vs. outlook",
+    query:
+      "What did the latest 8-K report, how does it line up with management's outlook in the MD&A, and how has the stock reacted across timeframes since?",
+  },
+  {
+    label: "Macro impact",
+    query:
+      "What is the current macro backdrop (rates, VIX, major indices), how does it affect this company's business model, and what does that mean for its valuation metrics?",
+  },
+  {
+    label: "Legal & cyber exposure",
+    query:
+      "What legal proceedings and cybersecurity risks are disclosed, how material are they relative to the company's cash and debt, and has the chart shown any bearish patterns as a result?",
+  },
+  {
+    label: "Investment case",
+    query:
+      "What drives this business, how are margins and cash flow trending according to the MD&A, how does the market backdrop affect that, and what does the technical setup imply for entry timing?",
+  },
+];
+
 interface ChatWindowProps {
   ticker: string;
   keys: ApiKeys;
@@ -80,7 +111,7 @@ export function ChatWindow({ ticker, keys, initialSessionId }: ChatWindowProps) 
 
       {freeTrial && (
         <div className="border-b border-border/60 bg-primary/5 px-4 py-1.5 text-center text-[11px] text-muted-foreground">
-          Free trial — up to {freeTrial.queries} queries every {freeTrial.window}.{" "}
+          Free trial — up to {freeTrial.queries} queries per day.{" "}
           <a href="/settings" className="underline hover:text-foreground">
             Sign in or add your own key
           </a>{" "}
@@ -96,9 +127,21 @@ export function ChatWindow({ ticker, keys, initialSessionId }: ChatWindowProps) 
               <Send className="h-5 w-5 text-primary" />
             </div>
             <p className="text-sm font-medium">Ask anything about {ticker}</p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Try: &quot;What are the main risks?&quot; or &quot;Summarize the latest 10-K&quot;
-            </p>
+            <p className="mt-1 text-xs text-muted-foreground">Or try one of these:</p>
+            <div className="mt-3 flex max-w-md flex-wrap justify-center gap-2">
+              {DEMO_PROMPTS.map((p) => (
+                <button
+                  key={p.label}
+                  type="button"
+                  title={p.query}
+                  disabled={status !== "connected"}
+                  onClick={() => sendMessage(p.query)}
+                  className="rounded-full border border-border/60 bg-background px-3 py-1 text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
           </div>
         ) : (
           <div className="space-y-4">
