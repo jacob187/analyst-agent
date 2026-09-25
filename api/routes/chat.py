@@ -331,6 +331,7 @@ async def chat(websocket: WebSocket, ticker: str):
                             f"ip:{ip}", "anon_free_trial",
                             ANON_FREE_QUERIES, ANON_FREE_WINDOW_SECONDS,
                         ):
+                            logger.info("Free trial quota exhausted: ip=%s ticker=%s", ip, ticker)
                             await _safe_send(websocket, {
                                 "type": "error",
                                 "message": (
@@ -340,6 +341,9 @@ async def chat(websocket: WebSocket, ticker: str):
                                 ),
                             })
                             continue
+                        logger.info(
+                            "Free trial query served: ip=%s ticker=%s model=%s", ip, ticker, model_id
+                        )
 
                     if session_id:
                         asyncio.create_task(save_message(session_id, "user", user_query))

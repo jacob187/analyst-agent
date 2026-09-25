@@ -13,6 +13,7 @@ paths, which run before any agent setup.
 
 import asyncio
 import json
+import logging
 import sqlite3
 from unittest.mock import MagicMock
 
@@ -314,6 +315,42 @@ class TestAnonFreeTrial:
             ws.send_text(json.dumps({"type": "query", "message": "hi again"}))
             err = _drain_until(ws, "error")
             assert "Free trial limit reached" in err["message"]
+
+    def test_free_trial_served_query_is_logged(self, client, temp_db, monkeypatch, caplog):
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+
+        with caplog.at_level(logging.INFO, logger="api.routes.chat"):
+            with client.websocket_connect("/ws/chat/AAPL") as ws:
+                ws.send_text(json.dumps({"type": "auth"}))
+                _drain_until(ws, "auth_success")
+
+                ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+                _drain_until(ws, "response")
+
+        served = [r for r in caplog.records if "Free trial query served" in r.message]
+        assert len(served) == 1
+        assert "ticker=AAPL" in served[0].message
+
+    def test_free_trial_exhaustion_is_logged(self, client, temp_db, monkeypatch, caplog):
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
+
+        with caplog.at_level(logging.INFO, logger="api.routes.chat"):
+            with client.websocket_connect("/ws/chat/AAPL") as ws:
+                ws.send_text(json.dumps({"type": "auth"}))
+                _drain_until(ws, "auth_success")
+
+                ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+                _drain_until(ws, "response")
+
+                ws.send_text(json.dumps({"type": "query", "message": "hi again"}))
+                _drain_until(ws, "error")
+
+        exhausted = [r for r in caplog.records if "Free trial quota exhausted" in r.message]
+        assert len(exhausted) == 1
+        assert "ticker=AAPL" in exhausted[0].message
 
     def test_forged_forwarded_for_cannot_reset_the_quota(
         self, client, temp_db, monkeypatch
