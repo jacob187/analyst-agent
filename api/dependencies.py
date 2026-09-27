@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from fastapi import Header, HTTPException
 
 from agents.model_registry import get_free_tier_model
+from api.db import get_llm_usage
 from api.clerk_auth import is_auth_disabled, is_clerk_enabled, verify_clerk_token
 from api.validators import USER_ID_RE
 
@@ -66,9 +67,9 @@ PROVIDER_ENV_VARS: dict[str, str] = {
 # key; it does not change env-key resolution for any other model or route.
 ANON_FREE_QUERIES = int(os.getenv("ANON_FREE_QUERIES", "3"))
 ANON_FREE_DAILY_CAP = int(os.getenv("ANON_FREE_DAILY_CAP", "200"))
-# Trial sessions also borrow the operator's Tavily key, metered per search.
-# 25 keeps a month inside Tavily's 1,000 free credits: basic searches are 1
-# credit, but get_company_news can make 2 calls (day → week fallback).
+# Trial sessions also borrow the operator's Tavily key, metered per Tavily
+# call (get_company_news's week fallback counts as a second). Basic searches
+# are 1 credit, so 25 keeps a month inside Tavily's 1,000 free credits.
 ANON_FREE_SEARCH_DAILY_CAP = int(os.getenv("ANON_FREE_SEARCH_DAILY_CAP", "25"))
 # Pseudo user ids for `user_llm_usage` — can't collide with Clerk `user_...`
 # ids or UUIDs.
@@ -92,6 +93,13 @@ def free_trial_key() -> str | None:
         return None
     env_var = PROVIDER_ENV_VARS.get(model.provider)
     return os.getenv(env_var) if env_var else None
+
+
+async def free_trial_open() -> bool:
+    """The operator lends a trial key and today's global cap isn't spent."""
+    return bool(free_trial_key()) and (
+        await get_llm_usage(FREE_TRIAL_GLOBAL_USAGE_KEY) < ANON_FREE_DAILY_CAP
+    )
 
 
 _clerk_unconfigured_warned = False

@@ -14,6 +14,7 @@ loop and the thread pool both stay free.
 import asyncio
 
 import pytest
+from langchain_core.tools import ToolException
 
 from agents.tools import research_tools
 
@@ -281,3 +282,133 @@ def test_non_trial_tools_keep_advanced_depth(recording_search):
     tools = {t.name: t for t in research_tools.create_research_tools("AAPL", "fake-key")}
     tools["web_search"].invoke("q")
     assert recording_search.instances[0]["search_depth"] == "advanced"
+
+
+class _ErroringTavilySearch:
+    """langchain_tavily swallows request failures (429, quota, auth) and
+    returns {"error": e} instead of raising."""
+
+    calls = 0
+
+    def __init__(self, **kwargs):
+        pass
+
+    def invoke(self, payload):
+        type(self).calls += 1
+        return {"error": Exception("429 Too Many Requests")}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name, func",
+    [
+        ("web_search", lambda q, _retry: research_tools._tool_tavily_search("AAPL", q, "k", "basic")),
+        ("get_company_news", lambda q, _retry: research_tools._tool_company_news("AAPL", "k", "basic")),
+        ("analyze_competitors", lambda q, _retry: research_tools._tool_competitor_analysis("AAPL", "k", "basic")),
+        ("get_industry_trends", lambda q, _retry: research_tools._tool_industry_trends("AAPL", "k", "basic")),
+    ],
+)
+async def test_metered_search_does_not_cache_tavily_errors(monkeypatch, name, func):
+    monkeypatch.setattr(research_tools, "TavilySearch", _ErroringTavilySearch)
+    _ErroringTavilySearch.calls = 0
+
+    async def budget():
+        return True
+
+    out = await research_tools._metered_search("AAPL", name, "news", func, budget)
+
+    assert out.startswith("Failed")
+    assert "429" in out
+    assert len(research_tools._research_cache) == 0
+    # An error on the "day" window must not trigger the "week" retry.
+    assert _ErroringTavilySearch.calls == 1
+
+
+class _QuietDayTavilySearch:
+    """No results for the past day (langchain_tavily raises on empty), one
+    story for the past week."""
+
+    calls: list = []
+
+    def __init__(self, time_range=None, **kwargs):
+        self.time_range = time_range
+
+    def invoke(self, payload):
+        type(self).calls.append(self.time_range)
+        if self.time_range == "day":
+            raise ToolException("No search results found")
+        return {"results": [{"title": "Weekly story", "url": "https://example.com/w"}]}
+
+
+def _counting_budget(allowed: int):
+    charged = []
+
+    async def budget():
+        charged.append(1)
+        return len(charged) <= allowed
+
+    return budget, charged
+
+
+@pytest.fixture
+def _quiet_day(monkeypatch):
+    monkeypatch.setattr(research_tools, "TavilySearch", _QuietDayTavilySearch)
+    _QuietDayTavilySearch.calls = []
+
+
+def test_company_news_falls_back_to_week_on_a_quiet_day(_quiet_day):
+    out = research_tools._tool_company_news("AAPL", "k", "basic")
+    assert "Weekly story" in out
+    assert _QuietDayTavilySearch.calls == ["day", "week"]
+
+
+@pytest.mark.asyncio
+async def test_trial_company_news_charges_the_week_fallback(_quiet_day):
+    budget, charged = _counting_budget(allowed=5)
+    news = next(
+        t for t in research_tools.create_research_tools("AAPL", "k", budget)
+        if t.name == "get_company_news"
+    )
+
+    out = await news.ainvoke("latest")
+
+    assert "Weekly story" in out
+    assert len(charged) == 2
+
+
+@pytest.mark.asyncio
+async def test_trial_company_news_skips_fallback_once_budget_is_spent(_quiet_day):
+    budget, charged = _counting_budget(allowed=1)
+    news = next(
+        t for t in research_tools.create_research_tools("AAPL", "k", budget)
+        if t.name == "get_company_news"
+    )
+
+    out = await news.ainvoke("latest")
+
+    assert out == research_tools.TRIAL_SEARCH_EXHAUSTED
+    assert _QuietDayTavilySearch.calls == ["day"]
+    assert len(research_tools._research_cache) == 0
+
+
+class _BusyDayTavilySearch:
+    def __init__(self, **kwargs):
+        pass
+
+    def invoke(self, payload):
+        return {"results": [{"title": "Daily story", "url": "https://example.com/d"}]}
+
+
+@pytest.mark.asyncio
+async def test_trial_rewording_a_query_ignoring_tool_hits_the_cache(monkeypatch):
+    monkeypatch.setattr(research_tools, "TavilySearch", _BusyDayTavilySearch)
+    budget, charged = _counting_budget(allowed=10)
+    news = next(
+        t for t in research_tools.create_research_tools("AAPL", "k", budget)
+        if t.name == "get_company_news"
+    )
+
+    await news.ainvoke("latest news")
+    await news.ainvoke("recent developments")
+
+    assert len(charged) == 1

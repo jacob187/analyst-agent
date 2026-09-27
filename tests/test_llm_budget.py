@@ -6,6 +6,8 @@ budget enforcement is exercised via the filings endpoint, which is the
 canonical operator-paid LLM dispatch site.
 """
 
+import asyncio
+
 import pytest
 
 import api.db as db_module
@@ -46,6 +48,14 @@ async def test_increment_llm_usage_isolated_per_user(fresh_db):
     assert await db_module.increment_llm_usage(USER_B) == 1
     # A's count untouched
     assert await db_module.get_llm_usage(USER_A) == 2
+
+
+@pytest.mark.eval_unit
+async def test_concurrent_increments_each_see_their_own_count(fresh_db):
+    # Parallel planner workers charge the trial search meter at once; each
+    # must get a distinct count or two can be refused at the cap boundary.
+    counts = await asyncio.gather(*(db_module.increment_llm_usage(USER_A) for _ in range(20)))
+    assert sorted(counts) == list(range(1, 21))
 
 
 @pytest.mark.eval_unit

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 import api.db as db_module
 from api.main import app
+from api import dependencies
 from api.routes import models as models_route
 
 
@@ -102,8 +103,8 @@ class TestEnvKeysFreeTrial:
     def test_trial_hidden_once_global_cap_is_spent(self, monkeypatch):
         # Otherwise the frontend lets anon into a chat that can only error.
         monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
-        monkeypatch.setattr(models_route, "ANON_FREE_DAILY_CAP", 1)
-        asyncio.run(db_module.increment_llm_usage(models_route.FREE_TRIAL_GLOBAL_USAGE_KEY))
+        monkeypatch.setattr(dependencies, "ANON_FREE_DAILY_CAP", 1)
+        asyncio.run(db_module.increment_llm_usage(dependencies.FREE_TRIAL_GLOBAL_USAGE_KEY))
         assert client.get("/env-keys").json()["free_trial_model_id"] is None
 
     @pytest.mark.eval_unit

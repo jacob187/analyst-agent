@@ -21,6 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from api import dependencies
 from api.main import app
 from api.routes import chat
 
@@ -435,6 +436,57 @@ class TestAnonFreeTrial:
             resp = _drain_until(ws, "response")
             assert resp["message"] == "Analysis complete."
 
+    @pytest.mark.parametrize("bad", [["x" * 10_000] * 4, "", "   ", 42, None])
+    def test_non_text_or_empty_query_does_not_burn_a_trial_credit(
+        self, client, temp_db, monkeypatch, bad
+    ):
+        # len() of a list counts elements, so a list of huge strings would slip
+        # past the length check and reach the operator's key.
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth"}))
+            _drain_until(ws, "auth_success")
+
+            ws.send_text(json.dumps({"type": "query", "message": bad}))
+            err = _drain_until(ws, "error")
+            assert "non-empty text" in err["message"]
+
+            ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+            resp = _drain_until(ws, "response")
+            assert resp["message"] == "Analysis complete."
+
+    def test_stale_saved_model_id_does_not_block_the_trial(self, client, temp_db, monkeypatch):
+        # An id saved before a model rename isn't an explicit choice.
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "model_id": "gemini-3-flash-preview"}))
+            ok = _drain_until(ws, "auth_success")
+            assert ok["free_trial"] is True
+            assert ok["model_id"] == chat.free_trial_model_id()
+
+    def test_trial_logs_never_contain_the_raw_ip(self, client, temp_db, monkeypatch, caplog):
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
+
+        with caplog.at_level(logging.INFO, logger="api.routes.chat"):
+            with client.websocket_connect(
+                "/ws/chat/AAPL", headers={"x-forwarded-for": "203.0.113.7"}
+            ) as ws:
+                ws.send_text(json.dumps({"type": "auth"}))
+                _drain_until(ws, "auth_success")
+                ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+                _drain_until(ws, "response")
+                ws.send_text(json.dumps({"type": "query", "message": "hi again"}))
+                _drain_until(ws, "error")
+
+        assert not any("203.0.113.7" in r.getMessage() for r in caplog.records)
+
     def test_anon_requesting_non_trial_model_still_requires_byok(self, client, temp_db, monkeypatch):
         # The free trial only covers the one designated light model — picking
         # a different model without a key is still refused.
@@ -498,6 +550,7 @@ class TestAnonFreeTrial:
         _patch_agent(monkeypatch)
         monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
         monkeypatch.setattr(chat, "ANON_FREE_DAILY_CAP", 1)
+        monkeypatch.setattr(dependencies, "ANON_FREE_DAILY_CAP", 1)
 
         with client.websocket_connect(
             "/ws/chat/AAPL", headers={"x-forwarded-for": "1.1.1.1"}
@@ -521,6 +574,7 @@ class TestAnonFreeTrial:
         monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
         monkeypatch.setattr(chat, "ANON_FREE_DAILY_CAP", 2)
+        monkeypatch.setattr(dependencies, "ANON_FREE_DAILY_CAP", 2)
 
         with client.websocket_connect(
             "/ws/chat/AAPL", headers={"x-forwarded-for": "1.1.1.1"}
@@ -543,6 +597,7 @@ class TestAnonFreeTrial:
         _patch_agent(monkeypatch)
         monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
         monkeypatch.setattr(chat, "ANON_FREE_DAILY_CAP", 1)
+        monkeypatch.setattr(dependencies, "ANON_FREE_DAILY_CAP", 1)
         asyncio.run(db_module.increment_llm_usage(chat.FREE_TRIAL_GLOBAL_USAGE_KEY))
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -556,6 +611,7 @@ class TestAnonFreeTrial:
         _patch_agent(monkeypatch)
         monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
         monkeypatch.setattr(chat, "ANON_FREE_DAILY_CAP", 1)
+        monkeypatch.setattr(dependencies, "ANON_FREE_DAILY_CAP", 1)
         asyncio.run(db_module.increment_llm_usage(chat.FREE_TRIAL_GLOBAL_USAGE_KEY))
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:

@@ -5,14 +5,11 @@ import os
 from fastapi import APIRouter, Depends
 
 from agents.model_registry import get_all_models
-from api.db import get_llm_usage
 from api.dependencies import (
-    ANON_FREE_DAILY_CAP,
     ANON_FREE_QUERIES,
-    FREE_TRIAL_GLOBAL_USAGE_KEY,
     ApiKeys,
-    free_trial_key,
     free_trial_model_id,
+    free_trial_open,
     get_api_keys,
 )
 
@@ -47,9 +44,7 @@ async def env_keys(keys: ApiKeys = Depends(get_api_keys)):
     trial cap isn't spent — it's the one deliberate exception to the gate
     above (see `api.dependencies.free_trial_key`).
     """
-    trial_open = bool(free_trial_key()) and (
-        await get_llm_usage(FREE_TRIAL_GLOBAL_USAGE_KEY) < ANON_FREE_DAILY_CAP
-    )
+    trial_open = await free_trial_open()
     return {
         "google": keys.is_operator_paid("google_genai"),
         "openai": keys.is_operator_paid("openai"),

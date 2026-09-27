@@ -103,6 +103,33 @@ class TestCreateLlm:
             anthropic_api_key="fake-anthropic-key",
         )
 
+    @pytest.mark.parametrize("model_id", ["claude-opus-4-8", "claude-sonnet-5", "claude-opus-5"])
+    @patch("langchain.chat_models.init_chat_model")
+    def test_anthropic_model_without_sampling_omits_temperature(self, mock_init, model_id):
+        # Opus 4.7+ and Claude 5 reject any temperature with a 400.
+        mock_init.return_value = MagicMock()
+        create_llm(model_id, "fake-anthropic-key")
+
+        mock_init.assert_called_once_with(
+            f"anthropic:{model_id}",
+            anthropic_api_key="fake-anthropic-key",
+        )
+
+    @patch("langchain.chat_models.init_chat_model")
+    def test_anthropic_thinking_omits_temperature(self, mock_init):
+        # Sonnet 4.6 takes temperature, but not alongside thinking.
+        mock_init.return_value = MagicMock()
+        create_llm(
+            "claude-sonnet-4-6", "fake-anthropic-key",
+            thinking=ThinkingConfig(enabled=True, level="medium"),
+        )
+
+        mock_init.assert_called_once_with(
+            "anthropic:claude-sonnet-4-6",
+            anthropic_api_key="fake-anthropic-key",
+            thinking={"type": "enabled", "budget_tokens": 4096},
+        )
+
     @patch("langchain.chat_models.init_chat_model")
     def test_gpt5_model_passes_temperature(self, mock_init):
         """gpt-5 (non-chat) rejects a non-default temperature, but dropping it

@@ -25,6 +25,7 @@ from api.dependencies import (
     FREE_TRIAL_SEARCH_USAGE_KEY,
     free_trial_key,
     free_trial_model_id,
+    free_trial_open,
     resolve_ws_keys,
     verify_ws_identity,
 )
@@ -149,9 +150,10 @@ async def chat(websocket: WebSocket, ticker: str):
         #
         # `keys.model_id` is env-defaulted (DEFAULT_MODEL_ID), so it can't
         # answer "did this caller pick a model?" — read the auth frame for that
-        # or setting DEFAULT_MODEL_ID would make the trial unreachable.
+        # or setting DEFAULT_MODEL_ID would make the trial unreachable. An id no
+        # longer in the registry (saved before a model rename) is no choice.
         requested_model_id = auth_message.get("model_id")
-        if not isinstance(requested_model_id, str) or not requested_model_id:
+        if not isinstance(requested_model_id, str) or not get_model(requested_model_id):
             requested_model_id = None
 
         fallback_model = get_model(keys.model_id or "") or get_default_model()
@@ -187,7 +189,7 @@ async def chat(websocket: WebSocket, ticker: str):
         if not api_key and user_id is None and model_id == trial_model_id:
             trial_key = free_trial_key()
             if trial_key:
-                if await get_llm_usage(FREE_TRIAL_GLOBAL_USAGE_KEY) >= ANON_FREE_DAILY_CAP:
+                if not await free_trial_open():
                     await websocket.send_json({"type": "error", "message": FREE_TRIAL_AT_CAPACITY})
                     await websocket.close()
                     return
@@ -331,6 +333,13 @@ async def chat(websocket: WebSocket, ticker: str):
                     # must not burn a free-trial credit or budget unit.
                     user_query = message.get("message", "")
 
+                    if not isinstance(user_query, str) or not user_query.strip():
+                        await _safe_send(websocket, {
+                            "type": "error",
+                            "message": "Message must be non-empty text.",
+                        })
+                        continue
+
                     if len(user_query) > MAX_QUERY_LENGTH:
                         await _safe_send(websocket, {
                             "type": "error",
@@ -355,7 +364,7 @@ async def chat(websocket: WebSocket, ticker: str):
                         # since usage rows are never pruned.
                         ip_key = f"anon_trial:ip:{hashlib.sha256(ip.encode()).hexdigest()[:16]}"
                         if await increment_llm_usage(ip_key) > ANON_FREE_QUERIES:
-                            logger.info("Free trial quota exhausted: ip=%s ticker=%s", ip, ticker)
+                            logger.info("Free trial quota exhausted: %s ticker=%s", ip_key, ticker)
                             await _safe_send(websocket, {
                                 "type": "error",
                                 "message": (
@@ -372,7 +381,7 @@ async def chat(websocket: WebSocket, ticker: str):
                             })
                             continue
                         logger.info(
-                            "Free trial query served: ip=%s ticker=%s model=%s", ip, ticker, model_id
+                            "Free trial query served: %s ticker=%s model=%s", ip_key, ticker, model_id
                         )
 
                     if session_id:

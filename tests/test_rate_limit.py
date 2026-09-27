@@ -95,8 +95,25 @@ class TestClientIp:
         assert client_ip(self._conn("not-an-ip")) == "unknown"
         assert client_ip(self._conn("<script>")) == "unknown"
 
-    def test_ipv6_hop(self):
-        assert client_ip(self._conn("1.1.1.1, 2001:db8::1")) == "2001:db8::1"
+    def test_ipv6_hop_keys_on_its_64(self):
+        assert client_ip(self._conn("1.1.1.1, 2001:db8::1")) == "2001:db8::"
+
+    def test_ipv6_rotation_within_a_64_shares_one_bucket(self):
+        a = client_ip(self._conn("2001:db8::1"))
+        b = client_ip(self._conn("2001:db8::ffff:1234"))
+        c = client_ip(self._conn("2001:db8:0:1::1"))
+        assert a == b != c
+
+    def test_ipv6_peer_keys_on_its_64(self):
+        assert client_ip(self._conn(peer="2001:db8::abcd")) == "2001:db8::"
+
+    def test_ipv4_mapped_ipv6_unwraps(self):
+        assert client_ip(self._conn("::ffff:203.0.113.7")) == "203.0.113.7"
+
+    def test_zero_hops_ignores_forwarded_header(self, monkeypatch):
+        # No proxy in front: every XFF entry is caller-written.
+        monkeypatch.setattr(rate_limit, "TRUSTED_PROXY_HOPS", 0)
+        assert client_ip(self._conn("1.1.1.1", peer="10.0.0.5")) == "10.0.0.5"
 
 
 class TestCheckRestRateLimit:

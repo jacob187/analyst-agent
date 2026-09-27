@@ -46,6 +46,11 @@ _ANTHROPIC_THINKING_BUDGETS: dict[str, int] = {
 # `{"type": "adaptive"}` instead — anything not listed here gets adaptive.
 _ANTHROPIC_LEGACY_BUDGET_MODELS = {"claude-sonnet-4-6"}
 
+# Anthropic models that still accept sampling params. Opus 4.7+ and every
+# Claude 5 model reject `temperature` outright (400); these accept it only
+# with thinking off.
+_ANTHROPIC_SAMPLING_MODELS = {"claude-sonnet-4-6"}
+
 
 @dataclass(frozen=True)
 class ThinkingConfig:
@@ -128,10 +133,16 @@ def create_llm(
     # Resolve the provider-specific API key kwarg name
     key_kwarg_name = _PROVIDER_KEY_KWARG.get(model.provider, "api_key")
 
+    sampling_kwargs = {"temperature": 0}
+    if model.provider == "anthropic" and (
+        thinking_kwargs or model.id not in _ANTHROPIC_SAMPLING_MODELS
+    ):
+        sampling_kwargs = {}
+
     return init_chat_model(
         f"{model.provider}:{model.id}",
         **{key_kwarg_name: api_key},
-        temperature=0,
+        **sampling_kwargs,
         **thinking_kwargs,
     )
 

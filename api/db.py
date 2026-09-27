@@ -324,26 +324,22 @@ def _today_utc() -> str:
 async def increment_llm_usage(user_id: str) -> int:
     """Increment today's LLM dispatch count for user_id; return the new count.
 
-    Atomic via SQLite's `INSERT ... ON CONFLICT DO UPDATE` so concurrent
-    callers can't race on read-then-write.
+    Atomic via a single `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`, so
+    each caller sees the count its own increment produced, never a later one.
     """
-    today = _today_utc()
     db = await get_db()
-    await db.execute(
+    async with db.execute(
         """
         INSERT INTO user_llm_usage (user_id, date, count)
         VALUES (?, ?, 1)
         ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1
+        RETURNING count
         """,
-        (user_id, today),
-    )
-    await db.commit()
-    async with db.execute(
-        "SELECT count FROM user_llm_usage WHERE user_id = ? AND date = ?",
-        (user_id, today),
+        (user_id, _today_utc()),
     ) as cursor:
         row = await cursor.fetchone()
-        return row["count"] if row else 0
+    await db.commit()
+    return row["count"]
 
 
 async def get_llm_usage(user_id: str) -> int:

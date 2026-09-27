@@ -8,7 +8,7 @@ from concurrent.futures import (
 from typing import Any, Awaitable, Callable, Optional
 
 from cachetools import TTLCache
-from langchain_core.tools import Tool
+from langchain_core.tools import Tool, ToolException
 from langchain_tavily import TavilySearch
 from tavily import TavilyClient
 
@@ -82,6 +82,8 @@ def _tool_tavily_search(
         if isinstance(result, str):
             return result
         elif isinstance(result, dict):
+            if "error" in result:
+                return f"Failed to perform web search: {result['error']}"
             answer = result.get("answer", "")
             results = result.get("results", [])
 
@@ -184,13 +186,20 @@ def _tool_tavily_research(
     return asyncio.run(_tool_tavily_research_async(ticker, topic, tavily_api_key))
 
 
-def _tool_company_news(ticker: str, tavily_api_key: str, search_depth: str = "advanced") -> str:
+def _tool_company_news(
+    ticker: str,
+    tavily_api_key: str,
+    search_depth: str = "advanced",
+    allow_retry: Callable[[], bool] | None = None,
+) -> str:
     """
     Get recent news and developments for a company.
 
     Args:
         ticker: Company ticker symbol
         tavily_api_key: Tavily API key
+        allow_retry: Free-trial meter, called before the week-range fallback
+            since that's a second billed search. False skips the fallback.
     """
     try:
         query = f"{ticker} stock latest news developments"
@@ -202,6 +211,8 @@ def _tool_company_news(ticker: str, tavily_api_key: str, search_depth: str = "ad
         # endpoint can't pin the agent step.
         result: dict | str | None = None
         for time_range in ("day", "week"):
+            if time_range == "week" and allow_retry and not allow_retry():
+                return TRIAL_SEARCH_EXHAUSTED
             search = TavilySearch(
                 tavily_api_key=tavily_api_key,
                 max_results=7,
@@ -210,10 +221,14 @@ def _tool_company_news(ticker: str, tavily_api_key: str, search_depth: str = "ad
                 topic="news",
                 time_range=time_range,
             )
-            result = _invoke_with_timeout(
-                search, query, _TAVILY_PER_CALL_TIMEOUT_SECONDS,
-            )
-            if isinstance(result, dict) and result.get("results"):
+            try:
+                result = _invoke_with_timeout(
+                    search, query, _TAVILY_PER_CALL_TIMEOUT_SECONDS,
+                )
+            except ToolException:
+                # langchain_tavily raises on zero results rather than returning them.
+                result = {"results": []}
+            if isinstance(result, dict) and ("error" in result or result.get("results")):
                 break
         if result is None:
             return f"News retrieval timed out for {ticker}."
@@ -221,8 +236,12 @@ def _tool_company_news(ticker: str, tavily_api_key: str, search_depth: str = "ad
         if isinstance(result, str):
             return result
         elif isinstance(result, dict):
+            if "error" in result:
+                return f"Failed to retrieve news: {result['error']}"
             answer = result.get("answer", "")
             results = result.get("results", [])
+            if not results:
+                return f"No news found for {ticker} in the past week."
 
             output_lines = [f"Recent News for {ticker}:", "=" * 50, ""]
 
@@ -269,6 +288,8 @@ def _tool_competitor_analysis(ticker: str, tavily_api_key: str, search_depth: st
         if isinstance(result, str):
             return result
         elif isinstance(result, dict):
+            if "error" in result:
+                return f"Failed to analyze competitors: {result['error']}"
             answer = result.get("answer", "")
             results = result.get("results", [])
 
@@ -322,6 +343,8 @@ def _tool_industry_trends(ticker: str, tavily_api_key: str, search_depth: str = 
         if isinstance(result, str):
             return result
         elif isinstance(result, dict):
+            if "error" in result:
+                return f"Failed to analyze industry trends: {result['error']}"
             answer = result.get("answer", "")
             results = result.get("results", [])
 
@@ -363,7 +386,7 @@ async def _metered_search(
     ticker: str,
     name: str,
     query: str,
-    func: Callable[[str], str],
+    func: Callable[[str, Callable[[], bool]], str],
     search_budget: Callable[[], Awaitable[bool]],
 ) -> str:
     # Cache before charging so repeat demo questions (same ticker + tool +
@@ -373,9 +396,14 @@ async def _metered_search(
         return _research_cache[cache_key]
     if not await search_budget():
         return TRIAL_SEARCH_EXHAUSTED
-    result = await asyncio.to_thread(func, query)
+    loop = asyncio.get_running_loop()
+
+    def charge_retry() -> bool:
+        return asyncio.run_coroutine_threadsafe(search_budget(), loop).result()
+
+    result = await asyncio.to_thread(func, query, charge_retry)
     # Error strings aren't cached — that would pin a transient failure for the TTL.
-    if not result.startswith(("Failed", "News retrieval timed out")):
+    if not result.startswith(("Failed", "News retrieval timed out", TRIAL_SEARCH_EXHAUSTED)):
         _research_cache[cache_key] = result
     return result
 
@@ -439,16 +467,26 @@ def create_research_tools(
     }
 
     if search_budget:
+        metered: dict[str, Callable[[str, Callable[[], bool]], str]] = {
+            name: (lambda query, charge_retry, func=func: func(query))
+            for name, func in funcs.items()
+        }
+        metered["get_company_news"] = lambda query, charge_retry: _tool_company_news(
+            ticker, tavily_api_key, depth, charge_retry
+        )
+        # Only these two read the query; keying the rest on it would let each
+        # rewording of the same request miss the cache and be charged again.
+        query_tools = {"web_search", "deep_research"}
         return [
             Tool.from_function(
                 name=name,
                 description=descriptions[name],
                 func=None,
                 coroutine=lambda query="", name=name, func=func: _metered_search(
-                    ticker, name, query, func, search_budget
+                    ticker, name, query if name in query_tools else "", func, search_budget
                 ),
             )
-            for name, func in funcs.items()
+            for name, func in metered.items()
         ]
 
     return [

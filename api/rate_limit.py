@@ -86,24 +86,34 @@ def client_ip(conn) -> str:
     the rightmost are appended by the proxies in front of us. Picking the
     ``TRUSTED_PROXY_HOPS``-th from the right lands on the hop our own edge
     wrote. Too low reaches an internal proxy IP and collapses every visitor
-    into one bucket; too high reaches back into client-supplied text.
+    into one bucket; too high reaches back into client-supplied text. Zero
+    means nothing sits in front of us, so the header is ignored entirely.
+
+    IPv6 addresses collapse to their /64: a single host typically controls
+    the whole prefix and could otherwise rotate into a fresh quota per request.
 
     ``conn`` is a Request or WebSocket — both expose ``.headers``/``.client``.
     """
-    forwarded = conn.headers.get("x-forwarded-for")
-    if forwarded:
-        hops = [p.strip() for p in forwarded.split(",") if p.strip()]
-        if hops:
-            hop = hops[-min(TRUSTED_PROXY_HOPS, len(hops))]
-            try:
-                ipaddress.ip_address(hop)
-                return hop
-            except ValueError:
-                # Present but unparseable: share one bucket rather than hand
-                # out a fresh quota per garbage value.
-                return "unknown"
+    forwarded = conn.headers.get("x-forwarded-for") if TRUSTED_PROXY_HOPS > 0 else None
+    hops = [p.strip() for p in forwarded.split(",") if p.strip()] if forwarded else []
+    if hops:
+        raw = hops[-min(TRUSTED_PROXY_HOPS, len(hops))]
+    elif conn.client:
+        raw = conn.client.host
+    else:
+        return "unknown"
 
-    return conn.client.host if conn.client else "unknown"
+    try:
+        addr = ipaddress.ip_address(raw)
+    except ValueError:
+        # Present but unparseable: share one bucket rather than hand out a
+        # fresh quota per garbage value.
+        return "unknown"
+    if addr.version == 6 and addr.ipv4_mapped:
+        return str(addr.ipv4_mapped)
+    if addr.version == 6:
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False).network_address)
+    return str(addr)
 
 
 def check_rest_rate_limit(

@@ -21,6 +21,7 @@ export function useApiKeys() {
   const [keys, setKeysState] = useState<ApiKeys>(DEFAULT_KEYS);
   const [envKeys, setEnvKeys] = useState<EnvKeysResponse | null>(null);
   const [envLoaded, setEnvLoaded] = useState(false);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
 
   useEffect(() => {
     // Load local keys from localStorage
@@ -39,12 +40,31 @@ export function useApiKeys() {
       .then(setEnvKeys)
       .catch(() => {})
       .finally(() => setEnvLoaded(true));
+
+    // A model id saved before a rename would otherwise count as an explicit
+    // choice and lock an anonymous visitor out of the free trial.
+    api.models()
+      .then(({ models }) => {
+        setKeysState((prev) => {
+          if (!prev.model_id || models.some((m) => m.id === prev.model_id)) return prev;
+          const next = { ...prev, model_id: "" };
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+          } catch {
+            // Ignore storage errors
+          }
+          return next;
+        });
+      })
+      .catch(() => {})
+      .finally(() => setModelsLoaded(true));
   }, []);
 
-  // Gate consumers until BOTH the env-key probe and Clerk auth have resolved,
-  // so hasRequiredKeys() never runs while isSignedIn === undefined and flashes
-  // the "sign in / add keys" panel at a signed-in user relying on the env key.
-  const loaded = envLoaded && authLoaded;
+  // Gate consumers until the env-key probe, stale-model check, and Clerk auth
+  // have all resolved, so hasRequiredKeys() never runs while isSignedIn ===
+  // undefined (flashing the "sign in / add keys" panel at a signed-in user
+  // relying on the env key) or against a model id about to be cleared.
+  const loaded = envLoaded && modelsLoaded && authLoaded;
 
   function setKeys(updated: ApiKeys) {
     setKeysState(updated);
