@@ -32,7 +32,7 @@ export default function CompaniesPage() {
       <div className="mb-8">
         <h1 className="font-display text-2xl font-bold sm:text-3xl">Saved Companies</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Companies you've analyzed.
+          Companies you&apos;ve analyzed.
         </p>
       </div>
 

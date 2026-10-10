@@ -24,7 +24,6 @@ function keyHeaders(keys: Partial<ApiKeys>): Record<string, string> {
   if (keys.openai_api_key) h["X-Openai-Api-Key"] = keys.openai_api_key;
   if (keys.anthropic_api_key)
     h["X-Anthropic-Api-Key"] = keys.anthropic_api_key;
-  if (keys.sec_header) h["X-Sec-Header"] = keys.sec_header;
   if (keys.tavily_api_key) h["X-Tavily-Api-Key"] = keys.tavily_api_key;
   if (keys.model_id) h["X-Model-Id"] = keys.model_id;
   return h;

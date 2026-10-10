@@ -289,8 +289,7 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
                 <div className="flex h-full flex-col items-center justify-center gap-4 rounded-xl border border-border/60 bg-card p-8 text-center">
                   <p className="text-sm font-medium">Sign in or add your API keys</p>
                   <p className="text-xs text-muted-foreground">
-                    Sign in to chat with our model, or add your own provider key and SEC EDGAR
-                    User-Agent in Settings.
+                    Sign in to chat with our model, or add your own provider key in Settings.
                   </p>
                   <a
                     href="/settings"

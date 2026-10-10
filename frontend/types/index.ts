@@ -29,7 +29,6 @@ export interface ApiKeys {
   google_api_key: string;
   openai_api_key: string;
   anthropic_api_key: string;
-  sec_header: string;
   tavily_api_key: string;
   model_id: string;
 }

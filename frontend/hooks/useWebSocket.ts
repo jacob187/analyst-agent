@@ -53,7 +53,6 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
           google_api_key: k.google_api_key || undefined,
           openai_api_key: k.openai_api_key || undefined,
           anthropic_api_key: k.anthropic_api_key || undefined,
-          sec_header: k.sec_header || undefined,
           tavily_api_key: k.tavily_api_key || undefined,
           model_id: k.model_id || undefined,
           session_id: sessionIdRef.current || undefined,

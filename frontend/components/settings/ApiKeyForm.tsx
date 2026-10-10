@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Eye, EyeOff, CheckCircle2, AlertCircle } from "lucide-react";
+import { Eye, EyeOff, CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -101,38 +101,6 @@ export function ApiKeyForm() {
               </div>
             );
           })}
-        </CardContent>
-      </Card>
-
-      {/* SEC Header */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="font-display text-base">
-            SEC EDGAR User-Agent
-            <span className="ml-2 text-xs font-normal text-destructive">
-              Required
-            </span>
-          </CardTitle>
-          <CardDescription>
-            Required by SEC fair-access policy. Format:{" "}
-            <code className="text-xs">Your Name email@example.com</code>
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-center gap-2">
-            {draft.sec_header ? (
-              <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" />
-            ) : (
-              <AlertCircle className="h-4 w-4 shrink-0 text-destructive" />
-            )}
-            <Input
-              id="sec_header"
-              value={draft.sec_header}
-              onChange={(e) => update("sec_header", e.target.value)}
-              placeholder="Jane Doe jane@example.com"
-              className="font-mono text-sm"
-            />
-          </div>
         </CardContent>
       </Card>
 

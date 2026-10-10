@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { api } from "@/lib/api";
 import { authDisabled, useAuth } from "@/lib/auth";
 import type { ApiKeys, EnvKeysResponse } from "@/types";
@@ -11,30 +11,57 @@ const DEFAULT_KEYS: ApiKeys = {
   google_api_key: "",
   openai_api_key: "",
   anthropic_api_key: "",
-  sec_header: "",
   tavily_api_key: "",
   model_id: "",
 };
 
+// Module-level store over localStorage, read via useSyncExternalStore. The
+// server snapshot is DEFAULT_KEYS, so hydration matches the SSR markup and
+// React swaps in the stored keys right after. In-memory `stored` stays the
+// source of truth even if localStorage writes fail.
+let stored: ApiKeys | null = null;
+const listeners = new Set<() => void>();
+
+function getSnapshot(): ApiKeys {
+  if (stored === null) {
+    stored = DEFAULT_KEYS;
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) stored = { ...DEFAULT_KEYS, ...(JSON.parse(raw) as Partial<ApiKeys>) };
+    } catch {
+      // Ignore parse errors
+    }
+  }
+  return stored;
+}
+
+function getServerSnapshot(): ApiKeys {
+  return DEFAULT_KEYS;
+}
+
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function writeKeys(updated: ApiKeys) {
+  stored = updated;
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+  } catch {
+    // Ignore storage errors
+  }
+  listeners.forEach((l) => l());
+}
+
 export function useApiKeys() {
   const { isSignedIn, isLoaded: authLoaded } = useAuth();
-  const [keys, setKeysState] = useState<ApiKeys>(DEFAULT_KEYS);
+  const keys = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
   const [envKeys, setEnvKeys] = useState<EnvKeysResponse | null>(null);
   const [envLoaded, setEnvLoaded] = useState(false);
   const [modelsLoaded, setModelsLoaded] = useState(false);
 
   useEffect(() => {
-    // Load local keys from localStorage
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as Partial<ApiKeys>;
-        setKeysState({ ...DEFAULT_KEYS, ...parsed });
-      }
-    } catch {
-      // Ignore parse errors
-    }
-
     // Fetch server-side env key availability
     api.envKeys()
       .then(setEnvKeys)
@@ -45,16 +72,9 @@ export function useApiKeys() {
     // choice and lock an anonymous visitor out of the free trial.
     api.models()
       .then(({ models }) => {
-        setKeysState((prev) => {
-          if (!prev.model_id || models.some((m) => m.id === prev.model_id)) return prev;
-          const next = { ...prev, model_id: "" };
-          try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-          } catch {
-            // Ignore storage errors
-          }
-          return next;
-        });
+        const current = getSnapshot();
+        if (!current.model_id || models.some((m) => m.id === current.model_id)) return;
+        writeKeys({ ...current, model_id: "" });
       })
       .catch(() => {})
       .finally(() => setModelsLoaded(true));
@@ -67,20 +87,13 @@ export function useApiKeys() {
   const loaded = envLoaded && modelsLoaded && authLoaded;
 
   function setKeys(updated: ApiKeys) {
-    setKeysState(updated);
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-    } catch {
-      // Ignore storage errors
-    }
+    writeKeys(updated);
   }
 
   function hasRequiredKeys(): boolean {
     // Operator env provider keys are lent only to signed-in (or self-host)
     // callers — mirror the backend's _env_keys_allowed gate. Counting them for
     // anonymous visitors makes the chat tab render and then fail on WS connect.
-    // SEC_HEADER is a global server identity, not a per-user key, so it's
-    // available to everyone.
     const canUseEnvKeys = !!isSignedIn || authDisabled;
 
     // Anonymous free trial: the backend lends its key for exactly one light
@@ -92,15 +105,14 @@ export function useApiKeys() {
     const canUseFreeTrial =
       !canUseEnvKeys && !!envKeys?.free_trial_model_id && usingFreeTrialModel;
 
-    const hasProviderKey =
+    return (
       !!keys.google_api_key ||
       !!keys.openai_api_key ||
       !!keys.anthropic_api_key ||
       (canUseEnvKeys &&
         (!!envKeys?.google || !!envKeys?.openai || !!envKeys?.anthropic)) ||
-      canUseFreeTrial;
-    const hasSecHeader = !!keys.sec_header || !!envKeys?.sec_header;
-    return hasProviderKey && hasSecHeader;
+      canUseFreeTrial
+    );
   }
 
   return { keys, setKeys, loaded, envKeys, hasRequiredKeys };
