@@ -251,6 +251,22 @@ class TestProfilePartialFailure:
         # Company info should still be present
         assert data["company"]["name"] == "Apple Inc."
 
+    def test_unserializable_payload_is_not_cached(self, client, mock_profile_deps):
+        """A NaN in the payload must not poison the cache for later requests."""
+        from api.routes.company import _profile_cache
+
+        mock_profile_deps["ti"].calculate_all_indicators.return_value = {
+            "moving_averages": {"MA_20": float("nan")},
+        }
+        resp = client.get("/api/company/NVDA/profile")
+        assert resp.status_code != 200
+        assert "NVDA" not in _profile_cache
+
+        # Once the data is clean again, the next request recovers.
+        mock_profile_deps["ti"].calculate_all_indicators.return_value = {}
+        resp = client.get("/api/company/NVDA/profile")
+        assert resp.status_code == 200
+
 
 # ── Bounded cache (Phase 3 hardening) ──────────────────────────────────────
 

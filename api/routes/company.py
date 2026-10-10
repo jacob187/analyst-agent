@@ -177,8 +177,9 @@ async def _build_profile(ticker: str) -> dict[str, Any]:
         "regime": regime,
     }
     # Round-trip through JSON off the event loop to coerce numpy floats,
-    # Timestamps, etc. to JSON-safe primitives.
-    return await asyncio.to_thread(lambda: json.loads(json.dumps(raw, default=str)))
+    # Timestamps, etc. to JSON-safe primitives. allow_nan=False matches
+    # JSONResponse, so an unrenderable payload fails here — before it's cached.
+    return await asyncio.to_thread(lambda: json.loads(json.dumps(raw, default=str, allow_nan=False)))
 
 
 @router.get("/{ticker}/profile")

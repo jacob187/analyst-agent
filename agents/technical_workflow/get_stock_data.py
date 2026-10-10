@@ -73,6 +73,9 @@ class YahooFinanceDataRetrieval:
         """
         try:
             hist = self.yf_ticker.history(period=period, interval=interval)
+            # yfinance can emit a placeholder bar for the current session with
+            # NaN OHLC; it poisons every rolling indicator downstream.
+            hist = hist.dropna(subset=["Open", "High", "Low", "Close"])
             if hist.empty:
                 print(
                     f"Warning: No historical price data retrieved for {self.ticker} for period {period}"
