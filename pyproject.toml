@@ -12,7 +12,7 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi==0.136.1",
     "uvicorn[standard]==0.46.0",
-    "edgartools>=5.28.0",
+    "edgartools>=5.61.1",
     "langchain==1.2.15",
     "langchain-google-genai==4.2.2",
     "langchain-openai==1.1.12",
@@ -31,7 +31,9 @@ dependencies = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+addopts = "-m 'not network'"
 markers = [
+    "network: hits live external services (no API keys); excluded by default, run with -m network",
     "eval_unit: pure logic tests, no API keys needed",
     "eval_fast: single LLM call each (router/planner/synthesizer)",
     "eval_tools: individual tool validation (requires API keys)",

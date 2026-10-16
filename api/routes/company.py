@@ -377,17 +377,26 @@ def _fetch_filing_data(ticker: str, fetch_raw: bool = True) -> dict[str, Any]:
                 if primary_item:
                     item_result = retriever.get_8k_item(primary_item)
                     item_text = item_result.get("text", "") if item_result.get("found") else ""
-                result["eightk"] = {
-                    "kind": "event",
-                    "raw": {
-                        "content_type": overview.get("content_type", "other"),
-                        "items": items,
-                        "context": overview.get("context", ""),
-                        "text": item_text,
+                context = overview.get("context", "")
+                if not item_text and not context:
+                    # Nothing real to analyse — don't send an empty prompt to
+                    # the LLM and cache the result for the filing's lifetime.
+                    result["eightk"] = {
+                        "kind": "none",
+                        "reason": f"8-K item {primary_item} could not be extracted",
+                    }
+                else:
+                    result["eightk"] = {
+                        "kind": "event",
+                        "raw": {
+                            "content_type": overview.get("content_type", "other"),
+                            "items": items,
+                            "context": context,
+                            "text": item_text,
+                            "metadata": metadata,
+                        },
                         "metadata": metadata,
-                    },
-                    "metadata": metadata,
-                }
+                    }
     except (ValueError, Exception) as e:
         result["eightk"] = {"kind": "none", "reason": f"No 8-K available ({e})"}
 
@@ -404,19 +413,32 @@ def _plan_sections(filing_data: dict[str, Any]) -> list[dict[str, Any]]:
     10-K sections (Item 1/1C/3/7A, XBRL) appear only when their raw text was
     extracted and found, so a keyless fetch (``fetch_raw=False`` → empty raw)
     yields just the always-present core sections.
+
+    Core sections whose raw text *was* fetched but failed to extract
+    (``found: False``, an empty 20-F balance sheet, an 8-K without parseable
+    earnings) are skipped — otherwise the LLM analyses the error message and
+    the result is cached for the filing's lifetime. Unfetched (keyless) input
+    is ``None``/empty and stays planned so cached analyses are still served.
     """
     plan: list[dict[str, Any]] = []
+
+    def extracted(raw: dict[str, Any] | None) -> bool:
+        return raw is None or bool(raw.get("found"))
 
     if "tenk" in filing_data:
         tenk = filing_data["tenk"]
         acc = tenk["metadata"].get("accession", "")
-        plan.append({"section": "tenk", "key": "risk_10k", "form": "10-K", "accession": acc, "atype": "risk_10k", "input": tenk.get("risk_raw", {})})
-        plan.append({"section": "tenk", "key": "mda_10k", "form": "10-K", "accession": acc, "atype": "mda_10k", "input": tenk.get("mda_raw", {})})
+        if extracted(tenk.get("risk_raw")):
+            plan.append({"section": "tenk", "key": "risk_10k", "form": "10-K", "accession": acc, "atype": "risk_10k", "input": tenk.get("risk_raw", {})})
+        if extracted(tenk.get("mda_raw")):
+            plan.append({"section": "tenk", "key": "mda_10k", "form": "10-K", "accession": acc, "atype": "mda_10k", "input": tenk.get("mda_raw", {})})
 
-        balance_input: dict[str, Any] = {"tenk": tenk.get("balance_sheet_raw", {})}
-        if "tenq" in filing_data and filing_data["tenq"].get("balance_sheet_raw"):
-            balance_input["tenq"] = filing_data["tenq"]["balance_sheet_raw"]
-        plan.append({"section": "tenk", "key": "balance", "form": "10-K", "accession": acc, "atype": "balance", "input": balance_input})
+        balance_raw = tenk.get("balance_sheet_raw")
+        if balance_raw is None or balance_raw:
+            balance_input: dict[str, Any] = {"tenk": balance_raw or {}}
+            if "tenq" in filing_data and filing_data["tenq"].get("balance_sheet_raw"):
+                balance_input["tenq"] = filing_data["tenq"]["balance_sheet_raw"]
+            plan.append({"section": "tenk", "key": "balance", "form": "10-K", "accession": acc, "atype": "balance", "input": balance_input})
 
         for atype, raw_key in [("business", "business_raw"), ("cybersecurity", "cyber_raw"), ("legal", "legal_raw"), ("market_risk", "market_risk_raw")]:
             raw = tenk.get(raw_key)
@@ -440,11 +462,15 @@ def _plan_sections(filing_data: dict[str, Any]) -> list[dict[str, Any]]:
     if "tenq" in filing_data:
         tenq = filing_data["tenq"]
         acc = tenq["metadata"].get("accession", "")
-        plan.append({"section": "tenq", "key": "risk_10q", "form": "10-Q", "accession": acc, "atype": "risk_10q", "input": tenq.get("risk_raw", {})})
-        plan.append({"section": "tenq", "key": "mda_10q", "form": "10-Q", "accession": acc, "atype": "mda_10q", "input": tenq.get("mda_raw", {})})
+        if extracted(tenq.get("risk_raw")):
+            plan.append({"section": "tenq", "key": "risk_10q", "form": "10-Q", "accession": acc, "atype": "risk_10q", "input": tenq.get("risk_raw", {})})
+        if extracted(tenq.get("mda_raw")):
+            plan.append({"section": "tenq", "key": "mda_10q", "form": "10-Q", "accession": acc, "atype": "mda_10q", "input": tenq.get("mda_raw", {})})
 
     eightk = filing_data.get("eightk", {})
     kind = eightk.get("kind", "none")
+    if kind == "earnings" and eightk.get("raw", {}).get("has_earnings") is False:
+        kind = "none"
     if kind in ("earnings", "event"):
         acc = eightk.get("metadata", {}).get("accession", "")
         plan.append({"section": "eightk", "key": "analysis", "form": "8-K", "accession": acc, "atype": kind, "input": eightk.get("raw", {})})
@@ -586,7 +612,8 @@ async def get_company_filings(
 ):
     """Return LLM-analyzed SEC filing summaries for the Filings tab.
 
-    First call for a ticker runs LLM analysis (~5-15s, costs ~$0.005).
+    First call for a ticker runs LLM analysis (~5-15s; up to 12 calls, ~70-100k
+    input tokens — about $0.07 per company on gemini-3.1-flash-lite).
     Subsequent calls return instantly from SQLite (keyed by accession
     number — automatic cache invalidation when new filings are published).
 

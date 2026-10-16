@@ -336,6 +336,47 @@ class TestFilings8K:
         mock_filings_deps["processor"].analyze_material_event.assert_called_once()
         mock_filings_deps["processor"].analyze_earnings.assert_not_called()
 
+    def test_event_not_analyzed_when_item_and_context_missing(self, client, mock_filings_deps):
+        """Item extraction failed and the overview has no context → nothing to analyse."""
+        mock_filings_deps["sec"].get_8k_overview.return_value = {
+            "found": True,
+            "has_earnings": False,
+            "items": ["5.02"],
+            "content_type": "director_change",
+            "context": "",
+            "metadata": _MOCK_8K_METADATA,
+        }
+        mock_filings_deps["sec"].get_8k_item.return_value = {
+            "text": "Error extracting 8-K item 5.02: boom", "metadata": {}, "found": False,
+        }
+        data = client.get(
+            "/api/company/AAPL/filings",
+            headers={"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"},
+        ).json()
+        assert data["eightk"]["kind"] == "none"
+        mock_filings_deps["processor"].analyze_material_event.assert_not_called()
+
+    def test_event_analyzed_from_context_when_item_extraction_fails(self, client, mock_filings_deps):
+        """Overview context alone is real input — still analysed, error text never sent."""
+        mock_filings_deps["sec"].get_8k_overview.return_value = {
+            "found": True,
+            "has_earnings": False,
+            "items": ["5.02"],
+            "content_type": "director_change",
+            "context": "Departure of CEO; appointment of interim CEO.",
+            "metadata": _MOCK_8K_METADATA,
+        }
+        mock_filings_deps["sec"].get_8k_item.return_value = {
+            "text": "Error extracting 8-K item 5.02: boom", "metadata": {}, "found": False,
+        }
+        data = client.get(
+            "/api/company/AAPL/filings",
+            headers={"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"},
+        ).json()
+        assert data["eightk"]["kind"] == "event"
+        event_input = mock_filings_deps["processor"].analyze_material_event.call_args.args[1]
+        assert "Error extracting" not in str(event_input)
+
 
 # ── Error cases ────────────────────────────────────────────────────────────
 
@@ -602,6 +643,26 @@ class TestFilingsStream:
         assert "needs_key" in statuses
         assert not any(e.get("type") == "section" for e in events)
         mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
+
+
+# ── failed extraction must never reach the LLM or the cache ────────────────
+
+
+class TestFailedExtractionNotAnalyzed:
+    def test_stream_skips_section_whose_extraction_failed(self, client, mock_filings_deps):
+        _core_only(mock_filings_deps)
+        mock_filings_deps["sec"].get_risk_factors_raw.return_value = {
+            "text": "Error extracting 1A from 10-K: boom", "metadata": {}, "found": False,
+        }
+        events = _stream_events(client, "/api/company/AAPL/filings/stream", _KEYED)
+
+        assert events[-1]["type"] == "complete"
+        section_keys = {e["key"] for e in events if e.get("type") == "section"}
+        assert "risk_10k" not in section_keys and "risk_10q" not in section_keys
+        assert "mda_10k" in section_keys
+        mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
+        saved_types = {c.args[3] for c in mock_filings_deps["save_cache"].call_args_list}
+        assert not saved_types & {"risk_10k", "risk_10q"}
 
 
 # ── #5: keyless callers must not pay for raw section extraction ────────────

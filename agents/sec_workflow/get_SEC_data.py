@@ -1,7 +1,10 @@
 from edgar import Company, CompanyNotFoundError
 import json
+import logging
 from typing import Literal, Optional, Dict, Any
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 # Item code → edgartools __getitem__ key for each form.
 # 10-K: items are unique across all parts; keys are "Item X" strings.
@@ -285,6 +288,7 @@ class SECDataRetrieval:
                 "found": True,
             }
         except Exception as e:
+            logger.warning("[%s] 8-K overview extraction failed: %s", self.ticker, e)
             return {"found": False, "text": f"Error fetching 8-K overview: {e}", "metadata": {}}
 
     def get_8k_item(self, item: str) -> Dict[str, Any]:
@@ -304,6 +308,7 @@ class SECDataRetrieval:
                 "found": found,
             }
         except Exception as e:
+            logger.warning("[%s] 8-K item %s extraction failed: %s", self.ticker, item, e)
             return {"text": f"Error extracting 8-K item {item}: {e}", "metadata": {}, "found": False}
 
     def get_earnings_data(self) -> Dict[str, Any]:
@@ -349,6 +354,7 @@ class SECDataRetrieval:
 
             return result
         except Exception as e:
+            logger.warning("[%s] 8-K earnings extraction failed: %s", self.ticker, e)
             return {"has_earnings": False, "reason": f"Error parsing earnings: {e}", "metadata": {}}
 
     def get_section(self, form: Literal["10-K", "10-Q", "20-F"], item: str) -> Dict[str, Any]:
@@ -397,6 +403,7 @@ class SECDataRetrieval:
             }
 
         except Exception as e:
+            logger.warning("[%s] %s Item %s extraction failed: %s", self.ticker, form, item, e)
             return {"text": f"Error extracting {item} from {form}: {e}", "metadata": {}, "found": False}
 
     def _get_twentyf_section(self, item: str) -> Dict[str, Any]:
@@ -434,6 +441,7 @@ class SECDataRetrieval:
                 "found": found,
             }
         except Exception as e:
+            logger.warning("[%s] 20-F Item %s extraction failed: %s", self.ticker, item, e)
             return {"text": f"Error extracting {item} from 20-F: {e}", "metadata": {}, "found": False}
 
     def get_mda_raw(self, form: Literal["10-K", "10-Q", "20-F"] = "10-K") -> Dict[str, Any]:

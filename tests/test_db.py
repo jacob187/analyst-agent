@@ -248,3 +248,65 @@ class TestDeleteSession:
         await db_module.delete_session(first_id)
         second_id = await db_module.get_or_create_session("AAPL", USER_A)
         assert second_id != first_id
+
+
+# ---------------------------------------------------------------------------
+# Filing analysis purge (count / delete by type + age)
+# ---------------------------------------------------------------------------
+
+async def _seed_analysis(analysis_type: str, created_at: str, ticker: str = "AAPL"):
+    await db_module.save_filing_analysis(ticker, "10-K", "acc-1", analysis_type, "{}")
+    db = await db_module.get_db()
+    await db.execute(
+        "UPDATE filing_analyses SET created_at = ? WHERE ticker = ? AND analysis_type = ?",
+        (created_at, ticker, analysis_type),
+    )
+    await db.commit()
+
+
+async def _remaining_types() -> set[str]:
+    db = await db_module.get_db()
+    async with db.execute("SELECT analysis_type FROM filing_analyses") as cur:
+        return {r["analysis_type"] for r in await cur.fetchall()}
+
+
+@pytest.mark.eval_unit
+class TestFilingAnalysisPurge:
+    async def test_delete_only_listed_types_before_cutoff(self, fresh_db):
+        await _seed_analysis("risk_10k", "2026-10-01 00:00:00")
+        await _seed_analysis("mda_10k", "2026-10-20 00:00:00")   # after cutoff
+        await _seed_analysis("balance", "2026-10-01 00:00:00")   # type not listed
+
+        deleted = await db_module.delete_filing_analyses(
+            ["risk_10k", "mda_10k"], created_before="2026-10-11 00:00:00"
+        )
+        assert deleted == 1
+        assert await _remaining_types() == {"mda_10k", "balance"}
+
+    async def test_count_matches_delete_scope(self, fresh_db):
+        await _seed_analysis("risk_10k", "2026-10-01 00:00:00")
+        await _seed_analysis("risk_10k", "2026-10-01 00:00:00", ticker="MSFT")
+        await _seed_analysis("event", "2026-10-20 00:00:00")
+        counts = await db_module.count_filing_analyses(
+            ["risk_10k", "event"], created_before="2026-10-11 00:00:00"
+        )
+        assert counts == {"risk_10k": 2}
+
+    async def test_empty_type_list_is_noop(self, fresh_db):
+        await _seed_analysis("risk_10k", "2026-10-01 00:00:00")
+        assert await db_module.delete_filing_analyses([]) == 0
+        assert await db_module.count_filing_analyses([]) == {}
+        assert await _remaining_types() == {"risk_10k"}
+
+    async def test_purge_command_dry_run_then_execute(self, fresh_db):
+        from api.purge_filing_analyses import run
+
+        await _seed_analysis("risk_10k", "2026-10-01 00:00:00")
+        await _seed_analysis("income_stmt", "2026-10-01 00:00:00")
+        cutoff = "2026-10-11 00:00:00"
+
+        assert await run(cutoff, execute=False) == 0
+        assert await _remaining_types() == {"risk_10k", "income_stmt"}
+
+        assert await run(cutoff, execute=True) == 1
+        assert await _remaining_types() == {"income_stmt"}  # XBRL types kept

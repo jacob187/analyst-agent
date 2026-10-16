@@ -1009,6 +1009,45 @@ async def get_filing_analysis(ticker: str, form_type: str,
         return None
 
 
+async def count_filing_analyses(analysis_types: list[str],
+                                created_before: str | None = None) -> dict[str, int]:
+    """Row counts per analysis_type, optionally only rows created before a UTC
+    timestamp ('YYYY-MM-DD HH:MM:SS', SQLite CURRENT_TIMESTAMP format)."""
+    if not analysis_types:
+        return {}
+    db = await get_db()
+    placeholders = ",".join("?" * len(analysis_types))
+    sql = f"""
+        SELECT analysis_type, COUNT(*) AS n FROM filing_analyses
+        WHERE analysis_type IN ({placeholders})
+    """
+    params: list[str] = list(analysis_types)
+    if created_before:
+        sql += " AND created_at < ?"
+        params.append(created_before)
+    sql += " GROUP BY analysis_type"
+    async with db.execute(sql, params) as cursor:
+        return {r["analysis_type"]: r["n"] for r in await cursor.fetchall()}
+
+
+async def delete_filing_analyses(analysis_types: list[str],
+                                 created_before: str | None = None) -> int:
+    """Delete cached analyses of the given types (optionally only those created
+    before a UTC timestamp). Returns the number of rows deleted."""
+    if not analysis_types:
+        return 0
+    db = await get_db()
+    placeholders = ",".join("?" * len(analysis_types))
+    sql = f"DELETE FROM filing_analyses WHERE analysis_type IN ({placeholders})"
+    params: list[str] = list(analysis_types)
+    if created_before:
+        sql += " AND created_at < ?"
+        params.append(created_before)
+    cursor = await db.execute(sql, params)
+    await db.commit()
+    return cursor.rowcount
+
+
 async def get_all_filing_analyses(ticker: str, accession_number: str) -> list[dict]:
     """Return all cached analyses for a specific filing (by accession number)."""
     db = await get_db()
