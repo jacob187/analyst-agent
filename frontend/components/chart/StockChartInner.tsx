@@ -133,24 +133,18 @@ export default function StockChartInner({
     // Bollinger Bands
     if (indicators.has("BB")) {
       const bb = data.indicators.bollinger as
-        | {
-            upper: Array<{ time: Time; value: number }>;
-            lower: Array<{ time: Time; value: number }>;
-            middle: Array<{ time: Time; value: number }>;
-          }
+        | Array<{ time: Time; upper: number; middle: number; lower: number }>
         | undefined;
-      if (bb) {
-        for (const band of [bb.upper, bb.middle, bb.lower]) {
-          if (band?.length) {
-            const s = priceChart.addSeries(LineSeries, {
-              color: "#06b6d4",
-              lineWidth: 1,
-              lineStyle: 2, // dashed
-              lastValueVisible: false,
-              priceLineVisible: false,
-            });
-            s.setData(band);
-          }
+      if (bb?.length) {
+        for (const band of ["upper", "middle", "lower"] as const) {
+          const s = priceChart.addSeries(LineSeries, {
+            color: "#06b6d4",
+            lineWidth: 1,
+            lineStyle: 2, // dashed
+            lastValueVisible: false,
+            priceLineVisible: false,
+          });
+          s.setData(bb.map((d) => ({ time: d.time, value: d[band] })));
         }
       }
     }
@@ -215,45 +209,35 @@ export default function StockChartInner({
       macdChartRef.current = macdChart;
 
       const macdData = data.indicators.macd as
-        | {
-            macd?: Array<{ time: Time; value: number }>;
-            signal?: Array<{ time: Time; value: number }>;
-            histogram?: Array<{ time: Time; value: number; color?: string }>;
-          }
+        | Array<{ time: Time; macd: number; signal: number; histogram: number }>
         | undefined;
 
-      if (macdData) {
-        if (macdData.histogram?.length) {
-          const hist = macdChart.addSeries(HistogramSeries, {
-            color: emerald,
-            priceFormat: { type: "price", precision: 4 },
-          });
-          hist.setData(
-            macdData.histogram.map((d) => ({
-              time: d.time,
-              value: d.value,
-              color: d.value >= 0 ? `${emerald}cc` : `${red}cc`,
-            }))
-          );
-        }
-        if (macdData.macd?.length) {
-          const macdLine = macdChart.addSeries(LineSeries, {
-            color: "#60a5fa",
-            lineWidth: 1,
-            lastValueVisible: false,
-            priceLineVisible: false,
-          });
-          macdLine.setData(macdData.macd);
-        }
-        if (macdData.signal?.length) {
-          const signalLine = macdChart.addSeries(LineSeries, {
-            color: "#f97316",
-            lineWidth: 1,
-            lastValueVisible: false,
-            priceLineVisible: false,
-          });
-          signalLine.setData(macdData.signal);
-        }
+      if (macdData?.length) {
+        const hist = macdChart.addSeries(HistogramSeries, {
+          color: emerald,
+          priceFormat: { type: "price", precision: 4 },
+        });
+        hist.setData(
+          macdData.map((d) => ({
+            time: d.time,
+            value: d.histogram,
+            color: d.histogram >= 0 ? `${emerald}cc` : `${red}cc`,
+          }))
+        );
+        const macdLine = macdChart.addSeries(LineSeries, {
+          color: "#60a5fa",
+          lineWidth: 1,
+          lastValueVisible: false,
+          priceLineVisible: false,
+        });
+        macdLine.setData(macdData.map((d) => ({ time: d.time, value: d.macd })));
+        const signalLine = macdChart.addSeries(LineSeries, {
+          color: "#f97316",
+          lineWidth: 1,
+          lastValueVisible: false,
+          priceLineVisible: false,
+        });
+        signalLine.setData(macdData.map((d) => ({ time: d.time, value: d.signal })));
         macdChart.timeScale().fitContent();
       }
     }
