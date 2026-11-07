@@ -377,26 +377,19 @@ def _fetch_filing_data(ticker: str, fetch_raw: bool = True) -> dict[str, Any]:
                 if primary_item:
                     item_result = retriever.get_8k_item(primary_item)
                     item_text = item_result.get("text", "") if item_result.get("found") else ""
-                context = overview.get("context", "")
-                if not item_text and not context:
-                    # Nothing real to analyse — don't send an empty prompt to
-                    # the LLM and cache the result for the filing's lifetime.
-                    result["eightk"] = {
-                        "kind": "none",
-                        "reason": f"8-K item {primary_item} could not be extracted",
-                    }
-                else:
-                    result["eightk"] = {
-                        "kind": "event",
-                        "raw": {
-                            "content_type": overview.get("content_type", "other"),
-                            "items": items,
-                            "context": context,
-                            "text": item_text,
-                            "metadata": metadata,
-                        },
+                result["eightk"] = {
+                    "kind": "event",
+                    "raw": {
+                        "content_type": overview.get("content_type", "other"),
+                        "items": items,
+                        "context": overview.get("context", ""),
+                        "text": item_text,
                         "metadata": metadata,
-                    }
+                    },
+                    "metadata": metadata,
+                }
+                if not item_text:
+                    result["eightk"]["reason"] = f"8-K item {primary_item} could not be extracted"
     except (ValueError, Exception) as e:
         result["eightk"] = {"kind": "none", "reason": f"No 8-K available ({e})"}
 
@@ -416,64 +409,67 @@ def _plan_sections(filing_data: dict[str, Any]) -> list[dict[str, Any]]:
 
     Core sections whose raw text *was* fetched but failed to extract
     (``found: False``, an empty 20-F balance sheet, an 8-K without parseable
-    earnings) are skipped — otherwise the LLM analyses the error message and
-    the result is cached for the filing's lifetime. Unfetched (keyless) input
-    is ``None``/empty and stays planned so cached analyses are still served.
+    earnings, an event 8-K whose item text is missing) are planned
+    ``cache_only``: an existing cached analysis is still served, but a cache
+    miss never generates — otherwise the LLM analyses the error message or
+    bare metadata and the result is cached for the filing's lifetime.
+    Unfetched (keyless) input is ``None``/empty and is planned normally.
     """
     plan: list[dict[str, Any]] = []
 
-    def extracted(raw: dict[str, Any] | None) -> bool:
-        return raw is None or bool(raw.get("found"))
+    def failed(raw: dict[str, Any] | None) -> bool:
+        return raw is not None and not raw.get("found")
 
     if "tenk" in filing_data:
         tenk = filing_data["tenk"]
         acc = tenk["metadata"].get("accession", "")
-        if extracted(tenk.get("risk_raw")):
-            plan.append({"section": "tenk", "key": "risk_10k", "form": "10-K", "accession": acc, "atype": "risk_10k", "input": tenk.get("risk_raw", {})})
-        if extracted(tenk.get("mda_raw")):
-            plan.append({"section": "tenk", "key": "mda_10k", "form": "10-K", "accession": acc, "atype": "mda_10k", "input": tenk.get("mda_raw", {})})
+        risk_raw, mda_raw = tenk.get("risk_raw"), tenk.get("mda_raw")
+        plan.append({"section": "tenk", "key": "risk_10k", "form": "10-K", "accession": acc, "atype": "risk_10k", "input": risk_raw or {}, "cache_only": failed(risk_raw)})
+        plan.append({"section": "tenk", "key": "mda_10k", "form": "10-K", "accession": acc, "atype": "mda_10k", "input": mda_raw or {}, "cache_only": failed(mda_raw)})
 
         balance_raw = tenk.get("balance_sheet_raw")
-        if balance_raw is None or balance_raw:
-            balance_input: dict[str, Any] = {"tenk": balance_raw or {}}
-            if "tenq" in filing_data and filing_data["tenq"].get("balance_sheet_raw"):
-                balance_input["tenq"] = filing_data["tenq"]["balance_sheet_raw"]
-            plan.append({"section": "tenk", "key": "balance", "form": "10-K", "accession": acc, "atype": "balance", "input": balance_input})
+        balance_input: dict[str, Any] = {"tenk": balance_raw or {}}
+        if "tenq" in filing_data and filing_data["tenq"].get("balance_sheet_raw"):
+            balance_input["tenq"] = filing_data["tenq"]["balance_sheet_raw"]
+        plan.append({"section": "tenk", "key": "balance", "form": "10-K", "accession": acc, "atype": "balance", "input": balance_input, "cache_only": balance_raw is not None and not balance_raw})
 
         for atype, raw_key in [("business", "business_raw"), ("cybersecurity", "cyber_raw"), ("legal", "legal_raw"), ("market_risk", "market_risk_raw")]:
             raw = tenk.get(raw_key)
             if raw and raw.get("found"):
-                plan.append({"section": "tenk", "key": atype, "form": "10-K", "accession": acc, "atype": atype, "input": raw})
+                plan.append({"section": "tenk", "key": atype, "form": "10-K", "accession": acc, "atype": atype, "input": raw, "cache_only": False})
 
         if tenk.get("income_stmt_raw"):
             income_input: dict[str, Any] = {"tenk": tenk["income_stmt_raw"], "tenk_metadata": tenk["metadata"]}
             if "tenq" in filing_data and filing_data["tenq"].get("income_stmt_raw"):
                 income_input["tenq"] = filing_data["tenq"]["income_stmt_raw"]
                 income_input["tenq_metadata"] = filing_data["tenq"]["metadata"]
-            plan.append({"section": "tenk", "key": "income_stmt", "form": "10-K", "accession": acc, "atype": "income_stmt", "input": income_input})
+            plan.append({"section": "tenk", "key": "income_stmt", "form": "10-K", "accession": acc, "atype": "income_stmt", "input": income_input, "cache_only": False})
 
         if tenk.get("cashflow_raw"):
             cashflow_input: dict[str, Any] = {"tenk": tenk["cashflow_raw"], "tenk_metadata": tenk["metadata"]}
             if "tenq" in filing_data and filing_data["tenq"].get("cashflow_raw"):
                 cashflow_input["tenq"] = filing_data["tenq"]["cashflow_raw"]
                 cashflow_input["tenq_metadata"] = filing_data["tenq"]["metadata"]
-            plan.append({"section": "tenk", "key": "cashflow", "form": "10-K", "accession": acc, "atype": "cashflow", "input": cashflow_input})
+            plan.append({"section": "tenk", "key": "cashflow", "form": "10-K", "accession": acc, "atype": "cashflow", "input": cashflow_input, "cache_only": False})
 
     if "tenq" in filing_data:
         tenq = filing_data["tenq"]
         acc = tenq["metadata"].get("accession", "")
-        if extracted(tenq.get("risk_raw")):
-            plan.append({"section": "tenq", "key": "risk_10q", "form": "10-Q", "accession": acc, "atype": "risk_10q", "input": tenq.get("risk_raw", {})})
-        if extracted(tenq.get("mda_raw")):
-            plan.append({"section": "tenq", "key": "mda_10q", "form": "10-Q", "accession": acc, "atype": "mda_10q", "input": tenq.get("mda_raw", {})})
+        risk_raw, mda_raw = tenq.get("risk_raw"), tenq.get("mda_raw")
+        plan.append({"section": "tenq", "key": "risk_10q", "form": "10-Q", "accession": acc, "atype": "risk_10q", "input": risk_raw or {}, "cache_only": failed(risk_raw)})
+        plan.append({"section": "tenq", "key": "mda_10q", "form": "10-Q", "accession": acc, "atype": "mda_10q", "input": mda_raw or {}, "cache_only": failed(mda_raw)})
 
     eightk = filing_data.get("eightk", {})
     kind = eightk.get("kind", "none")
-    if kind == "earnings" and eightk.get("raw", {}).get("has_earnings") is False:
-        kind = "none"
     if kind in ("earnings", "event"):
+        raw = eightk.get("raw", {})
+        # Keyless fetches leave raw empty; only a fetched-but-unusable 8-K is cache_only.
+        if kind == "earnings":
+            unusable = raw.get("has_earnings") is False
+        else:
+            unusable = bool(raw) and not raw.get("text")
         acc = eightk.get("metadata", {}).get("accession", "")
-        plan.append({"section": "eightk", "key": "analysis", "form": "8-K", "accession": acc, "atype": kind, "input": eightk.get("raw", {})})
+        plan.append({"section": "eightk", "key": "analysis", "form": "8-K", "accession": acc, "atype": kind, "input": raw, "cache_only": unusable})
 
     return plan
 
@@ -481,14 +477,15 @@ def _plan_sections(filing_data: dict[str, Any]) -> list[dict[str, Any]]:
 async def _analyze_or_cache(
     ticker: str, form_type: str, accession: str, analysis_type: str,
     llm_input: dict[str, Any], model_id: str, api_key: str | None,
-    on_progress=None,
+    on_progress=None, cache_only: bool = False,
 ) -> tuple[str, dict[str, Any] | None]:
     """Resolve one filing section — the single source of truth for the
     cache → keyless-gate → generate flow shared by the JSON and SSE endpoints (#10).
 
-    Returns ``(status, data)``: 'cached'|'needs_key'|'done'|'failed'. ``data``
-    is None for needs_key/failed. ``on_progress(status, extra)`` (optional) is
-    called as the state advances so the SSE endpoint can stream progress; the
+    Returns ``(status, data)``: 'cached'|'needs_key'|'unavailable'|'done'|'failed'.
+    ``data`` is None for everything but cached/done. ``cache_only`` (input failed
+    to extract) serves a cache hit but returns 'unavailable' on a miss, silently.
+    ``on_progress(status, extra)`` (optional) is called as the state advances so the SSE endpoint can stream progress; the
     JSON endpoint passes None. The daily budget is charged by the caller's
     pre-flight (only when generation will occur), never here.
     """
@@ -503,6 +500,9 @@ async def _analyze_or_cache(
         logger.info("[%s] CACHE HIT  %s/%s", ticker, form_type, analysis_type)
         progress("cached")
         return "cached", json.loads(cached["analysis_json"])
+
+    if cache_only:
+        return "unavailable", None
 
     if not api_key:
         # Cache miss with no key to generate — anonymous / keyless caller.
@@ -544,7 +544,8 @@ async def _charge_budget_if_generating(
         return True
     from api.db import get_filing_analysis
     cached = await asyncio.gather(*[
-        get_filing_analysis(ticker, p["form"], p["accession"], p["atype"]) for p in plan
+        get_filing_analysis(ticker, p["form"], p["accession"], p["atype"])
+        for p in plan if not p["cache_only"]
     ])
     if any(c is None for c in cached):
         await check_and_charge_budget(keys.user_id)
@@ -665,7 +666,10 @@ async def get_company_filings(
     # Resolve every section concurrently — cache hits return instantly, misses
     # with a key run the LLM in parallel threads.
     results = await asyncio.gather(*[
-        _analyze_or_cache(ticker, p["form"], p["accession"], p["atype"], p["input"], model.id, api_key)
+        _analyze_or_cache(
+            ticker, p["form"], p["accession"], p["atype"], p["input"], model.id, api_key,
+            cache_only=p["cache_only"],
+        )
         for p in plan
     ])
 
@@ -691,6 +695,8 @@ async def get_company_filings(
             }
 
     if "eightk" not in response:
+        if any(p["section"] == "eightk" and p["cache_only"] for p in plan):
+            eightk_kind = "none"  # unusable 8-K with nothing cached to show
         response["eightk"] = {
             "kind": eightk_kind,
             "reason": eightk.get("reason", "No 8-K data available"),
@@ -815,7 +821,7 @@ async def stream_company_filings(
 
                 _status, data = await _analyze_or_cache(
                     ticker, p["form"], p["accession"], p["atype"], p["input"],
-                    model.id, api_key, on_progress=on_progress,
+                    model.id, api_key, on_progress=on_progress, cache_only=p["cache_only"],
                 )
                 if data is not None:
                     await queue.put(_sse({"type": "section", "form": p["form"], "key": p["key"], "data": data}))
