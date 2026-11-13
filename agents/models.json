@@ -7,9 +7,9 @@
     "thinking_capable": true,
     "default": true,
     "operator_lendable": true,
-    "input_price_per_mtok": null,
-    "output_price_per_mtok": null,
-    "prices_as_of": null
+    "input_price_per_mtok": 0.75,
+    "output_price_per_mtok": 3.75,
+    "prices_as_of": "2026-11-13"
   },
   {
     "id": "gemini-3.1-pro-preview",
@@ -19,9 +19,9 @@
     "thinking_capable": true,
     "default": false,
     "operator_lendable": false,
-    "input_price_per_mtok": null,
-    "output_price_per_mtok": null,
-    "prices_as_of": null
+    "input_price_per_mtok": 2.0,
+    "output_price_per_mtok": 12.0,
+    "prices_as_of": "2026-11-13"
   },
   {
     "id": "gemini-3.1-flash-lite",
@@ -32,9 +32,9 @@
     "default": false,
     "free_tier": true,
     "operator_lendable": true,
-    "input_price_per_mtok": null,
-    "output_price_per_mtok": null,
-    "prices_as_of": null
+    "input_price_per_mtok": 0.25,
+    "output_price_per_mtok": 1.5,
+    "prices_as_of": "2026-11-13"
   },
   {
     "id": "gpt-5.4",
