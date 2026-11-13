@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -24,6 +25,12 @@ from starlette.websockets import WebSocketDisconnect
 from api import dependencies
 from api.main import app
 from api.routes import chat
+from tests.test_dependencies import (  # noqa: F401  (clerk_env / rsa_keypair are fixtures)
+    TEST_SUB,
+    _make_token,
+    clerk_env,
+    rsa_keypair,
+)
 
 
 @pytest.fixture
@@ -236,6 +243,116 @@ class TestAnonChatNoPersistence:
             _drain_until(ws, "response")
 
         assert _row_count(temp_db, "sessions") == 1
+
+
+# ── Token-derived identity ───────────────────────────────────────────────────
+
+
+class TestTokenDerivedIdentity:
+    """With Clerk enabled the verified `clerk_session_token` alone identifies
+    the user: no `user_id` field is required for persistence."""
+
+    def _persisted(self, db_path, expected_messages):
+        # Messages are written by fire-and-forget tasks; poll briefly.
+        deadline = time.monotonic() + 3
+        while True:
+            conn = sqlite3.connect(db_path)
+            try:
+                sessions = conn.execute("SELECT id, user_id FROM sessions").fetchall()
+                messages = conn.execute(
+                    "SELECT session_id, role, content FROM messages ORDER BY rowid"
+                ).fetchall()
+            finally:
+                conn.close()
+            if len(messages) >= expected_messages or time.monotonic() > deadline:
+                return sessions, messages
+            time.sleep(0.05)
+
+    def test_token_without_user_id_persists_session_and_messages(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+    ):
+        _patch_agent(monkeypatch)
+        priv, _ = rsa_keypair
+        auth = {**_BYOK_AUTH, "clerk_session_token": _make_token(priv)}  # no user_id
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            ok = _drain_until(ws, "auth_success")
+            assert ok["session_id"]
+
+            ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+            _drain_until(ws, "response")
+
+        sessions, messages = self._persisted(temp_db, expected_messages=2)
+        assert sessions == [(ok["session_id"], TEST_SUB)]
+        assert [(m[0], m[1]) for m in messages] == [
+            (ok["session_id"], "user"),
+            (ok["session_id"], "assistant"),
+        ]
+
+    def test_user_id_disagreeing_with_token_is_rejected(
+        self, client, temp_db, clerk_env, rsa_keypair
+    ):
+        priv, _ = rsa_keypair
+        auth = {
+            **_BYOK_AUTH,
+            "user_id": "user_someoneElse",
+            "clerk_session_token": _make_token(priv),
+        }
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            err = ws.receive_json()
+            assert err["type"] == "error"
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_json()
+            assert exc.value.code == 1008
+        assert _row_count(temp_db, "sessions") == 0
+
+    def test_invalid_token_alone_connects_anonymously(
+        self, client, temp_db, clerk_env, monkeypatch
+    ):
+        # An expired/invalid token with no user_id must not break chat: the
+        # visitor connects as anonymous (BYOK key, nothing persisted).
+        _patch_agent(monkeypatch)
+        auth = {**_BYOK_AUTH, "clerk_session_token": "expired-or-garbage"}
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            ok = _drain_until(ws, "auth_success")
+            assert ok["session_id"] is None
+            ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+            _drain_until(ws, "response")
+
+        assert _row_count(temp_db, "sessions") == 0
+
+    def test_invalid_token_with_user_id_is_rejected(
+        self, client, temp_db, clerk_env
+    ):
+        auth = {**_BYOK_AUTH, "user_id": TEST_SUB, "clerk_session_token": "expired-or-garbage"}
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            err = ws.receive_json()
+            assert err["type"] == "error"
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_json()
+            assert exc.value.code == 1008
+        assert _row_count(temp_db, "sessions") == 0
+
+    def test_token_only_verified_user_borrows_env_key(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+    ):
+        # No BYOK key: the operator's env key resolves off the verified id.
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setenv("OPENAI_API_KEY", "operator-key")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "operator-key")
+        priv, _ = rsa_keypair
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "clerk_session_token": _make_token(priv)}))
+            ok = _drain_until(ws, "auth_success")
+            assert ok["session_id"]
+            assert ok["free_trial"] is False
 
 
 # ── Anonymous free trial ─────────────────────────────────────────────────────

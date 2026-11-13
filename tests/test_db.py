@@ -131,6 +131,33 @@ class TestGetOrCreateSession:
         b = await db_module.get_or_create_session("AAPL", USER_B)
         assert a != b
 
+    async def _insert_sessions(self, rows):
+        db = await db_module.get_db()
+        for session_id, created_at in rows:
+            await db.execute(
+                "INSERT INTO sessions (id, ticker, user_id, created_at) VALUES (?, 'AAPL', ?, ?)",
+                (session_id, USER_A, created_at),
+            )
+        await db.commit()
+
+    async def test_returns_most_recently_created_of_several(self, fresh_db):
+        """Legacy data may hold several sessions per (ticker, user); resume the newest,
+        regardless of insertion order or id ordering."""
+        await self._insert_sessions([
+            ("mid", "2026-01-02 00:00:00"),
+            ("newest", "2026-01-03 00:00:00"),
+            ("oldest", "2026-01-01 00:00:00"),
+        ])
+        assert await db_module.get_or_create_session("AAPL", USER_A) == "newest"
+
+    async def test_created_at_tie_prefers_last_inserted(self, fresh_db):
+        """created_at has 1-second resolution, so ties fall back to insertion order."""
+        await self._insert_sessions([
+            ("zzz-first", "2026-01-01 00:00:00"),
+            ("aaa-second", "2026-01-01 00:00:00"),
+        ])
+        assert await db_module.get_or_create_session("AAPL", USER_A) == "aaa-second"
+
 
 # ---------------------------------------------------------------------------
 # get_session_by_ticker
@@ -148,6 +175,25 @@ class TestGetSessionByTicker:
         assert result is not None
         assert result["id"] == session_id
         assert result["ticker"] == "GOOG"
+
+    async def test_returns_most_recently_created_and_agrees_with_resume(self, fresh_db):
+        """REST lookup must pick the same session the WS resume does: newest wins,
+        with insertion order breaking created_at ties."""
+        db = await db_module.get_db()
+        for session_id, created_at in [
+            ("mid", "2026-01-02 00:00:00"),
+            ("tie-first", "2026-01-03 00:00:00"),
+            ("tie-last", "2026-01-03 00:00:00"),
+            ("oldest", "2026-01-01 00:00:00"),
+        ]:
+            await db.execute(
+                "INSERT INTO sessions (id, ticker, user_id, created_at) VALUES (?, 'AAPL', ?, ?)",
+                (session_id, USER_A, created_at),
+            )
+        await db.commit()
+        result = await db_module.get_session_by_ticker("AAPL", USER_A)
+        assert result["id"] == "tie-last"
+        assert await db_module.get_or_create_session("AAPL", USER_A) == "tie-last"
 
     async def test_case_insensitive_lookup(self, fresh_db):
         await db_module.get_or_create_session("AMZN", USER_A)

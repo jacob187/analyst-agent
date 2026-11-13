@@ -26,8 +26,8 @@ from api.dependencies import (
     free_trial_key,
     free_trial_model_id,
     free_trial_open,
+    resolve_ws_identity,
     resolve_ws_keys,
-    verify_ws_identity,
 )
 from api.llm_concurrency import (
     LLMBudgetExceeded,
@@ -129,13 +129,15 @@ async def chat(websocket: WebSocket, ticker: str):
             await websocket.close()
             return
 
-        keys = resolve_ws_keys(auth_message)
-
-        ok, reason = verify_ws_identity(keys.user_id, auth_message)
-        if not ok:
-            await websocket.send_json({"type": "error", "message": reason or "Unauthorized"})
+        # Identity comes from the verified Clerk token (user_id is optional and
+        # must match it); resolve it first so env-key lending keys off the
+        # verified id.
+        verified_user_id, reason = resolve_ws_identity(auth_message)
+        if reason:
+            await websocket.send_json({"type": "error", "message": reason})
             await websocket.close(code=1008)
             return
+        keys = resolve_ws_keys(auth_message, user_id=verified_user_id)
 
         # Anonymous (no user_id) is allowed: signed-out visitors may chat with
         # their own BYOK key, ephemerally. Persistence is sign-in-only (below).

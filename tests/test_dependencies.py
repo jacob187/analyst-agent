@@ -16,8 +16,8 @@ from api.dependencies import (
     free_trial_key,
     free_trial_model_id,
     get_api_keys,
+    resolve_ws_identity,
     resolve_ws_keys,
-    verify_ws_identity,
 )
 
 
@@ -383,6 +383,213 @@ class TestClerkRestVerification:
         assert result.user_id is None
 
 
+class TestTokenIsIdentityRest:
+    """With Clerk enabled, a verified token alone identifies the caller."""
+
+    @pytest.mark.eval_unit
+    async def test_token_alone_yields_user_id(self, clerk_env, rsa_keypair):
+        priv, _ = rsa_keypair
+        result = await get_api_keys(x_user_id=None, x_clerk_session_token=_make_token(priv))
+        assert result.user_id == TEST_SUB
+
+    @pytest.mark.eval_unit
+    async def test_token_alone_verified_user_inherits_env_key(
+        self, clerk_env, rsa_keypair, monkeypatch
+    ):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        priv, _ = rsa_keypair
+        result = await get_api_keys(
+            x_google_api_key=None, x_openai_api_key=None,
+            x_anthropic_api_key=None, x_tavily_api_key=None,
+            x_user_id=None, x_clerk_session_token=_make_token(priv),
+        )
+        assert result.google_api_key == "env-key"
+        assert result.is_operator_paid("google_genai") is True
+
+    @pytest.mark.eval_unit
+    async def test_invalid_token_alone_degrades_to_anonymous(self, clerk_env, caplog):
+        # Session tokens are short-lived; an expired one must not break public
+        # endpoints. Failure is logged (never the token itself).
+        with caplog.at_level("INFO", logger="api.dependencies"):
+            result = await get_api_keys(x_user_id=None, x_clerk_session_token="not-a-jwt")
+        assert result.user_id is None
+        assert any("failed verification" in r.message for r in caplog.records)
+        assert all("not-a-jwt" not in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.eval_unit
+    async def test_expired_token_alone_degrades_to_anonymous(self, clerk_env, rsa_keypair):
+        priv, _ = rsa_keypair
+        token = _make_token(priv, exp_delta=-60)
+        result = await get_api_keys(x_user_id=None, x_clerk_session_token=token)
+        assert result.user_id is None
+
+    @pytest.mark.eval_unit
+    async def test_invalid_token_with_user_id_rejected(self, clerk_env):
+        with pytest.raises(HTTPException) as exc:
+            await get_api_keys(x_user_id=TEST_SUB, x_clerk_session_token="not-a-jwt")
+        assert exc.value.status_code == 401
+
+    @pytest.mark.eval_unit
+    async def test_invalid_token_alone_gets_no_env_key(self, clerk_env, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        result = await get_api_keys(
+            x_google_api_key=None, x_openai_api_key=None,
+            x_anthropic_api_key=None, x_tavily_api_key=None,
+            x_user_id=None, x_clerk_session_token="not-a-jwt",
+        )
+        assert result.google_api_key is None
+
+    @pytest.mark.eval_unit
+    async def test_legacy_uuid_user_id_conflicts_with_token(self, clerk_env, rsa_keypair):
+        priv, _ = rsa_keypair
+        with pytest.raises(HTTPException) as exc:
+            await get_api_keys(
+                x_user_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                x_clerk_session_token=_make_token(priv),
+            )
+        assert exc.value.status_code == 401
+
+    @pytest.mark.eval_unit
+    async def test_auth_disabled_ignores_token_and_keeps_user_id(
+        self, clerk_env, monkeypatch
+    ):
+        monkeypatch.setenv("DISABLE_AUTH", "true")
+        result = await get_api_keys(x_user_id=TEST_SUB, x_clerk_session_token="whatever")
+        assert result.user_id == TEST_SUB
+        result = await get_api_keys(x_user_id=None, x_clerk_session_token="whatever")
+        assert result.user_id is None
+
+
+@pytest.fixture
+def temp_db(tmp_path, monkeypatch):
+    """Throwaway SQLite file with the schema initialised (real DB, no mocks)."""
+    import asyncio
+
+    import api.db as db_module
+
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "deps.db")
+    monkeypatch.setattr(db_module, "_db", None)
+    asyncio.run(db_module.init_db())
+    yield db_module
+    asyncio.run(db_module.close_db())
+
+
+class TestTokenIdentityEndpoint:
+    """End-to-end through TestClient: `GET /sessions/{id}/messages` scopes the
+    session lookup to the user id derived from the Clerk token."""
+
+    @pytest.fixture
+    def seeded(self, temp_db):
+        import asyncio
+
+        async def _seed():
+            session_id = await temp_db.get_or_create_session("AAPL", TEST_SUB)
+            await temp_db.save_message(session_id, "user", "hello from the token user")
+            return session_id
+
+        return asyncio.run(_seed())
+
+    @pytest.fixture
+    def client(self):
+        from fastapi.testclient import TestClient
+
+        from api.main import app
+
+        return TestClient(app)
+
+    @pytest.mark.eval_unit
+    def test_token_only_returns_users_messages(self, clerk_env, rsa_keypair, seeded, client):
+        priv, _ = rsa_keypair
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-Clerk-Session-Token": _make_token(priv)},
+        )
+        assert resp.status_code == 200
+        assert [m["content"] for m in resp.json()["messages"]] == ["hello from the token user"]
+
+    @pytest.mark.eval_unit
+    def test_token_with_matching_user_id_also_works(self, clerk_env, rsa_keypair, seeded, client):
+        priv, _ = rsa_keypair
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-Clerk-Session-Token": _make_token(priv), "X-User-Id": TEST_SUB},
+        )
+        assert resp.status_code == 200
+
+    @pytest.mark.eval_unit
+    def test_user_id_disagreeing_with_token_is_401(self, clerk_env, rsa_keypair, seeded, client):
+        priv, _ = rsa_keypair
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-Clerk-Session-Token": _make_token(priv), "X-User-Id": "user_someoneElse"},
+        )
+        assert resp.status_code == 401
+
+    @pytest.mark.eval_unit
+    def test_other_users_token_cannot_read_session(self, clerk_env, rsa_keypair, seeded, client):
+        priv, _ = rsa_keypair
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-Clerk-Session-Token": _make_token(priv, sub="user_intruder")},
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.eval_unit
+    def test_invalid_token_alone_per_user_endpoint_is_422(self, clerk_env, seeded, client):
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-Clerk-Session-Token": "not-a-jwt"},
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.eval_unit
+    def test_expired_token_alone_public_endpoint_is_200(self, clerk_env, rsa_keypair, client):
+        priv, _ = rsa_keypair
+        resp = client.get(
+            "/models",
+            headers={"X-Clerk-Session-Token": _make_token(priv, exp_delta=-60)},
+        )
+        assert resp.status_code == 200
+
+    @pytest.mark.eval_unit
+    def test_invalid_token_with_user_id_is_401(self, clerk_env, seeded, client):
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-Clerk-Session-Token": "not-a-jwt", "X-User-Id": TEST_SUB},
+        )
+        assert resp.status_code == 401
+
+    @pytest.mark.eval_unit
+    def test_no_token_is_anonymous_422(self, clerk_env, seeded, client):
+        resp = client.get(f"/sessions/{seeded}/messages", params={"ticker": "AAPL"})
+        assert resp.status_code == 422
+
+    @pytest.mark.eval_unit
+    def test_user_id_without_token_is_401(self, clerk_env, seeded, client):
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-User-Id": TEST_SUB},
+        )
+        assert resp.status_code == 401
+
+    @pytest.mark.eval_unit
+    def test_auth_disabled_user_id_header_still_works(self, no_clerk_env, seeded, client):
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-User-Id": TEST_SUB},
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()["messages"]) == 1
+
+
 class TestEnvKeyGate:
     """With Clerk enabled, the operator's env keys are lent only to verified
     signed-in users — never to anonymous callers. This is the cost boundary:
@@ -490,54 +697,104 @@ class TestClerkWsVerification:
     def test_valid_token_matching_user_ok(self, clerk_env, rsa_keypair):
         priv, _ = rsa_keypair
         token = _make_token(priv)
-        ok, reason = verify_ws_identity(TEST_SUB, {"clerk_session_token": token})
-        assert ok is True
+        user_id, reason = resolve_ws_identity(
+            {"user_id": TEST_SUB, "clerk_session_token": token}
+        )
+        assert user_id == TEST_SUB
+        assert reason is None
+
+    @pytest.mark.eval_unit
+    def test_token_alone_yields_user_id(self, clerk_env, rsa_keypair):
+        # The token's verified subject is the identity; user_id is optional.
+        priv, _ = rsa_keypair
+        token = _make_token(priv)
+        user_id, reason = resolve_ws_identity({"clerk_session_token": token})
+        assert user_id == TEST_SUB
         assert reason is None
 
     @pytest.mark.eval_unit
     def test_mismatched_user_ws_rejected(self, clerk_env, rsa_keypair):
         priv, _ = rsa_keypair
         token = _make_token(priv, sub="user_other")
-        ok, reason = verify_ws_identity(TEST_SUB, {"clerk_session_token": token})
-        assert ok is False
+        user_id, reason = resolve_ws_identity(
+            {"user_id": TEST_SUB, "clerk_session_token": token}
+        )
+        assert user_id is None
         assert "match" in (reason or "").lower()
 
     @pytest.mark.eval_unit
-    def test_missing_token_ws_rejected(self, clerk_env):
-        ok, reason = verify_ws_identity(TEST_SUB, {})
-        assert ok is False
-        assert "missing" in (reason or "").lower()
+    def test_invalid_token_ws_alone_is_anonymous(self, clerk_env):
+        assert resolve_ws_identity({"clerk_session_token": "not-a-jwt"}) == (None, None)
 
     @pytest.mark.eval_unit
-    def test_ws_clerk_unconfigured_ok(self, no_clerk_env):
-        ok, reason = verify_ws_identity(TEST_SUB, {})
-        assert ok is True
+    def test_invalid_token_ws_with_user_id_rejected(self, clerk_env):
+        user_id, reason = resolve_ws_identity(
+            {"user_id": TEST_SUB, "clerk_session_token": "not-a-jwt"}
+        )
+        assert user_id is None
+        assert "invalid" in (reason or "").lower()
+
+    @pytest.mark.eval_unit
+    def test_non_string_token_ws_treated_as_absent(self, clerk_env):
+        user_id, reason = resolve_ws_identity({"clerk_session_token": 123})
+        assert user_id is None
         assert reason is None
 
     @pytest.mark.eval_unit
-    def test_ws_disable_auth_ok(self, clerk_env, monkeypatch):
+    def test_missing_token_ws_rejected(self, clerk_env):
+        user_id, reason = resolve_ws_identity({"user_id": TEST_SUB})
+        assert user_id is None
+        assert "missing" in (reason or "").lower()
+
+    @pytest.mark.eval_unit
+    def test_no_credentials_ws_is_anonymous(self, clerk_env):
+        assert resolve_ws_identity({}) == (None, None)
+
+    @pytest.mark.eval_unit
+    def test_ws_clerk_unconfigured_trusts_user_id(self, no_clerk_env):
+        user_id, reason = resolve_ws_identity({"user_id": TEST_SUB})
+        assert user_id == TEST_SUB
+        assert reason is None
+
+    @pytest.mark.eval_unit
+    def test_ws_disable_auth_trusts_user_id(self, clerk_env, monkeypatch):
         monkeypatch.setenv("DISABLE_AUTH", "true")
-        ok, reason = verify_ws_identity(TEST_SUB, {})
-        assert ok is True
+        user_id, reason = resolve_ws_identity({"user_id": TEST_SUB})
+        assert user_id == TEST_SUB
         assert reason is None
 
     @pytest.mark.eval_unit
     def test_ws_anonymous_uuid_ok_without_token(self, clerk_env):
-        # A non-Clerk id connects as anonymous (no token needed) — but the
-        # identity itself is dropped in resolve_ws_keys (see below), so this
-        # only governs whether the connection is allowed, not who it acts as.
+        # A non-Clerk id connects as anonymous (no token needed) and is
+        # dropped to None so nothing persists under an unverifiable identity.
         anon = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-        ok, reason = verify_ws_identity(anon, {})
-        assert ok is True
-        assert reason is None
+        assert resolve_ws_identity({"user_id": anon}) == (None, None)
 
     @pytest.mark.eval_unit
     def test_ws_legacy_uuid_identity_dropped(self, clerk_env):
-        # The WS path mirrors REST: a legacy UUID is unverifiable under Clerk,
-        # so resolve_ws_keys drops it to anonymous (no persistence under it).
+        # resolve_ws_keys mirrors REST: a legacy UUID is unverifiable under
+        # Clerk, so it resolves to anonymous.
         anon = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         result = resolve_ws_keys({"user_id": anon})
         assert result.user_id is None
+
+    @pytest.mark.eval_unit
+    def test_ws_keys_token_only_gets_env_key(self, clerk_env, rsa_keypair, monkeypatch):
+        # Env-key lending keys off the verified id, not the user_id field.
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        priv, _ = rsa_keypair
+        auth = {"clerk_session_token": _make_token(priv)}
+        user_id, _reason = resolve_ws_identity(auth)
+        result = resolve_ws_keys(auth, user_id=user_id)
+        assert result.user_id == TEST_SUB
+        assert result.google_api_key == "env-key"
+        assert result.is_operator_paid("google_genai") is True
+
+    @pytest.mark.eval_unit
+    def test_ws_keys_token_only_resolves_identity_itself(self, clerk_env, rsa_keypair):
+        priv, _ = rsa_keypair
+        result = resolve_ws_keys({"clerk_session_token": _make_token(priv)})
+        assert result.user_id == TEST_SUB
 
 
 class TestUserIdRegexClerkFormat:
