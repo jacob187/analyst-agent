@@ -122,6 +122,7 @@ async def run_question(builder: Builder, question: Question, model_id: str, time
         output_tokens=metrics.output_tokens,
         total_tokens=metrics.total_tokens,
         llm_calls_without_usage=metrics.llm_calls_without_usage,
+        spans_outside_root_trace=metrics.spans_outside_root_trace,
         latency_s=round(metrics.latency_s, 3),
         llm_time_s=round(metrics.llm_time_s, 3),
         tool_calls=metrics.tool_calls,

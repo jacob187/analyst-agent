@@ -105,16 +105,24 @@ class TestExtractMetrics:
                 raise RuntimeError("boom")
         assert extract_metrics(exporter.get_finished_spans()).errors == []
 
-    def test_only_the_roots_trace_is_counted(self):
+    def test_spans_in_another_trace_still_count_and_are_flagged(self):
+        # A worker thread that does not copy contextvars starts its own trace.
         tracer, exporter = _new_tracer()
-        with tracer.start_as_current_span("unrelated"):
-            with tracer.start_as_current_span("ChatModel", attributes=_llm(999, 999, 1998)):
+        with tracer.start_as_current_span("orphan-chain"):
+            with tracer.start_as_current_span("ChatModel", attributes=_llm(999, 1, 1000)):
+                pass
+            with tracer.start_as_current_span("orphan_tool", attributes={KIND: "TOOL"}):
                 pass
         with tracer.start_as_current_span(ROOT_SPAN_NAME):
             with tracer.start_as_current_span("ChatModel", attributes=_llm(1, 2, 3)):
                 pass
         m = extract_metrics(exporter.get_finished_spans())
-        assert (m.llm_calls, m.input_tokens, m.output_tokens, m.total_tokens) == (1, 1, 2, 3)
+        assert (m.llm_calls, m.input_tokens, m.output_tokens, m.total_tokens) == (2, 1000, 3, 1003)
+        assert [t.name for t in m.tool_calls] == ["orphan_tool"]
+        assert m.spans_outside_root_trace == 2
+
+    def test_nothing_is_outside_the_root_trace_normally(self):
+        assert extract_metrics(_record_question()).spans_outside_root_trace == 0
 
     def test_no_spans_is_all_zero(self):
         m = extract_metrics([])

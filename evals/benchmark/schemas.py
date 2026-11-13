@@ -54,6 +54,9 @@ class QuestionResult(BaseModel):
     # LLM calls whose span carried no token counts. When > 0 the token totals
     # are a lower bound and the cost is reported as unknown.
     llm_calls_without_usage: int = 0
+    # LLM/TOOL spans that ran outside the question's trace (thread pools that do
+    # not copy contextvars). They are included in every count above.
+    spans_outside_root_trace: int = 0
     latency_s: float = 0.0
     llm_time_s: float = 0.0
     tool_calls: list[ToolCall] = Field(default_factory=list)

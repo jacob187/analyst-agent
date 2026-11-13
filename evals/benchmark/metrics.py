@@ -29,6 +29,7 @@ class SpanMetrics(BaseModel):
     output_tokens: int = 0
     total_tokens: int = 0
     llm_calls_without_usage: int = 0
+    spans_outside_root_trace: int = 0
     latency_s: float = 0.0
     llm_time_s: float = 0.0
     tool_calls: list[ToolCall] = Field(default_factory=list)
@@ -56,8 +57,11 @@ def _error_text(span: ReadableSpan) -> str:
 def extract_metrics(spans: Iterable[ReadableSpan]) -> SpanMetrics:
     """LLM-call count, token usage, latency, ordered tool calls and span errors.
 
-    * Only spans in the ``benchmark.question`` root's trace are counted (all of
-      them when there is no root).
+    * Pass the spans captured for ONE question. All of them are counted, including
+      LLM/TOOL spans outside the ``benchmark.question`` root's trace: calls made on
+      worker threads that do not copy contextvars (e.g. a bare ThreadPoolExecutor)
+      start their own trace but still belong to the question. Those are tallied in
+      ``spans_outside_root_trace`` so the gap stays visible.
     * Latency is the root span's duration; without a root, the spread from the
       first start to the last end.
     * An LLM span with none of the ``llm.token_count.*`` attributes is counted
@@ -65,12 +69,7 @@ def extract_metrics(spans: Iterable[ReadableSpan]) -> SpanMetrics:
     """
     spans = list(spans)
     roots = [s for s in spans if s.name == ROOT_SPAN_NAME and s.parent is None]
-    if roots:
-        root = roots[-1]
-        trace_id = root.context.trace_id
-        spans = [s for s in spans if s.context.trace_id == trace_id]
-    else:
-        root = None
+    root = roots[-1] if roots else None
     if not spans:
         return SpanMetrics()
 
@@ -87,6 +86,8 @@ def extract_metrics(spans: Iterable[ReadableSpan]) -> SpanMetrics:
     for span in spans:
         attrs = span.attributes or {}
         kind = attrs.get(_KIND)
+        if root is not None and kind in (_LLM, _TOOL) and span.context.trace_id != root.context.trace_id:
+            metrics.spans_outside_root_trace += 1
         if kind == _LLM:
             metrics.llm_calls += 1
             metrics.llm_time_s += _seconds(span)

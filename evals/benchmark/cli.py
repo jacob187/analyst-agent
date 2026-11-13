@@ -12,7 +12,8 @@ from pathlib import Path
 from evals.benchmark.common import DEFAULT_TIMEOUT_S, BenchmarkError, prepare_environment, provider_api_key, resolve_model
 from evals.benchmark.questions import DEFAULT_QUESTIONS_PATH, load_questions
 
-DEFAULT_REPORT_DIR = Path("benchmark_reports")
+# Anchored to the repo root (gitignored), wherever the command is run from.
+DEFAULT_REPORT_DIR = Path(__file__).resolve().parents[2] / "benchmark_reports"
 
 
 def _ids(value: str) -> list[str]:
@@ -48,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     report = sub.add_parser("report", help="render a PDF for the human owner")
     report.add_argument("--runs", type=Path, nargs="+", required=True)
     report.add_argument("--judgement", type=Path, help="judgement directory")
-    report.add_argument("--out", type=Path, help=f"PDF file (default: {DEFAULT_REPORT_DIR}/benchmark-<timestamp>.pdf)")
+    report.add_argument("--out", type=Path, help="PDF file (default: benchmark_reports/benchmark-<timestamp>.pdf in the repo root)")
     return parser
 
 

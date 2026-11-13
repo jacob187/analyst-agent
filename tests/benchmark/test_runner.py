@@ -45,7 +45,26 @@ class _HangingAgent:
         yield {"type": "response", "message": "too late"}
 
 
+class _ThreadPoolAgent:
+    """Calls its LLM from a plain executor thread, which does not copy contextvars,
+    like sec_tools._tool_all_summaries: the LLM span lands in a separate trace."""
+
+    async def stream(self, inputs):
+        import asyncio
+
+        from langchain_core.messages import AIMessage
+
+        from tests.benchmark.helpers import _ScriptedChatModel
+
+        usage = {"input_tokens": 40, "output_tokens": 5, "total_tokens": 45}
+        llm = _ScriptedChatModel(responses=[AIMessage(content="from a thread", usage_metadata=usage)])
+        reply = await asyncio.get_running_loop().run_in_executor(None, llm.invoke, "hi")
+        yield {"type": "response", "message": reply.content}
+
+
 async def _build(ticker: str, model_id: str):
+    if ticker == "THREAD":
+        return _ThreadPoolAgent()
     if ticker == "BUILD":
         raise RuntimeError(f"cannot build agent, key={SECRET}")
     if ticker == "HALF":
@@ -156,6 +175,15 @@ class TestRun:
         assert result.llm_calls_without_usage == 2
         assert result.total_tokens == 0
 
+    async def test_llm_calls_on_threads_outside_the_question_trace_are_still_counted(self, fake_arch, model, tmp_path):
+        out = tmp_path / "run"
+        await run_benchmark(fake_arch, model, [_q("threaded", "THREAD")], out, progress=lambda _m: None)
+        result = load_run(out).questions["threaded"]
+        assert result.status == "ok"
+        assert result.llm_calls == 1
+        assert (result.input_tokens, result.output_tokens) == (40, 5)
+        assert result.spans_outside_root_trace == 1
+
     async def test_only_runs_the_selected_ids(self, fake_arch, model, tmp_path):
         questions = [_q("q1", "AAPL"), _q("q2", "NVDA"), _q("q3", "JPM")]
         out = tmp_path / "run"
@@ -207,7 +235,8 @@ class TestPreflight:
 
 
 class TestCliErrors:
-    def test_unknown_model_exits_2_with_a_clear_message(self, tmp_path, capsys):
+    def test_unknown_model_exits_2_with_a_clear_message(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr("evals.benchmark.cli.prepare_environment", lambda: None)  # no .env reload
         code = main(["run", "--graph", "current", "--model", "no-such-model", "--out", str(tmp_path / "r")])
         assert code == 2
         assert "Unknown model 'no-such-model'" in capsys.readouterr().err

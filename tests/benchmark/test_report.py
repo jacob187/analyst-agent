@@ -2,11 +2,9 @@
 
 import re
 import zlib
-from pathlib import Path
-
 import pytest
 
-from evals.benchmark.cli import main
+from evals.benchmark.cli import DEFAULT_REPORT_DIR, main
 from evals.benchmark.judge import judge_runs
 from evals.benchmark.report import flatten_markdown, pdf_text, render_report, write_report
 from evals.benchmark.runs import load_run, write_model
@@ -122,11 +120,16 @@ class TestReport:
         assert code == 0
         assert out.read_bytes().startswith(b"%PDF-")
 
-    async def test_cli_report_defaults_to_benchmark_reports_folder(self, tmp_path, monkeypatch):
+    async def test_cli_report_defaults_to_the_gitignored_benchmark_reports_folder(self, tmp_path, monkeypatch):
+        assert DEFAULT_REPORT_DIR.name == "benchmark_reports"
+        assert (DEFAULT_REPORT_DIR.parent / "pyproject.toml").exists()  # anchored at the repo root
+        assert "benchmark_reports/" in (DEFAULT_REPORT_DIR.parent / ".gitignore").read_text().split()
+
+        redirected = tmp_path / "benchmark_reports"  # keep the test out of the real folder
+        monkeypatch.setattr("evals.benchmark.cli.DEFAULT_REPORT_DIR", redirected)
         run_dir = write_run(tmp_path, "run-a")
-        monkeypatch.chdir(tmp_path)
         assert main(["report", "--runs", str(run_dir)]) == 0
-        (pdf,) = Path("benchmark_reports").glob("benchmark-*.pdf")
+        (pdf,) = redirected.glob("benchmark-*.pdf")
         assert pdf.read_bytes().startswith(b"%PDF-")
 
     async def test_write_report_creates_parent_dirs(self, tmp_path):
