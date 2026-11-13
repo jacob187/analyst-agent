@@ -147,7 +147,9 @@ async def chat(websocket: WebSocket, ticker: str):
         # Identity comes from the verified Clerk token (user_id is optional and
         # must match it); resolve it first so env-key lending keys off the
         # verified id.
-        verified_user_id, reason = resolve_ws_identity(auth_message)
+        # Off the event loop: verification can block on a JWKS fetch. The id
+        # is then passed to resolve_ws_keys, which doesn't verify again.
+        verified_user_id, reason = await asyncio.to_thread(resolve_ws_identity, auth_message)
         if reason:
             await websocket.send_json({"type": "error", "message": reason})
             await websocket.close(code=1008)
