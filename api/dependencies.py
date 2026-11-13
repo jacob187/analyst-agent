@@ -339,10 +339,15 @@ async def get_api_keys(
 ) -> ApiKeys:
     """FastAPI dependency that resolves API keys from headers → env vars."""
     # Off the event loop: Clerk verification can block on a JWKS fetch when
-    # the key cache is cold or the signing key rotated.
-    user_id = await asyncio.to_thread(
-        _verify_user_identity, x_user_id, x_clerk_session_token
-    )
+    # the key cache is cold or the signing key rotated. Without a token
+    # nothing is verified, so skip the thread hop (it shares the default
+    # executor with long-running LLM work).
+    if x_clerk_session_token:
+        user_id = await asyncio.to_thread(
+            _verify_user_identity, x_user_id, x_clerk_session_token
+        )
+    else:
+        user_id = _verify_user_identity(x_user_id, None)
     allow_env = _env_keys_allowed(user_id)
     google_key, google_source = _resolve_key(x_google_api_key, "GOOGLE_API_KEY", allow_env)
     openai_key, openai_source = _resolve_key(x_openai_api_key, "OPENAI_API_KEY", allow_env)
