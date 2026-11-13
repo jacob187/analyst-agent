@@ -449,10 +449,13 @@ async def chat(websocket: WebSocket, ticker: str):
                                     },
                                 ):
                                     if not await _safe_send(websocket, event):
-                                        return  # client disconnected mid-stream
+                                        # Client gone mid-stream: not a server error.
+                                        span.set_attribute("client.disconnected", True)
+                                        return
                                     if event["type"] == "response":
                                         full_response = event["message"]
                             except WebSocketDisconnect:
+                                span.set_attribute("client.disconnected", True)
                                 return
                             except LLMTimeoutError as e:
                                 _record_span_error(span, e)
