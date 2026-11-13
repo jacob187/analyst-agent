@@ -8,6 +8,7 @@ import os
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from langchain_core.messages import HumanMessage, AIMessage
+from opentelemetry.trace import Span, Status, StatusCode
 
 from api.db import (
     get_or_create_session, get_session,
@@ -35,6 +36,7 @@ from api.llm_concurrency import (
     check_and_charge_budget,
 )
 from api.rate_limit import check_rate_limit, client_ip
+from api.tracing import get_tracer
 from api.validators import TICKER_RE
 from agents.graph.analyst_graph import LLMTimeoutError
 from agents.model_registry import (
@@ -59,6 +61,18 @@ FREE_TRIAL_AT_CAPACITY = (
     "The free trial is at capacity for today. "
     "Sign in or add your own API key in Settings to continue."
 )
+
+
+def _user_hash(user_id: str | None) -> str | None:
+    """Stable non-reversible tag for correlating a user's runs without exposing the id."""
+    if not user_id:
+        return None
+    return hashlib.sha256(user_id.encode()).hexdigest()[:16]
+
+
+def _record_span_error(span: Span, exc: Exception) -> None:
+    span.record_exception(exc)
+    span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
 
 
 async def _safe_send(websocket: WebSocket, data: dict) -> bool:
@@ -391,42 +405,57 @@ async def chat(websocket: WebSocket, ticker: str):
                     conversation_history.append(HumanMessage(content=user_query))
 
                     full_response = ""
-                    try:
-                        async for event in agent.stream(
-                            {"messages": conversation_history},
-                            config={
-                                "metadata": {
-                                    "session_id": session_id,
-                                    "ticker": ticker,
-                                    "user_id": user_id,
+                    span_attributes = {
+                        "ticker": ticker,
+                        "model_id": model_id,
+                        "free_trial": free_trial,
+                    }
+                    if session_id:
+                        span_attributes["session_id"] = session_id
+                    with get_tracer().start_as_current_span(
+                        "chat.query", attributes=span_attributes
+                    ) as span:
+                        try:
+                            async for event in agent.stream(
+                                {"messages": conversation_history},
+                                config={
+                                    "metadata": {
+                                        "session_id": session_id,
+                                        "ticker": ticker,
+                                        # Hashed: run metadata is exported verbatim as a
+                                        # trace attribute, and raw user ids must not leave.
+                                        "user_hash": _user_hash(user_id),
+                                    },
+                                    "run_name": f"chat:{ticker}",
                                 },
-                                "run_name": f"chat:{ticker}",
-                            },
-                        ):
-                            if not await _safe_send(websocket, event):
-                                return  # client disconnected mid-stream
-                            if event["type"] == "response":
-                                full_response = event["message"]
-                    except WebSocketDisconnect:
-                        return
-                    except LLMTimeoutError as e:
-                        logger.warning("LLM timeout for %s: %s", ticker, e)
-                        await _safe_send(websocket, {
-                            "type": "error",
-                            "message": "The model took too long to respond. Please try a simpler query or try again.",
-                        })
-                    except LLMConcurrencyExceeded:
-                        logger.warning("LLM dispatch pool saturated for %s", ticker)
-                        await _safe_send(websocket, {
-                            "type": "error",
-                            "message": "Server busy — please retry shortly.",
-                        })
-                    except Exception as e:
-                        logger.error("Error processing query for %s: %s", ticker, e, exc_info=True)
-                        await _safe_send(websocket, {
-                            "type": "error",
-                            "message": "Error processing your query. Please try again."
-                        })
+                            ):
+                                if not await _safe_send(websocket, event):
+                                    return  # client disconnected mid-stream
+                                if event["type"] == "response":
+                                    full_response = event["message"]
+                        except WebSocketDisconnect:
+                            return
+                        except LLMTimeoutError as e:
+                            _record_span_error(span, e)
+                            logger.warning("LLM timeout for %s: %s", ticker, e)
+                            await _safe_send(websocket, {
+                                "type": "error",
+                                "message": "The model took too long to respond. Please try a simpler query or try again.",
+                            })
+                        except LLMConcurrencyExceeded as e:
+                            _record_span_error(span, e)
+                            logger.warning("LLM dispatch pool saturated for %s", ticker)
+                            await _safe_send(websocket, {
+                                "type": "error",
+                                "message": "Server busy — please retry shortly.",
+                            })
+                        except Exception as e:
+                            _record_span_error(span, e)
+                            logger.error("Error processing query for %s: %s", ticker, e, exc_info=True)
+                            await _safe_send(websocket, {
+                                "type": "error",
+                                "message": "Error processing your query. Please try again."
+                            })
 
                     if full_response:
                         conversation_history.append(AIMessage(content=full_response))

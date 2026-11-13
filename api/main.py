@@ -44,6 +44,7 @@ from api.routes.chat import router as chat_router
 from api.routes.watchlist import router as watchlist_router
 from api.routes.models import router as models_router
 from api.routes.company import router as company_router
+from api.tracing import setup_tracing, shutdown_tracing
 
 logger = logging.getLogger(__name__)
 
@@ -117,9 +118,11 @@ async def lifespan(app: FastAPI):
     check_production_auth_config()
     check_production_sec_config()
     set_sec_identity()
+    tracing_provider = setup_tracing()
     await init_db()
     yield
     await close_db()
+    shutdown_tracing(tracing_provider)
 
 
 app = FastAPI(title="Analyst Agent API", lifespan=lifespan)
