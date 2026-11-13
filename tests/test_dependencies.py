@@ -887,6 +887,54 @@ class TestIsOperatorPaid:
         assert keys.is_operator_paid("not_a_real_provider") is False
 
 
+class TestKeyForModel:
+    """The operator's env key pays only for operator_lendable models (when
+    Clerk is enabled); a caller's own key runs any model."""
+
+    @staticmethod
+    def _models():
+        from agents.model_registry import get_model
+        return get_model("gemini-3.6-flash"), get_model("gemini-3.1-pro-preview")
+
+    @pytest.mark.eval_unit
+    def test_env_key_withheld_for_non_lendable_model(self, clerk_env, rsa_keypair, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        priv, _ = rsa_keypair
+        keys = resolve_ws_keys({"clerk_session_token": _make_token(priv)})
+        lendable, non_lendable = self._models()
+        assert keys.user_id == TEST_SUB
+        assert keys.key_for_model(lendable) == "env-key"
+        assert keys.key_for_model(non_lendable) is None
+
+    @pytest.mark.eval_unit
+    def test_own_key_runs_non_lendable_model(self, clerk_env, rsa_keypair, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        priv, _ = rsa_keypair
+        keys = resolve_ws_keys(
+            {"clerk_session_token": _make_token(priv), "google_api_key": "user-key"}
+        )
+        _, non_lendable = self._models()
+        assert keys.key_for_model(non_lendable) == "user-key"
+
+    @pytest.mark.eval_unit
+    def test_self_host_env_key_runs_any_model(self, monkeypatch):
+        # Clerk unconfigured (conftest default): the env keys are the
+        # operator's own, so the allowlist doesn't apply.
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        keys = resolve_ws_keys({})
+        _, non_lendable = self._models()
+        assert keys.key_for_model(non_lendable) == "env-key"
+
+    @pytest.mark.eval_unit
+    def test_auth_disabled_env_key_runs_any_model(self, monkeypatch):
+        monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
+        monkeypatch.setenv("DISABLE_AUTH", "true")
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        keys = resolve_ws_keys({})
+        _, non_lendable = self._models()
+        assert keys.key_for_model(non_lendable) == "env-key"
+
+
 class TestFreeTrial:
     """Anonymous visitors may spend the operator's key for exactly one light
     model (the free trial), independent of the Clerk-gated env-key resolver.

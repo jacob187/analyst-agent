@@ -1,6 +1,6 @@
 """Process-wide LLM dispatch concurrency cap + per-user daily budget.
 
-Two independent primitives:
+Primitives:
 
 - `llm_slot()` — async context manager backed by a module-level
   `asyncio.Semaphore`. Bounds the number of concurrent in-flight LLM
@@ -13,7 +13,13 @@ Two independent primitives:
   with `ApiKeys.is_operator_paid(provider)` so BYOK requests aren't
   charged against the operator's budget.
 
-Both are env-tunable. Tests override the module constants via
+- Per-call charging: `ensure_budget_available(user_id)` refuses a request up
+  front once today's usage is at/over the budget; after that each LLM call is
+  charged as it happens — `LLMCallCharger` (a callback on the run config) for
+  agent runs, `charge_llm_call` for single direct analyses. The budget unit
+  is one LLM call, not one request.
+
+The cap and budget are env-tunable. Tests override the module constants via
 `monkeypatch.setattr` and call `_rebuild_semaphore()` to pick up a new
 size.
 """
@@ -21,11 +27,16 @@ size.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager
+from typing import Any
 
-from api.db import increment_llm_usage
+from langchain_core.callbacks import BaseCallbackHandler
+
+from api.db import get_llm_usage, increment_llm_usage
 
 logger = logging.getLogger(__name__)
 
@@ -103,3 +114,99 @@ async def check_and_charge_budget(user_id: str | None) -> None:
     count = await increment_llm_usage(user_id)
     if count > LLM_DAILY_BUDGET:
         raise LLMBudgetExceeded(LLM_DAILY_BUDGET)
+
+
+async def ensure_budget_available(user_id: str | None) -> None:
+    """Raise `LLMBudgetExceeded` if user_id has already spent today's budget.
+
+    The pre-flight for per-call charging: a request is refused only when
+    usage is already at or over `LLM_DAILY_BUDGET`; once admitted it is
+    charged per LLM call (`charge_llm_call` / `LLMCallCharger`) and may
+    finish past the line. Concurrent requests can each pass this check, so
+    the overshoot is bounded by the calls of the requests in flight.
+    No-op for anonymous traffic.
+    """
+    if user_id is None:
+        return
+    if await get_llm_usage(user_id) >= LLM_DAILY_BUDGET:
+        raise LLMBudgetExceeded(LLM_DAILY_BUDGET)
+
+
+async def charge_llm_call(user_id: str) -> None:
+    """Charge one LLM call to user_id's daily usage."""
+    await increment_llm_usage(user_id)
+
+
+class LLMCallCharger(BaseCallbackHandler):
+    """LangChain callback that charges one budget unit per LLM call started.
+
+    Attach it through the run config so every chat-model / LLM start inside
+    the run is counted — graph nodes, sync tools in worker threads, and
+    `asyncio.to_thread` calls alike (they inherit the run's callbacks via
+    contextvars)::
+
+        charger = LLMCallCharger(user_id)
+        try:
+            async for event in agent.stream(..., config={"callbacks": [charger]}):
+                ...
+        finally:
+            await charger.settle()
+
+    Sync on purpose: LangChain runs an async handler fired from a worker
+    thread on a throwaway event loop, where the shared aiosqlite connection
+    doesn't belong. Instead each charge is scheduled onto the loop the
+    charger was created on, from whichever thread the call started on.
+    LLM calls on code paths that drop contextvars (a bare
+    ThreadPoolExecutor) don't see the run's callbacks and go uncharged.
+
+    Must be constructed on the running event loop.
+    """
+
+    run_inline = True  # fire on the calling thread; scheduling is ours
+
+    def __init__(self, user_id: str) -> None:
+        self.user_id = user_id
+        self.calls = 0
+        self._loop = asyncio.get_running_loop()
+        self._lock = threading.Lock()
+        self._pending: list[asyncio.Future | concurrent.futures.Future] = []
+
+    def _charge(self) -> None:
+        try:
+            try:
+                on_loop = asyncio.get_running_loop() is self._loop
+            except RuntimeError:
+                on_loop = False
+            coro = charge_llm_call(self.user_id)
+            future: asyncio.Future | concurrent.futures.Future
+            if on_loop:
+                future = self._loop.create_task(coro)
+            else:
+                future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+            with self._lock:
+                self.calls += 1
+                self._pending.append(future)
+        except Exception:
+            # Never break the LLM call over accounting.
+            logger.exception("Failed to schedule LLM budget charge")
+
+    def on_llm_start(self, serialized: dict[str, Any], prompts: list[str], **kwargs: Any) -> None:
+        self._charge()
+
+    def on_chat_model_start(
+        self, serialized: dict[str, Any], messages: list[list[Any]], **kwargs: Any
+    ) -> None:
+        self._charge()
+
+    async def settle(self) -> int:
+        """Await every scheduled charge; return the number of calls counted."""
+        with self._lock:
+            pending = [
+                asyncio.wrap_future(f) if isinstance(f, concurrent.futures.Future) else f
+                for f in self._pending
+            ]
+        results = await asyncio.gather(*pending, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.error("LLM budget charge failed for a call: %r", result)
+        return self.calls

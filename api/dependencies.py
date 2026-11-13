@@ -15,7 +15,8 @@ User identity gates persistence and operator-paid LLM access:
     Clerk session token (REST: `X-Clerk-Session-Token`; WS:
     `clerk_session_token`). `X-User-Id` / `user_id` is optional and, if sent,
     must equal the token's subject. Verified users unlock DB persistence and
-    may use the operator's env keys (bounded by the per-user daily budget).
+    may use the operator's env keys for `operator_lendable` models (bounded
+    by the per-user daily budget); other models need their own key.
 
 If Clerk is unconfigured (local dev / self-host) verification is skipped and
 the single operator is trusted with env keys. `DISABLE_AUTH=true` does the same.
@@ -36,7 +37,7 @@ from typing import Any
 
 from fastapi import Header, HTTPException
 
-from agents.model_registry import get_free_tier_model
+from agents.model_registry import ModelDef, get_free_tier_model
 from api.db import get_llm_usage
 from api.clerk_auth import is_auth_disabled, is_clerk_enabled, verify_clerk_token
 from api.validators import USER_ID_RE
@@ -159,6 +160,20 @@ def _env_keys_allowed(user_id: str | None) -> bool:
     return _trusted_user_id(user_id) is not None
 
 
+def operator_may_lend(model: ModelDef) -> bool:
+    """Whether the operator's env key may pay for this model.
+
+    With Clerk enabled (a hosted deploy) only models flagged
+    `operator_lendable` in models.json run on the operator's key; any other
+    model needs the caller's own key. Self-host / local dev (Clerk
+    unconfigured or DISABLE_AUTH=true) is exempt: the env keys belong to the
+    person running the server, so they may use any model with them.
+    """
+    if is_auth_disabled() or not is_clerk_enabled():
+        return True
+    return model.operator_lendable
+
+
 def _resolve_identity(
     raw_user_id: str | None, token: str | None
 ) -> tuple[str | None, str | None]:
@@ -252,6 +267,17 @@ class ApiKeys:
         if field_name is None:
             return None
         return getattr(self, field_name, None)
+
+    def key_for_model(self, model: ModelDef) -> str | None:
+        """Return the key that may run `model`, or None.
+
+        The caller's own (BYOK) key works for every model; the operator's
+        env key only for models it may lend (`operator_may_lend`).
+        """
+        key = self.get_provider_key(model.provider)
+        if key and self.is_operator_paid(model.provider) and not operator_may_lend(model):
+            return None
+        return key
 
     def require_provider_key(self, provider: str) -> str:
         """Return the API key for a provider, or raise ValueError."""
