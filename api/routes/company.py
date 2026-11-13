@@ -679,8 +679,9 @@ async def get_company_filings(
     # Key is optional: cached analyses are served to anyone. A key is only
     # needed to generate a fresh analysis on cache miss (BYOK, or the operator
     # env key for signed-in users on a model it may lend — otherwise the
-    # caller is keyless here and misses report needs_key). Keyless callers skip the expensive raw
-    # section extraction — only metadata (the cache key) is fetched.
+    # caller is keyless here and misses report needs_key). Keyless callers
+    # skip the expensive raw section extraction — only metadata (the cache
+    # key) is fetched.
     api_key = keys.key_for_model(model)
 
     # Step 1: Fetch filing data from EDGAR (no LLM, ~1-3s). Raw section text is
