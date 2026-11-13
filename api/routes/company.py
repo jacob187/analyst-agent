@@ -400,8 +400,8 @@ def _plan_sections(filing_data: dict[str, Any]) -> list[dict[str, Any]]:
     """Ordered list of analyzable sections from fetched filing data — the single
     source of truth for both endpoints (#10).
 
-    Each entry: ``{section, key, form, accession, atype, input}``. ``section``/
-    ``key`` place the result in the response; ``atype`` is the cache
+    Each entry: ``{section, key, form, accession, atype, input, cache_only}``.
+    ``section``/``key`` place the result in the response; ``atype`` is the cache
     analysis_type (== key except 8-K, where atype is the 8-K kind). Conditional
     10-K sections (Item 1/1C/3/7A, XBRL) appear only when their raw text was
     extracted and found, so a keyless fetch (``fetch_raw=False`` → empty raw)
@@ -472,6 +472,28 @@ def _plan_sections(filing_data: dict[str, Any]) -> list[dict[str, Any]]:
         plan.append({"section": "eightk", "key": "analysis", "form": "8-K", "accession": acc, "atype": kind, "input": raw, "cache_only": unusable})
 
     return plan
+
+
+async def _reported_eightk_kind(
+    ticker: str, filing_data: dict[str, Any], plan: list[dict[str, Any]],
+) -> str:
+    """The 8-K kind both endpoints report — single source of truth so the JSON
+    and SSE responses cannot drift.
+
+    An 8-K planned ``cache_only`` (item text failed to extract) is reported as
+    ``"none"`` unless a cached analysis exists for it; otherwise clients render
+    an empty 8-K heading that no section will ever fill.
+    """
+    kind = filing_data.get("eightk", {}).get("kind", "none")
+    entry = next((p for p in plan if p["section"] == "eightk"), None)
+    if entry is not None and entry["cache_only"]:
+        from api.db import get_filing_analysis
+        cached = await get_filing_analysis(
+            ticker, entry["form"], entry["accession"], entry["atype"],
+        )
+        if not cached:
+            return "none"
+    return kind
 
 
 async def _analyze_or_cache(
@@ -680,7 +702,7 @@ async def get_company_filings(
         response["tenq"] = {"metadata": filing_data["tenq"]["metadata"]}
 
     eightk = filing_data.get("eightk", {})
-    eightk_kind = eightk.get("kind", "none")
+    eightk_kind = await _reported_eightk_kind(ticker, filing_data, plan)
 
     for p, (_status, data) in zip(plan, results):
         if data is None:
@@ -695,8 +717,6 @@ async def get_company_filings(
             }
 
     if "eightk" not in response:
-        if any(p["section"] == "eightk" and p["cache_only"] for p in plan):
-            eightk_kind = "none"  # unusable 8-K with nothing cached to show
         response["eightk"] = {
             "kind": eightk_kind,
             "reason": eightk.get("reason", "No 8-K data available"),
@@ -786,9 +806,13 @@ async def stream_company_filings(
                 yield _sse({"type": "error", "message": "Failed to fetch filings from EDGAR."})
                 return
 
+            # Plan before metadata: the reported 8-K kind depends on whether an
+            # unusable 8-K has a cached analysis to show.
+            plan = _plan_sections(filing_data)
+
             # Emit metadata immediately so the frontend can render section headers
             eightk = filing_data.get("eightk", {})
-            eightk_kind = eightk.get("kind", "none")
+            eightk_kind = await _reported_eightk_kind(ticker, filing_data, plan)
             yield _sse({
                 "type": "metadata",
                 "tenk_metadata": filing_data.get("tenk", {}).get("metadata"),
@@ -796,8 +820,6 @@ async def stream_company_filings(
                 "eightk_kind": eightk_kind,
                 "eightk_metadata": eightk.get("metadata") if eightk_kind != "none" else None,
             })
-
-            plan = _plan_sections(filing_data)
 
             # Charge the daily budget once, only when an LLM call will run
             # (operator-paid + ≥1 cache miss). Over budget → error + stop.
