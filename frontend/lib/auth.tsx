@@ -21,10 +21,9 @@ import {
 } from "@clerk/nextjs";
 import type { ReactNode } from "react";
 
-export const authDisabled = process.env.NEXT_PUBLIC_DISABLE_AUTH === "true";
+import { AUTH_DISABLED, LOCAL_DEV_USER_ID } from "./constants";
 
-/** Stable user_id used when auth is disabled — matches the backend's USER_ID_RE. */
-export const LOCAL_DEV_USER_ID = "user_localdev";
+export const authDisabled = AUTH_DISABLED;
 
 interface UseAuthShape {
   isLoaded: boolean;
