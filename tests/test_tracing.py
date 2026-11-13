@@ -204,13 +204,13 @@ class TestAttributeLengthLimit:
     def test_defaults_to_8192_when_unset(self, otlp_endpoint):
         assert "OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT" not in os.environ
         provider = setup_tracing()
-        assert os.environ["OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT"] == "8192"
         assert _long_attribute_length(provider) == 8192
+        # The default is applied via SpanLimits, not leaked into the environment.
+        assert "OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT" not in os.environ
 
     def test_explicit_limit_is_respected(self, otlp_endpoint, monkeypatch):
         monkeypatch.setenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", "100")
         provider = setup_tracing()
-        assert os.environ["OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT"] == "100"
         assert _long_attribute_length(provider) == 100
 
     def test_capture_spans_applies_the_same_cap(self):

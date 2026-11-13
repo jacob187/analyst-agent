@@ -119,10 +119,13 @@ async def lifespan(app: FastAPI):
     check_production_sec_config()
     set_sec_identity()
     tracing_provider = setup_tracing()
-    await init_db()
-    yield
-    await close_db()
-    shutdown_tracing(tracing_provider)
+    try:
+        await init_db()
+        yield
+        await close_db()
+    finally:
+        # Flush spans even if startup or DB shutdown fails.
+        shutdown_tracing(tracing_provider)
 
 
 app = FastAPI(title="Analyst Agent API", lifespan=lifespan)
