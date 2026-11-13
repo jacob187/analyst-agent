@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage
 from starlette.websockets import WebSocketDisconnect
 
 from api import dependencies
@@ -847,3 +848,240 @@ class TestAnonFreeTrial:
 
         assert captured["tavily_api_key"] == "their-tavily"
         assert captured["search_budget"] is None
+
+
+# ── Operator key only pays for operator_lendable models ─────────────────────
+
+# claude-opus-5 is not operator_lendable; gemini-3.6-flash (the default) is.
+_NON_LENDABLE = "claude-opus-5"
+_LENDABLE = "gemini-3.6-flash"
+
+
+def _set_operator_keys(monkeypatch):
+    for var in ("GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.setenv(var, "operator-key")
+
+
+def _first_frame(client, auth):
+    with client.websocket_connect("/ws/chat/AAPL") as ws:
+        ws.send_text(json.dumps(auth))
+        return ws.receive_json()
+
+
+class TestOperatorKeyAllowlist:
+    def test_signed_in_non_lendable_model_without_own_key_is_refused(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+    ):
+        _patch_agent(monkeypatch)
+        _set_operator_keys(monkeypatch)
+        priv, _ = rsa_keypair
+        auth = {"type": "auth", "clerk_session_token": _make_token(priv), "model_id": _NON_LENDABLE}
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            err = ws.receive_json()
+            assert err == {
+                "type": "error",
+                "message": "Anthropic API key required for Claude Opus 5. Add your key in Settings.",
+            }
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_json()
+        assert _row_count(temp_db, "sessions") == 0
+
+    def test_signed_in_lendable_model_runs_on_operator_key(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+    ):
+        _patch_agent(monkeypatch)
+        _set_operator_keys(monkeypatch)
+        priv, _ = rsa_keypair
+        auth = {"type": "auth", "clerk_session_token": _make_token(priv), "model_id": _LENDABLE}
+        ok = _first_frame(client, auth)
+        assert ok["type"] == "auth_success"
+        assert ok["model_id"] == _LENDABLE
+
+    def test_signed_in_byok_key_runs_non_lendable_model(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+    ):
+        _patch_agent(monkeypatch)
+        _set_operator_keys(monkeypatch)
+        priv, _ = rsa_keypair
+        auth = {
+            "type": "auth", "clerk_session_token": _make_token(priv),
+            "model_id": _NON_LENDABLE, "anthropic_api_key": "their-key",
+        }
+        ok = _first_frame(client, auth)
+        assert ok["type"] == "auth_success"
+        assert ok["model_id"] == _NON_LENDABLE
+
+    def test_anon_byok_key_runs_non_lendable_model(self, client, temp_db, clerk_env, monkeypatch):
+        _patch_agent(monkeypatch)
+        auth = {"type": "auth", "model_id": _NON_LENDABLE, "anthropic_api_key": "their-key"}
+        ok = _first_frame(client, auth)
+        assert ok["type"] == "auth_success"
+        assert ok["model_id"] == _NON_LENDABLE
+
+    def test_signed_in_without_model_choice_lands_on_a_lendable_model(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+    ):
+        # The operator's default points at a model it won't lend; the caller
+        # picked nothing, so they get a lendable model instead of a refusal.
+        _patch_agent(monkeypatch)
+        _set_operator_keys(monkeypatch)
+        monkeypatch.setenv("DEFAULT_MODEL_ID", _NON_LENDABLE)
+        priv, _ = rsa_keypair
+        ok = _first_frame(client, {"type": "auth", "clerk_session_token": _make_token(priv)})
+        assert ok["type"] == "auth_success"
+        from agents.model_registry import get_model
+        assert get_model(ok["model_id"]).operator_lendable is True
+
+    def test_self_host_may_use_any_model_on_env_keys(self, client, temp_db, monkeypatch):
+        # Clerk unconfigured (conftest default): the env keys are the
+        # self-hoster's own, so the allowlist doesn't apply.
+        _patch_agent(monkeypatch)
+        _set_operator_keys(monkeypatch)
+        ok = _first_frame(client, {"type": "auth", "model_id": _NON_LENDABLE})
+        assert ok["type"] == "auth_success"
+        assert ok["model_id"] == _NON_LENDABLE
+
+
+# ── Daily budget counts LLM calls ───────────────────────────────────────────
+
+
+def _usage(user_id: str) -> int:
+    import api.db as db_module
+    return asyncio.run(db_module.get_llm_usage(user_id))
+
+
+def _wait_for_usage(user_id: str, expected: int) -> int:
+    """Charges settle after the response frame is sent; poll briefly."""
+    deadline = time.monotonic() + 3
+    while True:
+        used = _usage(user_id)
+        if used >= expected or time.monotonic() > deadline:
+            return used
+        time.sleep(0.05)
+
+
+def _wire_real_graph(monkeypatch):
+    """Real PlanningAgent + ReAct node over a scripted fake chat model: one
+    tool-call turn then an answer, i.e. exactly 2 LLM calls per query. Only
+    the model is fake (at the invoke boundary); callbacks flow through the
+    real graph."""
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.tools import tool
+    from langgraph.graph import END, StateGraph
+    from langgraph.prebuilt import create_react_agent
+
+    from agents.graph.analyst_graph import AnalysisState, PlanningAgent, create_react_node
+
+    class _ScriptedChatModel(FakeMessagesListChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    @tool
+    def add_numbers(a: int, b: int) -> int:
+        """Add two integers."""
+        return a + b
+
+    def make_pair(*_a, **_k):
+        llm = _ScriptedChatModel(responses=[
+            AIMessage(content="", tool_calls=[
+                {"name": "add_numbers", "args": {"a": 2, "b": 3}, "id": "call_1"},
+            ]),
+            AIMessage(content="The total is 5."),
+        ])
+        return llm, llm
+
+    def build_agent(ticker, llm, **_k):
+        workflow = StateGraph(AnalysisState)
+        workflow.add_node("react_agent", create_react_node(create_react_agent(llm, [add_numbers])))
+        workflow.set_entry_point("react_agent")
+        workflow.add_edge("react_agent", END)
+        return PlanningAgent(workflow.compile(), ticker)
+
+    monkeypatch.setattr(chat, "create_llm_pair", make_pair)
+    monkeypatch.setattr("agents.graph.analyst_graph.create_sec_qa_agent", build_agent)
+
+
+_SIGNED_IN = "user_percallbudget"
+
+
+class TestPerCallBudget:
+    def test_operator_paid_query_charges_each_llm_call(self, client, temp_db, monkeypatch):
+        _wire_real_graph(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE}))
+            _drain_until(ws, "auth_success")
+            ws.send_text(json.dumps({"type": "query", "message": "what is 2 + 3?"}))
+            assert _drain_until(ws, "response")["message"] == "The total is 5."
+
+        assert _wait_for_usage(_SIGNED_IN, 2) == 2
+
+    def test_history_compression_call_is_charged(self, client, temp_db, monkeypatch):
+        _wire_real_graph(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setattr(chat, "get_token_threshold", lambda _model_id: 0)
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE}))
+            _drain_until(ws, "auth_success")
+            ws.send_text(json.dumps({"type": "query", "message": "what is 2 + 3?"}))
+            _drain_until(ws, "response")
+
+        # 2 calls answering + 1 summarising the history.
+        assert _wait_for_usage(_SIGNED_IN, 3) == 3
+
+    def test_query_refused_when_budget_already_spent(self, client, temp_db, monkeypatch):
+        import api.db as db_module
+        from api import llm_concurrency
+
+        _wire_real_graph(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 3)
+        for _ in range(3):
+            asyncio.run(db_module.increment_llm_usage(_SIGNED_IN))
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE}))
+            _drain_until(ws, "auth_success")
+            err = _trial_query(ws)  # first response-or-error frame
+            assert err["type"] == "error"
+            assert err["message"].startswith("Daily LLM budget reached.")
+
+        assert _usage(_SIGNED_IN) == 3
+
+    def test_query_admitted_below_budget_may_finish_past_it(self, client, temp_db, monkeypatch):
+        import api.db as db_module
+        from api import llm_concurrency
+
+        _wire_real_graph(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 3)
+        for _ in range(2):
+            asyncio.run(db_module.increment_llm_usage(_SIGNED_IN))
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE}))
+            _drain_until(ws, "auth_success")
+            ws.send_text(json.dumps({"type": "query", "message": "what is 2 + 3?"}))
+            _drain_until(ws, "response")
+
+        assert _wait_for_usage(_SIGNED_IN, 4) == 4
+
+    def test_byok_query_charges_nothing(self, client, temp_db, monkeypatch):
+        _wire_real_graph(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({
+                "type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE,
+                "google_api_key": "their-key",
+            }))
+            _drain_until(ws, "auth_success")
+            ws.send_text(json.dumps({"type": "query", "message": "what is 2 + 3?"}))
+            _drain_until(ws, "response")
+
+        time.sleep(0.2)
+        assert _usage(_SIGNED_IN) == 0

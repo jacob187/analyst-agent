@@ -11,6 +11,12 @@ from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 
 from api.main import app
+from tests.test_dependencies import (  # noqa: F401  (clerk_env / rsa_keypair are fixtures)
+    TEST_SUB,
+    _make_token,
+    clerk_env,
+    rsa_keypair,
+)
 
 
 @pytest.fixture
@@ -472,24 +478,31 @@ class TestFilingsPartialData:
 # ── Daily LLM budget (operator-paid only) ─────────────────────────────────
 
 
+@pytest.fixture
+def budget_db(tmp_path, monkeypatch):
+    import api.db as db_module
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "budget.db")
+    monkeypatch.setattr(db_module, "_db", None)
+    # init_db is async, but TestClient drives the FastAPI app which has
+    # init_db in its lifespan. Force the connection open eagerly so
+    # increment_llm_usage finds the table on the very first call.
+    # asyncio.run owns its loop: get_event_loop() here picks up whatever
+    # loop the previous test left behind, which may be closed.
+    import asyncio as _asyncio
+    _asyncio.run(db_module.init_db())
+    yield
+    _asyncio.run(db_module.close_db())
+
+
+def _usage(user_id: str) -> int:
+    import asyncio as _asyncio
+    import api.db as db_module
+    return _asyncio.run(db_module.get_llm_usage(user_id))
+
+
 class TestFilingsLLMBudget:
     """The daily budget gate fires when the request's provider key comes from
     server env (operator pays). BYOK requests bypass it."""
-
-    @pytest.fixture
-    def budget_db(self, tmp_path, monkeypatch):
-        import api.db as db_module
-        monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "budget.db")
-        monkeypatch.setattr(db_module, "_db", None)
-        # init_db is async, but TestClient drives the FastAPI app which has
-        # init_db in its lifespan. Force the connection open eagerly so
-        # increment_llm_usage finds the table on the very first call.
-        # asyncio.run owns its loop: get_event_loop() here picks up whatever
-        # loop the previous test left behind, which may be closed.
-        import asyncio as _asyncio
-        _asyncio.run(db_module.init_db())
-        yield
-        _asyncio.run(db_module.close_db())
 
     def test_byok_bypasses_budget(self, client, mock_filings_deps, budget_db, monkeypatch):
         """Header-supplied key (BYOK) is not charged against the operator's budget."""
@@ -501,19 +514,40 @@ class TestFilingsLLMBudget:
         for _ in range(5):
             resp = client.get("/api/company/AAPL/filings", headers=headers)
             assert resp.status_code == 200
+        assert _usage("user_byoktest") == 0
 
     def test_env_key_subject_to_budget(self, client, mock_filings_deps, budget_db, monkeypatch):
-        """When the key resolves from env (no header), the daily budget applies."""
+        """When the key resolves from env (no header), the daily budget applies:
+        a request admitted under budget is charged per generated section and
+        may finish past it; the next one is refused up front."""
         from api import llm_concurrency
+        _core_only(mock_filings_deps)  # 6 sections: 10-K x3, 10-Q x2, 8-K
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
         monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 2)
         headers = {"X-User-Id": "user_envbudget"}
-        # First two succeed; third crosses the limit and returns 429.
         assert client.get("/api/company/AAPL/filings", headers=headers).status_code == 200
-        assert client.get("/api/company/AAPL/filings", headers=headers).status_code == 200
+        assert _usage("user_envbudget") == 6
         resp = client.get("/api/company/AAPL/filings", headers=headers)
         assert resp.status_code == 429
         assert "budget" in resp.json()["detail"].lower()
+        assert _usage("user_envbudget") == 6
+
+    def test_stream_over_budget_emits_error(self, client, mock_filings_deps, budget_db, monkeypatch):
+        import asyncio as _asyncio
+        import api.db as db_module
+        from api import llm_concurrency
+        _core_only(mock_filings_deps)
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 1)
+        _asyncio.run(db_module.increment_llm_usage("user_streamover"))
+
+        events = _stream_events(
+            client, "/api/company/AAPL/filings/stream", {"X-User-Id": "user_streamover"}
+        )
+        assert events[-1]["type"] == "error"
+        assert "budget" in events[-1]["message"].lower()
+        mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
+        assert _usage("user_streamover") == 1
 
 
 # ── Process-wide LLM dispatch concurrency cap ────────────────────────────
@@ -770,50 +804,95 @@ class TestKeylessSkipsRawExtraction:
         sec.extract_balance_sheet_as_str.assert_not_called()
 
 
-# ── #6: budget charged only when an LLM call actually happens ──────────────
+# ── #6: budget charged per LLM analysis actually run ───────────────────────
+
+_ENV_USER = "user_perSection"
 
 
-class TestBudgetChargedOnlyOnGeneration:
-    def test_fully_cached_does_not_charge_budget(self, client, mock_filings_deps, monkeypatch):
-        from unittest.mock import AsyncMock as _AsyncMock
-        from api.routes import company as company_route
+def _cached_only(deps, cached_types):
+    """Cache holds analyses for `cached_types` only; every other section misses."""
+    async def lookup(ticker, form_type, accession, analysis_type):
+        if analysis_type in cached_types:
+            return {"analysis_json": json.dumps(_MOCK_RISK_ANALYSIS)}
+        return None
+    deps["get_cache"].side_effect = lookup
 
-        mock_charge = _AsyncMock()
-        monkeypatch.setattr(company_route, "check_and_charge_budget", mock_charge)
-        # Operator-paid (env key, no header) + every section cached.
+
+def _generated(events):
+    return [e["step"] for e in events if e.get("type") == "progress" and e.get("status") == "done"]
+
+
+class TestBudgetChargedPerSection:
+    def test_n_uncached_sections_charge_n(self, client, mock_filings_deps, budget_db, monkeypatch):
+        _core_only(mock_filings_deps)  # risk/mda/balance 10-K, risk/mda 10-Q, 8-K earnings
+        _cached_only(mock_filings_deps, {"risk_10k", "mda_10k"})
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
-        mock_filings_deps["get_cache"].return_value = {
-            "analysis_json": json.dumps(_MOCK_RISK_ANALYSIS)
-        }
-        resp = client.get("/api/company/AAPL/filings", headers={"X-User-Id": "user_cachedbudget"})
+
+        resp = client.get("/api/company/AAPL/filings", headers={"X-User-Id": _ENV_USER})
         assert resp.status_code == 200
-        mock_charge.assert_not_called()
+        assert _usage(_ENV_USER) == 4
 
-    def test_stream_fully_cached_does_not_charge_budget(self, client, mock_filings_deps, monkeypatch):
-        from unittest.mock import AsyncMock as _AsyncMock
-        from api.routes import company as company_route
-
+    def test_stream_n_uncached_sections_charge_n(self, client, mock_filings_deps, budget_db, monkeypatch):
         _core_only(mock_filings_deps)
-        mock_charge = _AsyncMock()
-        monkeypatch.setattr(company_route, "check_and_charge_budget", mock_charge)
+        _cached_only(mock_filings_deps, {"balance"})
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+
+        events = _stream_events(client, "/api/company/AAPL/filings/stream", {"X-User-Id": _ENV_USER})
+        assert events[-1]["type"] == "complete"
+        assert len(_generated(events)) == 5
+        assert _usage(_ENV_USER) == 5
+
+    def test_section_refused_a_dispatch_slot_charges_nothing(
+        self, client, mock_filings_deps, budget_db, monkeypatch
+    ):
+        from api import llm_concurrency
+        _core_only(mock_filings_deps)
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        monkeypatch.setattr(llm_concurrency, "LLM_DISPATCH_CONCURRENCY", 0)
+        monkeypatch.setattr(llm_concurrency, "LLM_DISPATCH_WAIT_SECONDS", 0.01)
+        llm_concurrency._rebuild_semaphore()
+
+        resp = client.get("/api/company/AAPL/filings", headers={"X-User-Id": _ENV_USER})
+        assert resp.status_code == 200
+        mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
+        assert _usage(_ENV_USER) == 0
+
+    def test_fully_cached_charges_nothing(self, client, mock_filings_deps, budget_db, monkeypatch):
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
         mock_filings_deps["get_cache"].return_value = {
             "analysis_json": json.dumps(_MOCK_RISK_ANALYSIS)
         }
-        events = _stream_events(
-            client, "/api/company/AAPL/filings/stream", {"X-User-Id": "user_streamcached"}
-        )
-        assert events[-1]["type"] == "complete"
-        mock_charge.assert_not_called()
+        resp = client.get("/api/company/AAPL/filings", headers={"X-User-Id": _ENV_USER})
+        assert resp.status_code == 200
+        assert _usage(_ENV_USER) == 0
 
-    def test_stream_cache_only_miss_does_not_charge_budget(self, client, mock_filings_deps, monkeypatch):
-        """Failed-extraction sections never generate, so their cache misses cost nothing."""
-        from unittest.mock import AsyncMock as _AsyncMock
-        from api.routes import company as company_route
+    def test_fully_cached_served_even_when_over_budget(self, client, mock_filings_deps, budget_db, monkeypatch):
+        import asyncio as _asyncio
+        import api.db as db_module
+        from api import llm_concurrency
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 1)
+        _asyncio.run(db_module.increment_llm_usage(_ENV_USER))
+        mock_filings_deps["get_cache"].return_value = {
+            "analysis_json": json.dumps(_MOCK_RISK_ANALYSIS)
+        }
+        resp = client.get("/api/company/AAPL/filings", headers={"X-User-Id": _ENV_USER})
+        assert resp.status_code == 200
+        assert _usage(_ENV_USER) == 1
 
+    def test_stream_fully_cached_charges_nothing(self, client, mock_filings_deps, budget_db, monkeypatch):
         _core_only(mock_filings_deps)
-        mock_charge = _AsyncMock()
-        monkeypatch.setattr(company_route, "check_and_charge_budget", mock_charge)
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        mock_filings_deps["get_cache"].return_value = {
+            "analysis_json": json.dumps(_MOCK_RISK_ANALYSIS)
+        }
+        events = _stream_events(client, "/api/company/AAPL/filings/stream", {"X-User-Id": _ENV_USER})
+        assert events[-1]["type"] == "complete"
+        assert _usage(_ENV_USER) == 0
+
+    def test_stream_cache_only_miss_charges_nothing(self, client, mock_filings_deps, budget_db, monkeypatch):
+        """Failed-extraction sections never generate, so their cache misses cost nothing."""
+        _core_only(mock_filings_deps)
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
         failed = {"text": "Error extracting: boom", "metadata": {}, "found": False}
         sec = mock_filings_deps["sec"]
@@ -822,9 +901,59 @@ class TestBudgetChargedOnlyOnGeneration:
         sec.extract_balance_sheet_as_str.return_value = ""
         sec.get_8k_overview.return_value = {"found": False, "text": "No 8-K", "metadata": {}}
 
-        events = _stream_events(
-            client, "/api/company/AAPL/filings/stream", {"X-User-Id": "user_streamcacheonly"}
-        )
+        events = _stream_events(client, "/api/company/AAPL/filings/stream", {"X-User-Id": _ENV_USER})
         assert events[-1]["type"] == "complete"
         assert not any(e.get("type") == "section" for e in events)
-        mock_charge.assert_not_called()
+        assert _usage(_ENV_USER) == 0
+
+
+# ── Operator key only pays for operator_lendable models ─────────────────────
+
+
+class TestFilingsOperatorKeyAllowlist:
+    """With Clerk enabled, a signed-in user without their own key gets the
+    operator's key only for operator_lendable models; otherwise cache misses
+    are `needs_key`, exactly like a keyless caller."""
+
+    @pytest.fixture
+    def signed_in(self, clerk_env, rsa_keypair, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        priv, _ = rsa_keypair
+        return {"X-Clerk-Session-Token": _make_token(priv)}
+
+    def test_non_lendable_model_needs_own_key(self, client, mock_filings_deps, budget_db, signed_in):
+        _core_only(mock_filings_deps)
+        mock_filings_deps["model"].operator_lendable = False
+
+        resp = client.get("/api/company/AAPL/filings", headers=signed_in)
+        assert resp.status_code == 200
+        assert set(resp.json()["tenk"]) == {"metadata"}  # no analyses generated
+        events = _stream_events(client, "/api/company/AAPL/filings/stream", signed_in)
+        statuses = {e["status"] for e in events if e.get("type") == "progress" and e["step"] != "edgar_fetch"}
+        assert statuses == {"needs_key"}
+
+        sec = mock_filings_deps["sec"]
+        sec.get_risk_factors_raw.assert_not_called()  # treated as keyless
+        mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
+        assert _usage(TEST_SUB) == 0
+
+    def test_lendable_model_runs_on_operator_key(self, client, mock_filings_deps, budget_db, signed_in):
+        _core_only(mock_filings_deps)
+        mock_filings_deps["model"].operator_lendable = True
+
+        events = _stream_events(client, "/api/company/AAPL/filings/stream", signed_in)
+        assert len(_generated(events)) == 6
+        assert _usage(TEST_SUB) == 6
+
+    def test_own_key_runs_non_lendable_model(self, client, mock_filings_deps, budget_db, signed_in):
+        _core_only(mock_filings_deps)
+        mock_filings_deps["model"].operator_lendable = False
+
+        events = _stream_events(
+            client, "/api/company/AAPL/filings/stream",
+            {**signed_in, "X-Google-Api-Key": "their-key"},
+        )
+        assert len(_generated(events)) == 6
+        assert _usage(TEST_SUB) == 0  # BYOK: operator not charged
+
+

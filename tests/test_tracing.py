@@ -436,6 +436,34 @@ class TestChatQueryTrace:
         (event,) = [e for e in root.events if e.name == "exception"]
         assert event.attributes["exception.type"].endswith(type(exc).__name__)
 
+    def test_client_disconnect_mid_stream_is_marked_not_errored(
+        self, client, temp_db, monkeypatch
+    ):
+        from starlette.websockets import WebSocketDisconnect
+
+        class _DisconnectingAgent:
+            def stream(self, *a, **k):
+                async def _gen():
+                    yield {"type": "status", "message": "working"}
+                    raise WebSocketDisconnect(1001)
+                return _gen()
+
+        monkeypatch.setattr(chat, "create_llm_pair", lambda *a, **k: (None, None))
+        monkeypatch.setattr(
+            "agents.graph.analyst_graph.create_sec_qa_agent", lambda *a, **k: _DisconnectingAgent()
+        )
+        with capture_spans() as captured:
+            with client.websocket_connect("/ws/chat/AAPL") as ws:
+                ws.send_text(json.dumps(_auth()))
+                _drain_until(ws, "auth_success")
+                ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+                _drain_until(ws, "status")
+
+        (root,) = [s for s in captured.spans if s.name == "chat.query"]
+        assert root.attributes["client.disconnected"] is True
+        assert root.status.status_code != StatusCode.ERROR
+        assert not [e for e in root.events if e.name == "exception"]
+
 
 # ── AC6 and identity: secrets never reach exported spans ────────────────────
 

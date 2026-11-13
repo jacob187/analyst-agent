@@ -32,8 +32,9 @@ from api.dependencies import (
 )
 from api.llm_concurrency import (
     LLMBudgetExceeded,
+    LLMCallCharger,
     LLMConcurrencyExceeded,
-    check_and_charge_budget,
+    ensure_budget_available,
 )
 from api.rate_limit import check_rate_limit, client_ip
 from api.tracing import get_tracer
@@ -146,7 +147,12 @@ async def chat(websocket: WebSocket, ticker: str):
         # Identity comes from the verified Clerk token (user_id is optional and
         # must match it); resolve it first so env-key lending keys off the
         # verified id.
-        verified_user_id, reason = resolve_ws_identity(auth_message)
+        # Off the event loop: verification can block on a JWKS fetch. The id
+        # is then passed to resolve_ws_keys, which doesn't verify again.
+        if auth_message.get("clerk_session_token"):
+            verified_user_id, reason = await asyncio.to_thread(resolve_ws_identity, auth_message)
+        else:
+            verified_user_id, reason = resolve_ws_identity(auth_message)
         if reason:
             await websocket.send_json({"type": "error", "message": reason})
             await websocket.close(code=1008)
@@ -163,6 +169,8 @@ async def chat(websocket: WebSocket, ticker: str):
         # for, so someone who brought only an OpenAI/Anthropic key isn't
         # steered onto the (Google) default and bounced with "key required".
         # With no usable key at all, fall through to the free-trial model.
+        # "Usable" is per model: the operator's env key only counts for
+        # models it may lend (ApiKeys.key_for_model).
         #
         # `keys.model_id` is env-defaulted (DEFAULT_MODEL_ID), so it can't
         # answer "did this caller pick a model?" — read the auth frame for that
@@ -177,11 +185,11 @@ async def chat(websocket: WebSocket, ticker: str):
 
         if requested_model_id:
             model_id = requested_model_id
-        elif keys.get_provider_key(fallback_model.provider):
+        elif keys.key_for_model(fallback_model):
             model_id = fallback_model.id
         else:
             byok_model = next(
-                (m for m in get_all_models() if keys.get_provider_key(m.provider)),
+                (m for m in get_all_models() if keys.key_for_model(m)),
                 None,
             )
             if byok_model:
@@ -195,8 +203,9 @@ async def chat(websocket: WebSocket, ticker: str):
             model = default
             model_id = default.id
 
-        # Resolve the API key for the selected provider
-        api_key = keys.get_provider_key(model.provider)
+        # Resolve the API key for the selected model: BYOK, or the operator's
+        # env key if it may lend this model.
+        api_key = keys.key_for_model(model)
 
         # Anonymous free trial: no BYOK key, but the requested model is the
         # one designated light model the operator lends to anon visitors,
@@ -214,16 +223,19 @@ async def chat(websocket: WebSocket, ticker: str):
 
         if not api_key:
             provider_display = model.provider.replace("_", " ").title()
+            # Signing in doesn't help a signed-in user on a model the operator
+            # won't lend — only their own key does.
+            remedy = "Add your key in Settings." if user_id else "Sign in or add your key in Settings."
             await websocket.send_json({
                 "type": "error",
-                "message": f"{provider_display} API key required for {model.display_name}. Sign in or add your key in Settings."
+                "message": f"{provider_display} API key required for {model.display_name}. {remedy}"
             })
             await websocket.close()
             return
 
-        # If the operator's env key resolves the LLM (not BYOK), each user
-        # message draws against the per-user daily budget. The model is fixed
-        # for the session, so resolve once and reuse on every message.
+        # If the operator's env key resolves the LLM (not BYOK), each LLM call
+        # made answering a message draws against the per-user daily budget.
+        # The model is fixed for the session, so resolve once and reuse.
         operator_paid = keys.is_operator_paid(model.provider)
 
         # Free-trial sessions also borrow the operator's Tavily key, metered
@@ -363,9 +375,13 @@ async def chat(websocket: WebSocket, ticker: str):
                         })
                         continue
 
+                    # Operator-paid: refuse up front once today's budget is
+                    # spent; otherwise each LLM call is charged as it starts
+                    # (LLMCallCharger on the run config, below).
+                    charger: LLMCallCharger | None = None
                     if operator_paid:
                         try:
-                            await check_and_charge_budget(user_id)
+                            await ensure_budget_available(user_id)
                         except LLMBudgetExceeded:
                             await _safe_send(websocket, {
                                 "type": "error",
@@ -400,83 +416,103 @@ async def chat(websocket: WebSocket, ticker: str):
                             "Free trial query served: %s ticker=%s model=%s", ip_key, ticker, model_id
                         )
 
-                    if session_id:
-                        asyncio.create_task(save_message(session_id, "user", user_query))
-                    conversation_history.append(HumanMessage(content=user_query))
-
-                    full_response = ""
-                    span_attributes = {
-                        "ticker": ticker,
-                        "model_id": model_id,
-                        "free_trial": free_trial,
-                    }
-                    if session_id:
-                        span_attributes["session_id"] = session_id
-                    with get_tracer().start_as_current_span(
-                        "chat.query", attributes=span_attributes
-                    ) as span:
-                        try:
-                            async for event in agent.stream(
-                                {"messages": conversation_history},
-                                config={
-                                    "metadata": {
-                                        "session_id": session_id,
-                                        "ticker": ticker,
-                                        # Hashed: run metadata is exported verbatim as a
-                                        # trace attribute, and raw user ids must not leave.
-                                        "user_hash": _user_hash(user_id),
-                                    },
-                                    "run_name": f"chat:{ticker}",
-                                },
-                            ):
-                                if not await _safe_send(websocket, event):
-                                    return  # client disconnected mid-stream
-                                if event["type"] == "response":
-                                    full_response = event["message"]
-                        except WebSocketDisconnect:
-                            return
-                        except LLMTimeoutError as e:
-                            _record_span_error(span, e)
-                            logger.warning("LLM timeout for %s: %s", ticker, e)
-                            await _safe_send(websocket, {
-                                "type": "error",
-                                "message": "The model took too long to respond. Please try a simpler query or try again.",
-                            })
-                        except LLMConcurrencyExceeded as e:
-                            _record_span_error(span, e)
-                            logger.warning("LLM dispatch pool saturated for %s", ticker)
-                            await _safe_send(websocket, {
-                                "type": "error",
-                                "message": "Server busy — please retry shortly.",
-                            })
-                        except Exception as e:
-                            _record_span_error(span, e)
-                            logger.error("Error processing query for %s: %s", ticker, e, exc_info=True)
-                            await _safe_send(websocket, {
-                                "type": "error",
-                                "message": "Error processing your query. Please try again."
-                            })
-
-                    if full_response:
-                        conversation_history.append(AIMessage(content=full_response))
+                    run_callbacks: list = []
+                    if operator_paid and user_id:
+                        charger = LLMCallCharger(user_id)
+                        run_callbacks.append(charger)
+                    try:
                         if session_id:
-                            asyncio.create_task(
-                                save_message(session_id, "assistant", full_response)
+                            asyncio.create_task(save_message(session_id, "user", user_query))
+                        conversation_history.append(HumanMessage(content=user_query))
+
+                        full_response = ""
+                        span_attributes = {
+                            "ticker": ticker,
+                            "model_id": model_id,
+                            "free_trial": free_trial,
+                        }
+                        if session_id:
+                            span_attributes["session_id"] = session_id
+                        with get_tracer().start_as_current_span(
+                            "chat.query", attributes=span_attributes
+                        ) as span:
+                            try:
+                                async for event in agent.stream(
+                                    {"messages": conversation_history},
+                                    config={
+                                        "metadata": {
+                                            "session_id": session_id,
+                                            "ticker": ticker,
+                                            # Hashed: run metadata is exported verbatim as a
+                                            # trace attribute, and raw user ids must not leave.
+                                            "user_hash": _user_hash(user_id),
+                                        },
+                                        "run_name": f"chat:{ticker}",
+                                        "callbacks": run_callbacks,
+                                    },
+                                ):
+                                    if not await _safe_send(websocket, event):
+                                        # Client gone mid-stream: not a server error.
+                                        span.set_attribute("client.disconnected", True)
+                                        return
+                                    if event["type"] == "response":
+                                        full_response = event["message"]
+                            except WebSocketDisconnect:
+                                span.set_attribute("client.disconnected", True)
+                                return
+                            except LLMTimeoutError as e:
+                                _record_span_error(span, e)
+                                logger.warning("LLM timeout for %s: %s", ticker, e)
+                                await _safe_send(websocket, {
+                                    "type": "error",
+                                    "message": "The model took too long to respond. Please try a simpler query or try again.",
+                                })
+                            except LLMConcurrencyExceeded as e:
+                                _record_span_error(span, e)
+                                logger.warning("LLM dispatch pool saturated for %s", ticker)
+                                await _safe_send(websocket, {
+                                    "type": "error",
+                                    "message": "Server busy — please retry shortly.",
+                                })
+                            except Exception as e:
+                                _record_span_error(span, e)
+                                logger.error("Error processing query for %s: %s", ticker, e, exc_info=True)
+                                await _safe_send(websocket, {
+                                    "type": "error",
+                                    "message": "Error processing your query. Please try again."
+                                })
+
+                        if full_response:
+                            conversation_history.append(AIMessage(content=full_response))
+                            if session_id:
+                                asyncio.create_task(
+                                    save_message(session_id, "assistant", full_response)
+                                )
+
+                            tokens_so_far, chars_so_far, messages_counted = (
+                                estimate_tokens_incremental(
+                                    conversation_history, chars_so_far, messages_counted
+                                )
                             )
 
-                        tokens_so_far, chars_so_far, messages_counted = (
-                            estimate_tokens_incremental(
-                                conversation_history, chars_so_far, messages_counted
-                            )
-                        )
-
-                        if tokens_so_far > token_threshold:
-                            conversation_history = await compress_history(
-                                session_id, conversation_history, llm
-                            )
-                            # Compression replaces history with a shorter list.
-                            # Reset the running tally so the next turn re-baselines.
-                            chars_so_far, messages_counted = 0, 0
+                            if tokens_so_far > token_threshold:
+                                # The summarization call is part of answering
+                                # this message, so it's charged too.
+                                compress_llm = (
+                                    llm.with_config(callbacks=run_callbacks)
+                                    if run_callbacks else llm
+                                )
+                                conversation_history = await compress_history(
+                                    session_id, conversation_history, compress_llm
+                                )
+                                # Compression replaces history with a shorter list.
+                                # Reset the running tally so the next turn re-baselines.
+                                chars_so_far, messages_counted = 0, 0
+                    finally:
+                        # Also on a mid-stream disconnect: every call that
+                        # started is charged before the handler returns.
+                        if charger is not None:
+                            await charger.settle()
 
             except WebSocketDisconnect:
                 break

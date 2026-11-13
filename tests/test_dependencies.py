@@ -887,6 +887,137 @@ class TestIsOperatorPaid:
         assert keys.is_operator_paid("not_a_real_provider") is False
 
 
+def _spy_verification_off_loop(monkeypatch) -> list[bool]:
+    """Wrap the real verify_clerk_token; record, per call, whether it ran on
+    a thread with a running event loop (True = blocking the loop)."""
+    import asyncio
+    from api import dependencies
+
+    on_loop: list[bool] = []
+    real = dependencies.verify_clerk_token
+
+    def spy(token):
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return real(token)
+
+    monkeypatch.setattr(dependencies, "verify_clerk_token", spy)
+    return on_loop
+
+
+class TestClerkVerificationOffLoop:
+    @pytest.mark.eval_unit
+    async def test_get_api_keys_verifies_token_off_the_event_loop(
+        self, clerk_env, rsa_keypair, monkeypatch
+    ):
+        on_loop = _spy_verification_off_loop(monkeypatch)
+        priv, _ = rsa_keypair
+        keys = await get_api_keys(
+            x_google_api_key=None, x_openai_api_key=None, x_anthropic_api_key=None,
+            x_tavily_api_key=None, x_model_id=None, x_user_id=None,
+            x_clerk_session_token=_make_token(priv),
+        )
+        assert keys.user_id == TEST_SUB
+        assert on_loop == [False]
+
+    @pytest.mark.eval_unit
+    async def test_get_api_keys_rejection_still_raises_401(self, clerk_env, monkeypatch):
+        on_loop = _spy_verification_off_loop(monkeypatch)
+        with pytest.raises(HTTPException) as exc:
+            await get_api_keys(
+                x_google_api_key=None, x_openai_api_key=None, x_anthropic_api_key=None,
+                x_tavily_api_key=None, x_model_id=None, x_user_id=TEST_SUB,
+                x_clerk_session_token="garbage",
+            )
+        assert exc.value.status_code == 401
+        assert on_loop == [False]
+
+    def test_ws_auth_verifies_token_off_the_event_loop(
+        self, clerk_env, rsa_keypair, monkeypatch, tmp_path
+    ):
+        import asyncio
+        import json as _json
+        from unittest.mock import MagicMock
+
+        import api.db as db_module
+        from fastapi.testclient import TestClient
+        from api.main import app
+        from api.routes import chat
+
+        monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "ws.db")
+        monkeypatch.setattr(db_module, "_db", None)
+        asyncio.run(db_module.init_db())
+        monkeypatch.setattr(chat, "create_llm_pair", lambda *a, **k: (MagicMock(), MagicMock()))
+        monkeypatch.setattr(
+            "agents.graph.analyst_graph.create_sec_qa_agent", lambda *a, **k: MagicMock()
+        )
+        on_loop = _spy_verification_off_loop(monkeypatch)
+        priv, _ = rsa_keypair
+        try:
+            with TestClient(app).websocket_connect("/ws/chat/AAPL") as ws:
+                ws.send_text(_json.dumps({
+                    "type": "auth", "google_api_key": "byok",
+                    "clerk_session_token": _make_token(priv),
+                }))
+                ok = ws.receive_json()
+            assert ok["type"] == "auth_success"
+            assert ok["session_id"]  # verified, signed-in
+            assert on_loop == [False]
+        finally:
+            asyncio.run(db_module.close_db())
+
+
+class TestKeyForModel:
+    """The operator's env key pays only for operator_lendable models (when
+    Clerk is enabled); a caller's own key runs any model."""
+
+    @staticmethod
+    def _models():
+        from agents.model_registry import get_model
+        return get_model("gemini-3.6-flash"), get_model("gemini-3.1-pro-preview")
+
+    @pytest.mark.eval_unit
+    def test_env_key_withheld_for_non_lendable_model(self, clerk_env, rsa_keypair, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        priv, _ = rsa_keypair
+        keys = resolve_ws_keys({"clerk_session_token": _make_token(priv)})
+        lendable, non_lendable = self._models()
+        assert keys.user_id == TEST_SUB
+        assert keys.key_for_model(lendable) == "env-key"
+        assert keys.key_for_model(non_lendable) is None
+
+    @pytest.mark.eval_unit
+    def test_own_key_runs_non_lendable_model(self, clerk_env, rsa_keypair, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        priv, _ = rsa_keypair
+        keys = resolve_ws_keys(
+            {"clerk_session_token": _make_token(priv), "google_api_key": "user-key"}
+        )
+        _, non_lendable = self._models()
+        assert keys.key_for_model(non_lendable) == "user-key"
+
+    @pytest.mark.eval_unit
+    def test_self_host_env_key_runs_any_model(self, monkeypatch):
+        # Clerk unconfigured (conftest default): the env keys are the
+        # operator's own, so the allowlist doesn't apply.
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        keys = resolve_ws_keys({})
+        _, non_lendable = self._models()
+        assert keys.key_for_model(non_lendable) == "env-key"
+
+    @pytest.mark.eval_unit
+    def test_auth_disabled_env_key_runs_any_model(self, monkeypatch):
+        monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
+        monkeypatch.setenv("DISABLE_AUTH", "true")
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        keys = resolve_ws_keys({})
+        _, non_lendable = self._models()
+        assert keys.key_for_model(non_lendable) == "env-key"
+
+
 class TestFreeTrial:
     """Anonymous visitors may spend the operator's key for exactly one light
     model (the free trial), independent of the Clerk-gated env-key resolver.
