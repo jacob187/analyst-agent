@@ -407,10 +407,37 @@ class TestTokenIsIdentityRest:
         assert result.is_operator_paid("google_genai") is True
 
     @pytest.mark.eval_unit
-    async def test_invalid_token_alone_rejected(self, clerk_env):
+    async def test_invalid_token_alone_degrades_to_anonymous(self, clerk_env, caplog):
+        # Session tokens are short-lived; an expired one must not break public
+        # endpoints. Failure is logged (never the token itself).
+        with caplog.at_level("INFO", logger="api.dependencies"):
+            result = await get_api_keys(x_user_id=None, x_clerk_session_token="not-a-jwt")
+        assert result.user_id is None
+        assert any("failed verification" in r.message for r in caplog.records)
+        assert all("not-a-jwt" not in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.eval_unit
+    async def test_expired_token_alone_degrades_to_anonymous(self, clerk_env, rsa_keypair):
+        priv, _ = rsa_keypair
+        token = _make_token(priv, exp_delta=-60)
+        result = await get_api_keys(x_user_id=None, x_clerk_session_token=token)
+        assert result.user_id is None
+
+    @pytest.mark.eval_unit
+    async def test_invalid_token_with_user_id_rejected(self, clerk_env):
         with pytest.raises(HTTPException) as exc:
-            await get_api_keys(x_user_id=None, x_clerk_session_token="not-a-jwt")
+            await get_api_keys(x_user_id=TEST_SUB, x_clerk_session_token="not-a-jwt")
         assert exc.value.status_code == 401
+
+    @pytest.mark.eval_unit
+    async def test_invalid_token_alone_gets_no_env_key(self, clerk_env, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        result = await get_api_keys(
+            x_google_api_key=None, x_openai_api_key=None,
+            x_anthropic_api_key=None, x_tavily_api_key=None,
+            x_user_id=None, x_clerk_session_token="not-a-jwt",
+        )
+        assert result.google_api_key is None
 
     @pytest.mark.eval_unit
     async def test_legacy_uuid_user_id_conflicts_with_token(self, clerk_env, rsa_keypair):
@@ -510,6 +537,33 @@ class TestTokenIdentityEndpoint:
             headers={"X-Clerk-Session-Token": _make_token(priv, sub="user_intruder")},
         )
         assert resp.status_code == 404
+
+    @pytest.mark.eval_unit
+    def test_invalid_token_alone_per_user_endpoint_is_422(self, clerk_env, seeded, client):
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-Clerk-Session-Token": "not-a-jwt"},
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.eval_unit
+    def test_expired_token_alone_public_endpoint_is_200(self, clerk_env, rsa_keypair, client):
+        priv, _ = rsa_keypair
+        resp = client.get(
+            "/models",
+            headers={"X-Clerk-Session-Token": _make_token(priv, exp_delta=-60)},
+        )
+        assert resp.status_code == 200
+
+    @pytest.mark.eval_unit
+    def test_invalid_token_with_user_id_is_401(self, clerk_env, seeded, client):
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-Clerk-Session-Token": "not-a-jwt", "X-User-Id": TEST_SUB},
+        )
+        assert resp.status_code == 401
 
     @pytest.mark.eval_unit
     def test_no_token_is_anonymous_422(self, clerk_env, seeded, client):
@@ -669,8 +723,14 @@ class TestClerkWsVerification:
         assert "match" in (reason or "").lower()
 
     @pytest.mark.eval_unit
-    def test_invalid_token_ws_rejected(self, clerk_env):
-        user_id, reason = resolve_ws_identity({"clerk_session_token": "not-a-jwt"})
+    def test_invalid_token_ws_alone_is_anonymous(self, clerk_env):
+        assert resolve_ws_identity({"clerk_session_token": "not-a-jwt"}) == (None, None)
+
+    @pytest.mark.eval_unit
+    def test_invalid_token_ws_with_user_id_rejected(self, clerk_env):
+        user_id, reason = resolve_ws_identity(
+            {"user_id": TEST_SUB, "clerk_session_token": "not-a-jwt"}
+        )
         assert user_id is None
         assert "invalid" in (reason or "").lower()
 

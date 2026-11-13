@@ -308,6 +308,36 @@ class TestTokenDerivedIdentity:
             assert exc.value.code == 1008
         assert _row_count(temp_db, "sessions") == 0
 
+    def test_invalid_token_alone_connects_anonymously(
+        self, client, temp_db, clerk_env, monkeypatch
+    ):
+        # An expired/invalid token with no user_id must not break chat: the
+        # visitor connects as anonymous (BYOK key, nothing persisted).
+        _patch_agent(monkeypatch)
+        auth = {**_BYOK_AUTH, "clerk_session_token": "expired-or-garbage"}
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            ok = _drain_until(ws, "auth_success")
+            assert ok["session_id"] is None
+            ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+            _drain_until(ws, "response")
+
+        assert _row_count(temp_db, "sessions") == 0
+
+    def test_invalid_token_with_user_id_is_rejected(
+        self, client, temp_db, clerk_env
+    ):
+        auth = {**_BYOK_AUTH, "user_id": TEST_SUB, "clerk_session_token": "expired-or-garbage"}
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            err = ws.receive_json()
+            assert err["type"] == "error"
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_json()
+            assert exc.value.code == 1008
+        assert _row_count(temp_db, "sessions") == 0
+
     def test_token_only_verified_user_borrows_env_key(
         self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
     ):

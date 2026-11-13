@@ -171,6 +171,8 @@ def _resolve_identity(
     With Clerk enabled the verified token is the single source of truth:
       - token present -> verified `sub` is the user id. A supplied user id is
         optional, but if it differs from `sub` the request is rejected.
+      - invalid/expired token, no user id -> anonymous (tokens are short-lived;
+        public endpoints must keep working). With a user id -> rejected.
       - no token, Clerk-format user id -> rejected (claim without proof).
       - no token, no id (or a legacy UUID, unverifiable against Clerk) ->
         anonymous (None); endpoint-level checks (require_user_id) then gate
@@ -191,7 +193,13 @@ def _resolve_identity(
             or not _is_clerk_user_id(verified_sub)
             or _validate_user_id(verified_sub) is None
         ):
-            return None, "Invalid Clerk session token"
+            if raw_user_id:
+                # An explicit identity claim that can't be verified.
+                return None, "Invalid Clerk session token"
+            # Clerk session tokens are short-lived: a visitor whose token just
+            # expired must still reach public endpoints, as anonymous.
+            logger.info("Clerk token failed verification; treating caller as anonymous")
+            return None, None
         if raw_user_id and raw_user_id != verified_sub:
             logger.warning("Clerk token sub does not match supplied user_id")
             return None, "User ID does not match Clerk session"

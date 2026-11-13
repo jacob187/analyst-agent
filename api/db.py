@@ -415,10 +415,15 @@ async def get_or_create_session(ticker: str, user_id: str, model: str | None = N
     return session_id
 
 async def get_session_by_ticker(ticker: str, user_id: str) -> dict | None:
-    """Return session metadata for a ticker+user, or None if no session exists."""
+    """Return session metadata for a ticker+user, or None if no session exists.
+
+    Same ordering as `get_or_create_session` (newest wins) so REST lookup and
+    WebSocket resume always agree.
+    """
     db = await get_db()
     async with db.execute(
-        "SELECT id, ticker, user_id, model, created_at FROM sessions WHERE ticker = ? AND user_id = ?",
+        "SELECT id, ticker, user_id, model, created_at FROM sessions WHERE ticker = ? AND user_id = ? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
         (ticker.upper(), user_id)
     ) as cursor:
         row = await cursor.fetchone()
