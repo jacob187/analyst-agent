@@ -260,7 +260,7 @@ class TestTokenDerivedIdentity:
             try:
                 sessions = conn.execute("SELECT id, user_id FROM sessions").fetchall()
                 messages = conn.execute(
-                    "SELECT session_id, role, content FROM messages ORDER BY created_at"
+                    "SELECT session_id, role, content FROM messages ORDER BY rowid"
                 ).fetchall()
             finally:
                 conn.close()
