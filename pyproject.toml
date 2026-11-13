@@ -27,6 +27,10 @@ dependencies = [
     "langsmith==0.7.37",
     "pyjwt[crypto]>=2.9.0",
     "cachetools>=5.3",
+    "opentelemetry-sdk==1.45.2",
+    "opentelemetry-exporter-otlp-proto-http==1.45.2",
+    "openinference-instrumentation-langchain==0.1.86",
+    "openinference-semantic-conventions==0.1.44",
 ]
 
 [tool.pytest.ini_options]
