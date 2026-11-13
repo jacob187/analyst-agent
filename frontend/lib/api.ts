@@ -1,5 +1,4 @@
-import { API_BASE } from "./constants";
-import { getUserId } from "@/hooks/useUserId";
+import { API_BASE, DEV_USER_ID } from "./constants";
 import type {
   ApiKeys,
   BriefingResponse,
@@ -29,11 +28,6 @@ function keyHeaders(keys: Partial<ApiKeys>): Record<string, string> {
   return h;
 }
 
-function userIdHeader(): Record<string, string> {
-  const id = getUserId();
-  return id ? { "X-User-Id": id } : {};
-}
-
 /**
  * Read a Clerk session JWT, if a Clerk session exists.
  * Returns null when Clerk hasn't loaded yet or the user is signed out.
@@ -50,8 +44,14 @@ export async function getClerkToken(): Promise<string | null> {
   }
 }
 
+/**
+ * Identity headers for browser calls. With Clerk enabled only the session token
+ * is sent (the backend derives the user from it); X-User-Id is sent solely in
+ * auth-disabled mode. Server components pass `serverAuthHeaders()` instead.
+ */
 async function authHeaders(): Promise<Record<string, string>> {
-  const headers: Record<string, string> = { ...userIdHeader() };
+  const headers: Record<string, string> = {};
+  if (DEV_USER_ID) headers["X-User-Id"] = DEV_USER_ID;
   const token = await getClerkToken();
   if (token) headers["X-Clerk-Session-Token"] = token;
   return headers;
@@ -188,15 +188,16 @@ export const api = {
   tickers: () =>
     get<{ tickers: TickerSummary[] }>("/tickers"),
 
-  sessions: (ticker: string) =>
-    get<{ sessions: Session[] }>(`/sessions?ticker=${ticker}`),
+  sessions: (ticker: string, headers?: Record<string, string>) =>
+    get<{ sessions: Session[] }>(`/sessions?ticker=${ticker}`, headers),
 
-  sessionByTicker: (ticker: string) =>
-    get<{ session: Session | null }>(`/sessions/by-ticker/${ticker}`),
+  sessionByTicker: (ticker: string, headers?: Record<string, string>) =>
+    get<{ session: Session | null }>(`/sessions/by-ticker/${ticker}`, headers),
 
-  messages: (sessionId: string, ticker: string) =>
+  messages: (sessionId: string, ticker: string, headers?: Record<string, string>) =>
     get<{ messages: Message[] }>(
-      `/sessions/${sessionId}/messages?ticker=${ticker}`
+      `/sessions/${sessionId}/messages?ticker=${ticker}`,
+      headers
     ),
 
   deleteSession: (sessionId: string, ticker: string) =>

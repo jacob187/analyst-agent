@@ -4,6 +4,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { ChatMessage } from "@/components/chat/ChatMessage";
 import { SessionActions } from "./SessionActions";
 import { api } from "@/lib/api";
+import { serverAuthHeaders } from "@/lib/server-auth";
 
 interface Props {
   params: Promise<{ id: string }>;
@@ -14,9 +15,16 @@ export default async function SessionPage({ params, searchParams }: Props) {
   const { id } = await params;
   const { ticker = "" } = await searchParams;
 
+  const authHeaders = await serverAuthHeaders();
   const [{ messages }, { sessions }] = await Promise.all([
-    api.messages(id, ticker).catch(() => ({ messages: [] })),
-    api.sessions(ticker).catch(() => ({ sessions: [] })),
+    api.messages(id, ticker, authHeaders).catch((err) => {
+      console.error("session page: failed to load messages", err);
+      return { messages: [] };
+    }),
+    api.sessions(ticker, authHeaders).catch((err) => {
+      console.error("session page: failed to load sessions", err);
+      return { sessions: [] };
+    }),
   ]);
 
   const session = sessions.find((s) => s.id === id);
