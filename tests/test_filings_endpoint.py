@@ -690,6 +690,63 @@ class TestFailedExtractionNotAnalyzed:
         mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
 
 
+# ── unusable 8-K: both endpoints must report the same kind ─────────────────
+
+
+def _unusable_event_8k(deps):
+    """Event 8-K whose item text failed to extract (kept as kind 'event', empty
+    raw text, so _plan_sections marks it cache_only)."""
+    _core_only(deps)
+    deps["sec"].get_8k_overview.return_value = {
+        "found": True,
+        "has_earnings": False,
+        "items": ["5.02"],
+        "content_type": "director_change",
+        "context": "8K: Apple Inc. Current Report",
+        "metadata": _MOCK_8K_METADATA,
+    }
+    deps["sec"].get_8k_item.return_value = {
+        "text": "Error extracting 8-K item 5.02: boom", "metadata": {}, "found": False,
+    }
+
+
+def _cached_event_only(deps):
+    """Cache holds an analysis for the 8-K event only; all other sections miss."""
+    async def lookup(ticker, form_type, accession, analysis_type):
+        if form_type == "8-K" and analysis_type == "event":
+            return {"analysis_json": json.dumps({"event_type": "Leadership Change"})}
+        return None
+    deps["get_cache"].side_effect = lookup
+
+
+class TestUnusableEightKKindParity:
+    def _both(self, client):
+        json_kind = client.get("/api/company/AAPL/filings", headers=_KEYED).json()["eightk"]["kind"]
+        events = _stream_events(client, "/api/company/AAPL/filings/stream", _KEYED)
+        metadata = next(e for e in events if e.get("type") == "metadata")
+        return json_kind, metadata, events
+
+    def test_stream_reports_none_when_unusable_and_uncached(self, client, mock_filings_deps):
+        _unusable_event_8k(mock_filings_deps)
+        json_kind, metadata, events = self._both(client)
+        assert metadata["eightk_kind"] == "none"
+        assert metadata["eightk_metadata"] is None
+        assert not any(e.get("type") == "section" and e["form"] == "8-K" for e in events)
+        assert json_kind == metadata["eightk_kind"]
+
+    def test_stream_reports_event_and_emits_cached_section(self, client, mock_filings_deps):
+        _unusable_event_8k(mock_filings_deps)
+        _cached_event_only(mock_filings_deps)
+        json_kind, metadata, events = self._both(client)
+        assert metadata["eightk_kind"] == "event"
+        assert metadata["eightk_metadata"] is not None
+        sections = [e for e in events if e.get("type") == "section" and e["form"] == "8-K"]
+        assert len(sections) == 1
+        assert sections[0]["data"]["event_type"] == "Leadership Change"
+        assert json_kind == metadata["eightk_kind"]
+        mock_filings_deps["processor"].analyze_material_event.assert_not_called()
+
+
 # ── #5: keyless callers must not pay for raw section extraction ────────────
 
 
