@@ -1,0 +1,138 @@
+# Benchmark question set. Editing this file changes the question-set hash, so
+# runs made before and after the edit are not comparable (judge refuses them).
+#
+# Categories:
+#   filing_lookup    - risk factors, MD&A, balance sheet from 10-K / 10-Q
+#   multi_step       - combines filings + financials + technicals
+#   material_events  - 8-K disclosures
+#   technicals       - price action and indicators
+#   market_news      - web research / macro context (needs a Tavily key to be answerable)
+- id: aapl-risk-factors
+  ticker: AAPL
+  category: filing_lookup
+  question: What are the most significant risk factors Apple discloses in its latest 10-K, and which of them are new or have changed in emphasis compared with the prior year?
+
+- id: nvda-mdna-datacenter
+  ticker: NVDA
+  category: filing_lookup
+  question: According to NVIDIA's latest annual MD&A, what drove the change in Data Center revenue and gross margin year over year?
+
+- id: jpm-balance-sheet
+  ticker: JPM
+  category: filing_lookup
+  question: Summarize JPMorgan's latest balance sheet. How have total assets, deposits, and shareholders' equity changed versus the prior year-end?
+
+- id: aapl-liquidity-capital-returns
+  ticker: AAPL
+  category: filing_lookup
+  question: How does Apple describe its liquidity position and capital return program in its latest 10-K, including cash, debt, buybacks, and dividends?
+
+- id: nvda-customer-concentration
+  ticker: NVDA
+  category: filing_lookup
+  question: What does NVIDIA's latest 10-K say about customer concentration and supply chain dependencies, and how material are they to revenue?
+
+- id: jpm-credit-risk-allowance
+  ticker: JPM
+  category: filing_lookup
+  question: What does JPMorgan's latest filing say about credit risk, and how did the allowance for credit losses and net charge-offs change over the period?
+
+- id: aapl-multi-valuation-check
+  ticker: AAPL
+  category: multi_step
+  question: Combine Apple's latest reported revenue and net income trends with its recent price action. Does the stock's momentum look supported by fundamentals?
+
+- id: nvda-multi-growth-vs-trend
+  ticker: NVDA
+  category: multi_step
+  question: Compare NVIDIA's most recent quarterly revenue growth and margins with its current technical trend. Is the market pricing in more growth than the filings support?
+
+- id: jpm-multi-earnings-vs-technicals
+  ticker: JPM
+  category: multi_step
+  question: Using JPMorgan's latest filings and its recent price and volume behavior, assess whether the stock reflects its recent earnings and credit-quality picture.
+
+- id: aapl-multi-risk-and-chart
+  ticker: AAPL
+  category: multi_step
+  question: Take Apple's top two disclosed risk factors and tell me whether the recent price history and technical indicators suggest the market is reacting to either of them.
+
+- id: nvda-multi-balance-sheet-momentum
+  ticker: NVDA
+  category: multi_step
+  question: Pull NVIDIA's cash, debt, and inventory trend from the latest filings and relate it to the stock's multi-timeframe technical picture. What stands out?
+
+- id: jpm-multi-capital-and-trend
+  ticker: JPM
+  category: multi_step
+  question: Summarize JPMorgan's capital position and net interest income trend from its filings, then say how the recent technical setup compares with that fundamental story.
+
+- id: aapl-8k-recent
+  ticker: AAPL
+  category: material_events
+  question: What material events has Apple disclosed in its most recent 8-K filings, and is any of them likely to matter to investors?
+
+- id: nvda-8k-recent
+  ticker: NVDA
+  category: material_events
+  question: Summarize NVIDIA's most recent 8-K filings. Were there earnings releases, executive changes, or other material agreements?
+
+- id: jpm-8k-recent
+  ticker: JPM
+  category: material_events
+  question: What has JPMorgan reported in its latest 8-Ks? Flag anything involving leadership, capital actions, or regulatory matters.
+
+- id: aapl-8k-leadership-governance
+  ticker: AAPL
+  category: material_events
+  question: Has Apple filed any 8-Ks recently about executive officer or board changes, or shareholder meeting results? What did they say?
+
+- id: nvda-8k-agreements
+  ticker: NVDA
+  category: material_events
+  question: Did NVIDIA disclose any material definitive agreements, acquisitions, or financing arrangements in recent 8-Ks?
+
+- id: aapl-technicals-trend
+  ticker: AAPL
+  category: technicals
+  question: What do Apple's RSI, MACD, and moving averages say about its current trend and momentum?
+
+- id: nvda-technicals-multitimeframe
+  ticker: NVDA
+  category: technicals
+  question: Give me a multi-timeframe technical read on NVIDIA across daily, weekly, and monthly charts. Do the timeframes agree?
+
+- id: jpm-technicals-levels
+  ticker: JPM
+  category: technicals
+  question: Where are JPMorgan's key support and resistance levels, and do Bollinger Bands or volume suggest a breakout or a reversal?
+
+- id: aapl-technicals-patterns
+  ticker: AAPL
+  category: technicals
+  question: Are there any notable chart patterns forming in Apple's recent price action, and how reliable do they look given volume?
+
+- id: nvda-technicals-volatility
+  ticker: NVDA
+  category: technicals
+  question: How volatile has NVIDIA been recently relative to its own history, and are the technical indicators showing overbought or oversold conditions?
+
+- id: nvda-news-competition
+  ticker: NVDA
+  category: market_news
+  question: What recent news and competitive developments could affect NVIDIA's position in AI accelerators, and who are its main competitors?
+
+- id: jpm-news-rates-macro
+  ticker: JPM
+  category: market_news
+  question: How are current interest rates, Treasury yields, and recent macro news likely to affect JPMorgan's earnings outlook?
+
+- id: aapl-news-recent
+  ticker: AAPL
+  category: market_news
+  question: What are the most important recent news stories about Apple, and what is the general market sentiment around the stock?
+
+- id: jpm-news-market-overview
+  ticker: JPM
+  category: market_news
+  question: Give me a quick overview of broad market conditions today (major indices, VIX, Treasury yields) and how banks like JPMorgan are positioned in it.
