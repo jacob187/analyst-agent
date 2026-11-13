@@ -23,7 +23,11 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
   const [freeTrial, setFreeTrial] = useState<{ queries: number } | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const streamingIdxRef = useRef<number | null>(null);
+  // Id of the assistant bubble currently being filled. Set and cleared
+  // synchronously in the WS handler (never inside a setMessages updater): React
+  // runs updaters lazily, so a ref mutated or read there can be stale by the
+  // time it runs — which split one reply across two bubbles.
+  const streamingIdRef = useRef<string | null>(null);
 
   // ── Refs for unstable values ────────────────────────────────────────────────
   // Reading from refs inside connect() means we never need them as deps,
@@ -98,62 +102,70 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
           }
           break;
 
-        case "thinking":
-          setMessages((prev) => {
-            if (streamingIdxRef.current === null) {
-              streamingIdxRef.current = prev.length;
-              return [
-                ...prev,
-                {
-                  id: crypto.randomUUID(),
-                  role: "assistant",
-                  content: "",
-                  thinking: data.message ?? "",
-                  isStreaming: true,
-                  status: "Thinking…",
-                },
-              ];
-            }
-            return prev.map((m, i) =>
-              i === streamingIdxRef.current
-                ? { ...m, thinking: (m.thinking ?? "") + (data.message ?? "") }
-                : m
+        case "thinking": {
+          const id = streamingIdRef.current;
+          if (id === null) {
+            const newId = crypto.randomUUID();
+            streamingIdRef.current = newId;
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: newId,
+                role: "assistant",
+                content: "",
+                thinking: data.message ?? "",
+                isStreaming: true,
+                status: "Thinking…",
+              },
+            ]);
+          } else {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === id
+                  ? { ...m, thinking: (m.thinking ?? "") + (data.message ?? "") }
+                  : m
+              )
             );
-          });
+          }
           break;
+        }
 
         case "token":
-        case "response":
-          setMessages((prev) => {
-            if (streamingIdxRef.current === null) {
-              streamingIdxRef.current = prev.length;
-              return [
-                ...prev,
-                {
-                  id: crypto.randomUUID(),
-                  role: "assistant",
-                  content: data.message ?? "",
-                  isStreaming: data.type === "token",
-                  status: data.type === "token" ? "Responding…" : undefined,
-                },
-              ];
-            }
-            return prev.map((m, i) =>
-              i === streamingIdxRef.current
-                ? {
-                    ...m,
-                    content:
-                      data.type === "response"
-                        ? (data.message ?? "")
-                        : m.content + (data.message ?? ""),
-                    isStreaming: data.type === "token",
-                    status: data.type === "token" ? "Responding…" : undefined,
-                  }
-                : m
+        case "response": {
+          const id = streamingIdRef.current;
+          const isToken = data.type === "token";
+          if (id === null) {
+            const newId = crypto.randomUUID();
+            // A final response closes the cycle; a token opens one.
+            streamingIdRef.current = isToken ? newId : null;
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: newId,
+                role: "assistant",
+                content: data.message ?? "",
+                isStreaming: isToken,
+                status: isToken ? "Responding…" : undefined,
+              },
+            ]);
+          } else {
+            if (!isToken) streamingIdRef.current = null;
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === id
+                  ? {
+                      ...m,
+                      content: isToken
+                        ? m.content + (data.message ?? "")
+                        : (data.message ?? ""),
+                      isStreaming: isToken,
+                      status: isToken ? "Responding…" : undefined,
+                    }
+                  : m
+              )
             );
-          });
-          if (data.type === "response") {
-            streamingIdxRef.current = null;
+          }
+          if (!isToken) {
             // Clean up any leftover status-only messages (e.g. "Processing query…")
             // that were created by earlier node/tool events for this response cycle.
             setMessages((prev) =>
@@ -161,34 +173,39 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
             );
           }
           break;
+        }
 
-        case "node":
-          setMessages((prev) => {
-            if (streamingIdxRef.current === null) {
-              streamingIdxRef.current = prev.length;
-              return [
-                ...prev,
-                {
-                  id: crypto.randomUUID(),
-                  role: "assistant",
-                  content: "",
-                  isStreaming: true,
-                  status: data.message ?? "Processing…",
-                },
-              ];
-            }
-            return prev.map((m, i) =>
-              i === streamingIdxRef.current
-                ? { ...m, status: data.message ?? m.status }
-                : m
+        case "node": {
+          const id = streamingIdRef.current;
+          if (id === null) {
+            const newId = crypto.randomUUID();
+            streamingIdRef.current = newId;
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: newId,
+                role: "assistant",
+                content: "",
+                isStreaming: true,
+                status: data.message ?? "Processing…",
+              },
+            ]);
+          } else {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === id ? { ...m, status: data.message ?? m.status } : m
+              )
             );
-          });
+          }
           break;
+        }
 
-        case "tool":
+        case "tool": {
+          const id = streamingIdRef.current;
+          if (id === null) break;
           setMessages((prev) =>
-            prev.map((m, i) =>
-              i === streamingIdxRef.current
+            prev.map((m) =>
+              m.id === id
                 ? {
                     ...m,
                     status: data.message ?? `Running ${data.tool ?? "tool"}…`,
@@ -197,19 +214,40 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
             )
           );
           break;
+        }
 
-        case "error":
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: crypto.randomUUID(),
-              role: "assistant",
-              content: `Error: ${data.message ?? "Unknown error"}`,
-              isStreaming: false,
-            },
-          ]);
-          streamingIdxRef.current = null;
+        case "error": {
+          const id = streamingIdRef.current;
+          streamingIdRef.current = null;
+          const errorText = `Error: ${data.message ?? "Unknown error"}`;
+          if (id === null) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: crypto.randomUUID(),
+                role: "assistant",
+                content: errorText,
+                isStreaming: false,
+              },
+            ]);
+          } else {
+            // Close the in-flight bubble in place: keep any partial answer and
+            // append the error, instead of leaving it spinning beside a new one.
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === id
+                  ? {
+                      ...m,
+                      content: m.content ? `${m.content}\n\n${errorText}` : errorText,
+                      isStreaming: false,
+                      status: undefined,
+                    }
+                  : m
+              )
+            );
+          }
           break;
+        }
 
         default:
           break;
@@ -218,7 +256,7 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
 
     ws.onclose = () => {
       setStatus("disconnected");
-      streamingIdxRef.current = null;
+      streamingIdRef.current = null;
     };
 
     ws.onerror = () => setStatus("error");
@@ -244,7 +282,7 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
 
   const sendMessage = useCallback((text: string) => {
     if (wsRef.current?.readyState !== WebSocket.OPEN) return;
-    streamingIdxRef.current = null;
+    streamingIdRef.current = null;
     setMessages((prev) => [
       ...prev,
       { id: crypto.randomUUID(), role: "user", content: text },

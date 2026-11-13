@@ -14,6 +14,7 @@ from agents.graph import analyst_graph
 from agents.graph.analyst_graph import (
     LLMTimeoutError,
     _run_with_timeout,
+    _stream_with_timeout,
     _truncate_messages,
 )
 from langchain_core.messages import AIMessage, HumanMessage
@@ -48,6 +49,54 @@ async def test_run_with_timeout_includes_label_in_error(monkeypatch):
 
     with pytest.raises(LLMTimeoutError, match="my_label"):
         await _run_with_timeout(slow(), label="my_label")
+
+
+# ---------------------------------------------------------------------------
+# Streaming: idle deadline + total cap
+# ---------------------------------------------------------------------------
+
+
+async def _chunks(n: int, gap: float):
+    for i in range(n):
+        await asyncio.sleep(gap)
+        yield f"c{i}"
+
+
+@pytest.mark.asyncio
+async def test_stream_slow_but_steady_completes(monkeypatch):
+    # Total time (~0.2s) exceeds the idle deadline, but every gap is under it.
+    monkeypatch.setattr(analyst_graph, "LLM_CALL_TIMEOUT", 0.1)
+    monkeypatch.setattr(analyst_graph, "LLM_STREAM_MAX_SECONDS", 5.0)
+
+    got = []
+    await _stream_with_timeout(_chunks(8, 0.025), got.append, label="s")
+    assert got == [f"c{i}" for i in range(8)]
+
+
+@pytest.mark.asyncio
+async def test_stream_stall_raises_with_partial_output(monkeypatch):
+    monkeypatch.setattr(analyst_graph, "LLM_CALL_TIMEOUT", 0.05)
+    monkeypatch.setattr(analyst_graph, "LLM_STREAM_MAX_SECONDS", 5.0)
+
+    async def stalls():
+        yield "first"
+        await asyncio.sleep(1.0)
+        yield "never"
+
+    got = []
+    with pytest.raises(LLMTimeoutError, match="stall_label"):
+        await _stream_with_timeout(stalls(), got.append, label="stall_label")
+    assert got == ["first"]
+
+
+@pytest.mark.asyncio
+async def test_stream_total_cap_raises(monkeypatch):
+    # Each gap is under the idle deadline, but the stream never ends.
+    monkeypatch.setattr(analyst_graph, "LLM_CALL_TIMEOUT", 0.1)
+    monkeypatch.setattr(analyst_graph, "LLM_STREAM_MAX_SECONDS", 0.15)
+
+    with pytest.raises(LLMTimeoutError):
+        await _stream_with_timeout(_chunks(1000, 0.02), lambda _: None, label="cap")
 
 
 # ---------------------------------------------------------------------------
