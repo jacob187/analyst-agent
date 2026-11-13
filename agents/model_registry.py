@@ -8,6 +8,7 @@ Adding a new model requires only editing models.json — no code changes.
 """
 
 import json
+import re
 from datetime import date
 from pathlib import Path
 from typing import Annotated, Any
@@ -47,9 +48,9 @@ class ModelDef(BaseModel):
     @classmethod
     def _iso_date(cls, value: str | None) -> str | None:
         if value is not None:
-            date.fromisoformat(value)
-            if len(value) != 10:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
                 raise ValueError("prices_as_of must be YYYY-MM-DD")
+            date.fromisoformat(value)  # rejects impossible dates (2026-13-01)
         return value
 
 

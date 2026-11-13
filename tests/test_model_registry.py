@@ -206,7 +206,7 @@ class TestPriceFields:
         with pytest.raises(ValidationError):
             _build_registry([_entry(input_price_per_mtok=bad)])
 
-    @pytest.mark.parametrize("bad", ["2026-13-01", "Nov 1 2026", "20261101", 20261101])
+    @pytest.mark.parametrize("bad", ["2026-13-01", "Nov 1 2026", "20261101", "2026-W44-1", 20261101])
     def test_bad_prices_as_of_rejected(self, bad):
         with pytest.raises(ValidationError):
             _build_registry([_entry(prices_as_of=bad)])
