@@ -28,3 +28,7 @@ AGENTS.md
 # Claude Code (private config, shared skills)
 .claude/*
 !.claude/skills/
+
+# Agent tracking files (specs, plans, progress) and local benchmark reports
+.agent/
+benchmark_reports/
