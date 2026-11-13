@@ -12,10 +12,11 @@ Streaming:
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
-from typing import Dict, Any, TypedDict, Annotated, Optional, List, Literal, Generator, Union, Awaitable, Callable
+from typing import Dict, Any, TypedDict, Annotated, Optional, List, Literal, Generator, Union, Awaitable, Callable, AsyncIterator
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from langgraph.graph import StateGraph, END
@@ -44,6 +45,12 @@ logger = logging.getLogger(__name__)
 # indefinitely on adversarial prompts; without a timeout the WS session pins
 # an agent in memory and the user sees nothing. Env-overridable.
 LLM_CALL_TIMEOUT = float(os.getenv("LLM_CALL_TIMEOUT_SECONDS", "120"))
+
+# Streaming calls apply LLM_CALL_TIMEOUT as an *idle* deadline (time to first
+# chunk / between chunks) so a slow-but-progressing synthesis isn't killed
+# mid-answer. This hard cap still bounds the total so a trickling stream can't
+# pin the WS session forever. Env-overridable.
+LLM_STREAM_MAX_SECONDS = float(os.getenv("LLM_STREAM_MAX_SECONDS", "300"))
 
 # Cap on conversation history passed to the ReAct agent. Bounds per-turn token
 # cost; without this, every prior message is re-sent to the LLM each turn so
@@ -79,6 +86,44 @@ async def _run_with_timeout(coro, *, label: str):
         except asyncio.TimeoutError as e:
             logger.warning("LLM call timed out: label=%s timeout=%ss", label, LLM_CALL_TIMEOUT)
             raise LLMTimeoutError(f"LLM call '{label}' timed out after {LLM_CALL_TIMEOUT}s") from e
+
+
+async def _stream_with_timeout(
+    chunks: AsyncIterator[Any], on_chunk: Callable[[Any], None], *, label: str
+) -> None:
+    """Consume an LLM stream under an idle deadline plus a total cap.
+
+    Each chunk must arrive within `LLM_CALL_TIMEOUT` of the previous one (or of
+    the start), and the whole stream must finish within `LLM_STREAM_MAX_SECONDS`.
+    Holds one LLM dispatch slot for the stream's lifetime, like `_run_with_timeout`.
+    """
+    loop = asyncio.get_running_loop()
+    async with llm_slot():
+        it = chunks.__aiter__()
+        deadline = loop.time() + LLM_STREAM_MAX_SECONDS
+        try:
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise LLMTimeoutError(
+                        f"LLM call '{label}' exceeded the {LLM_STREAM_MAX_SECONDS}s stream cap"
+                    )
+                idle = min(LLM_CALL_TIMEOUT, remaining)
+                try:
+                    chunk = await asyncio.wait_for(anext(it), timeout=idle)
+                except StopAsyncIteration:
+                    return
+                except asyncio.TimeoutError as e:
+                    logger.warning("LLM stream stalled: label=%s idle_timeout=%ss", label, idle)
+                    raise LLMTimeoutError(
+                        f"LLM call '{label}' produced no output for {idle:.0f}s"
+                    ) from e
+                on_chunk(chunk)
+        finally:
+            aclose = getattr(it, "aclose", None)
+            if aclose is not None:
+                with contextlib.suppress(Exception):
+                    await aclose()
 
 
 class StepResult(TypedDict):
@@ -543,18 +588,16 @@ def create_synthesizer_node(llm: BaseChatModel, ticker: str):
             pass
 
         if writer:
-            # Streaming path: emit tokens/thinking as they arrive. The entire
-            # stream has a single deadline — total synthesis time can't exceed
-            # LLM_CALL_TIMEOUT even with thinking enabled.
-            async def _stream() -> str:
-                full = ""
-                async for chunk in llm.astream(prompt):
-                    full += _process_streaming_chunk(chunk, writer)
-                return full
-
-            state["final_response"] = await _run_with_timeout(
-                _stream(), label="synthesizer_stream"
+            # Streaming path: emit tokens/thinking as they arrive. Times out on
+            # stalls (no chunk within LLM_CALL_TIMEOUT), not on total length;
+            # LLM_STREAM_MAX_SECONDS caps the whole stream.
+            parts: List[str] = []
+            await _stream_with_timeout(
+                llm.astream(prompt),
+                lambda chunk: parts.append(_process_streaming_chunk(chunk, writer)),
+                label="synthesizer_stream",
             )
+            state["final_response"] = "".join(parts)
         else:
             response = await _run_with_timeout(
                 llm.ainvoke(prompt), label="synthesizer_invoke"
