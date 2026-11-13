@@ -842,6 +842,21 @@ class TestBudgetChargedPerSection:
         assert len(_generated(events)) == 5
         assert _usage(_ENV_USER) == 5
 
+    def test_section_refused_a_dispatch_slot_charges_nothing(
+        self, client, mock_filings_deps, budget_db, monkeypatch
+    ):
+        from api import llm_concurrency
+        _core_only(mock_filings_deps)
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        monkeypatch.setattr(llm_concurrency, "LLM_DISPATCH_CONCURRENCY", 0)
+        monkeypatch.setattr(llm_concurrency, "LLM_DISPATCH_WAIT_SECONDS", 0.01)
+        llm_concurrency._rebuild_semaphore()
+
+        resp = client.get("/api/company/AAPL/filings", headers={"X-User-Id": _ENV_USER})
+        assert resp.status_code == 200
+        mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
+        assert _usage(_ENV_USER) == 0
+
     def test_fully_cached_charges_nothing(self, client, mock_filings_deps, budget_db, monkeypatch):
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
         mock_filings_deps["get_cache"].return_value = {

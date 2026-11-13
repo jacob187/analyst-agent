@@ -539,9 +539,11 @@ async def _analyze_or_cache(
     logger.info("[%s] LLM CALL   %s/%s — calling %s", ticker, form_type, analysis_type, model_id)
     t0 = time.monotonic()
     try:
-        if charge_user_id:
-            await charge_llm_call(charge_user_id)
         async with llm_slot():
+            # Charged only once a slot is held: a saturated pool fails the
+            # section before any LLM call, so it costs nothing.
+            if charge_user_id:
+                await charge_llm_call(charge_user_id)
             analysis = await asyncio.to_thread(
                 _run_llm_analysis, ticker, analysis_type, llm_input, model_id, api_key,
             )
