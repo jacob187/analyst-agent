@@ -387,12 +387,15 @@ async def get_or_create_session(ticker: str, user_id: str, model: str | None = N
 
     One session per ticker per user is enforced at the application level.
     Entering AAPL always resumes that user's AAPL conversation — delete
-    the session from History to start fresh.
+    the session from History to start fresh. If several exist (legacy data),
+    the most recently created one wins; rowid breaks created_at's 1-second ties.
     """
     db = await get_db()
     ticker = ticker.upper()
     async with db.execute(
-        "SELECT id FROM sessions WHERE ticker = ? AND user_id = ?", (ticker, user_id)
+        "SELECT id FROM sessions WHERE ticker = ? AND user_id = ? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (ticker, user_id),
     ) as cursor:
         row = await cursor.fetchone()
         if row:
