@@ -551,6 +551,23 @@ class TestAnonFreeTrial:
         assert len(served) == 1
         assert "ticker=AAPL" in served[0].message
 
+    def test_free_trial_query_log_names_model_and_billing(
+        self, client, temp_db, monkeypatch, caplog
+    ):
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+
+        with caplog.at_level(logging.INFO, logger="api.routes.chat"):
+            with client.websocket_connect("/ws/chat/AAPL") as ws:
+                ws.send_text(json.dumps({"type": "auth"}))
+                ok = _drain_until(ws, "auth_success")
+                ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+                _drain_until(ws, "response")
+
+        [record] = _query_logs(caplog)
+        assert f"model={ok['model_id']}" in record.getMessage()
+        assert "billing=free_trial" in record.getMessage()
+
     def test_free_trial_exhaustion_is_logged(self, client, temp_db, monkeypatch, caplog):
         _patch_agent(monkeypatch)
         monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
@@ -1195,3 +1212,59 @@ class TestPerCallBudget:
 
         time.sleep(0.2)
         assert _usage(_SIGNED_IN) == 0
+
+
+# ── One INFO line per query: which model answered, and who paid ─────────────
+
+
+def _query_logs(caplog):
+    return [
+        r for r in caplog.records
+        if r.name == "api.routes.chat" and r.levelno == logging.INFO
+        and r.getMessage().startswith("Chat query")
+    ]
+
+
+class TestQueryLog:
+    def test_byok_query_logs_model_and_billing(self, client, temp_db, monkeypatch, caplog):
+        _patch_agent(monkeypatch)
+        auth = {**_BYOK_AUTH, "model_id": "claude-haiku-5-5"}
+
+        with caplog.at_level(logging.INFO, logger="api.routes.chat"):
+            with client.websocket_connect("/ws/chat/AAPL") as ws:
+                ws.send_text(json.dumps(auth))
+                _drain_until(ws, "auth_success")
+                ws.send_text(json.dumps({"type": "query", "message": "private question"}))
+                _drain_until(ws, "response")
+
+        [record] = _query_logs(caplog)
+        message = record.getMessage()
+        assert "model=claude-haiku-5-5" in message
+        assert "ticker=AAPL" in message
+        assert "billing=byok" in message
+        assert "session=None" in message
+        assert "private question" not in message
+        assert "byok-key" not in message
+
+    def test_operator_paid_query_logs_session_not_user(
+        self, client, temp_db, monkeypatch, caplog
+    ):
+        _patch_agent(monkeypatch)
+        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+
+        with caplog.at_level(logging.INFO, logger="api.routes.chat"):
+            with client.websocket_connect("/ws/chat/AAPL") as ws:
+                ws.send_text(json.dumps(
+                    {"type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE}
+                ))
+                ok = _drain_until(ws, "auth_success")
+                ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+                _drain_until(ws, "response")
+
+        [record] = _query_logs(caplog)
+        message = record.getMessage()
+        assert f"model={_LENDABLE}" in message
+        assert "billing=operator" in message
+        assert f"session={ok['session_id']}" in message
+        assert _SIGNED_IN not in message
+        assert "operator-key" not in message

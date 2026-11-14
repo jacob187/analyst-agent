@@ -421,6 +421,13 @@ async def chat(websocket: WebSocket, ticker: str):
                             "Free trial query served: %s ticker=%s model=%s", ip_key, ticker, model_id
                         )
 
+                    logger.info(
+                        "Chat query: ticker=%s model=%s billing=%s session=%s",
+                        ticker, model_id,
+                        "free_trial" if free_trial else "operator" if operator_paid else "byok",
+                        session_id,
+                    )
+
                     run_callbacks: list = []
                     if operator_paid and user_id:
                         charger = LLMCallCharger(user_id)
