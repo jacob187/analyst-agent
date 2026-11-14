@@ -11,6 +11,7 @@ from pathlib import Path
 
 from evals.benchmark.common import DEFAULT_TIMEOUT_S, BenchmarkError, prepare_environment, provider_api_key, resolve_model
 from evals.benchmark.compare_summary import DEFAULT_CHAT_COST_MULTIPLE, comparison_text
+from evals.benchmark.isolation import quiet_attribute_truncation
 from evals.benchmark.questions import DEFAULT_QUESTIONS_PATH, load_questions
 
 # Anchored to the repo root (gitignored), wherever the command is run from.
@@ -91,11 +92,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     _, model = preflight(args.graph, args.model)
     questions = load_questions(args.questions)
     print(f"Running {args.graph} with model {model.id}")
-    asyncio.run(
-        run_benchmark(
-            args.graph, model, questions, args.out, only=args.only, timeout_s=args.timeout
+    with quiet_attribute_truncation():
+        asyncio.run(
+            run_benchmark(
+                args.graph, model, questions, args.out, only=args.only, timeout_s=args.timeout
+            )
         )
-    )
     return 0
 
 
@@ -174,14 +176,15 @@ def _cmd_compare_models(args: argparse.Namespace) -> int:
         if not compare.confirm("Run these models and spend the estimated cost? [y/N] "):
             raise BenchmarkError("Not confirmed, nothing was run. Pass --yes to skip the prompt.")
 
-    summary = asyncio.run(
-        compare.execute(
-            plan,
-            lambda: compare.make_judge_llm(plan.judge_model),
-            timeout_s=args.timeout,
-            chat_cost_multiple=args.chat_cost_multiple,
+    with quiet_attribute_truncation():
+        summary = asyncio.run(
+            compare.execute(
+                plan,
+                lambda: compare.make_judge_llm(plan.judge_model),
+                timeout_s=args.timeout,
+                chat_cost_multiple=args.chat_cost_multiple,
+            )
         )
-    )
     print(comparison_text(summary))
     print(f"Wrote {out / compare.SUMMARY_FILE} and {out / compare.REPORT_FILE}")
     return 0
