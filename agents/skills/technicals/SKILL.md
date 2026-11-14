@@ -26,6 +26,10 @@ Use this skill for stock price, valuation metrics and anything about technical i
 - `get_pattern_detection`: Head & Shoulders, Double Top/Bottom, Golden/Death Cross and RSI divergences, with confidence scores.
 - `get_multi_timeframe_analysis`: daily / weekly / hourly analysis with conflict detection and a weighted recommendation. Use it when the user asks about timeframes or conflicting signals.
 
+## Add context from other domains
+
+Indicators show what price did, not why. Also load the news-research skill and check for recent news or catalysts (earnings, filings, guidance, analyst actions) that could explain the move, and mention the broader market backdrop when it matters (market-context skill). Report the technical read first, then the catalysts that support or contradict it.
+
 ## Explaining indicators
 
 For every indicator you discuss, give:

@@ -182,6 +182,30 @@ class TestPromptAssembly:
         assert model.requests[0]["messages"][0].content == expected
         assert "{ticker}" not in expected and TICKER in expected
 
+    async def test_system_prompt_asks_for_complete_cross_domain_cited_answers(self):
+        model, agent = build([AIMessage(content="ok")])
+        await collect(agent)
+
+        system = model.requests[0]["messages"][0].content
+        for phrase in (
+            "You may load more than one skill",  # multiple skills
+            "Answer every part of the question",  # completeness
+            "Look across domains",  # cross-domain evidence
+            "also check recent news and recent price action",  # 8-K / filing example
+            "check news or catalysts",  # technicals example
+            "give each one's source",  # cite sources
+            "filing type and period or filing date",
+            "Flag data gaps and contradictions instead of guessing",  # gaps / conflicts
+            "headings or bullets",  # structure
+        ):
+            assert phrase in system, phrase
+
+    def test_material_events_keeps_its_cross_checking_rules(self):
+        instructions = SKILLS["material-events"].instructions
+        assert "Describe each filing exactly once" in instructions
+        assert "Compare structured fields across sources" in instructions
+        assert "get_company_news" in instructions  # and now points at news/price context
+
     @pytest.mark.parametrize("skill_name", sorted(SKILLS))
     async def test_load_skill_returns_the_full_instructions(self, skill_name):
         model, agent = build([tool_turn(load(skill_name)), AIMessage(content="done")])
@@ -236,11 +260,84 @@ class TestPromptAssembly:
 
 
 # ---------------------------------------------------------------------------
-# Tool filtering
+# Tool exposure: every tool by default, per-skill filtering behind SKILLS_FILTER_TOOLS
 # ---------------------------------------------------------------------------
 
 
-class TestToolFiltering:
+@pytest.fixture(autouse=True)
+def _default_tool_mode(monkeypatch):
+    """Each test starts with the flag unset (the default: all tools exposed)."""
+    monkeypatch.delenv("SKILLS_FILTER_TOOLS", raising=False)
+
+
+ALL_TOOLS = {LOAD_SKILL_TOOL, *known_tool_names()}
+
+
+class TestAllToolsExposed:
+    async def test_every_tool_is_visible_before_any_skill_is_loaded(self):
+        model, agent = build([AIMessage(content="ok")])
+        await collect(agent)
+        assert set(model.requests[0]["tools"]) == ALL_TOOLS
+
+    @pytest.mark.parametrize("skill_name", sorted(SKILLS))
+    async def test_every_tool_is_still_visible_after_a_skill_is_loaded(self, skill_name):
+        model, agent = build([tool_turn(load(skill_name)), AIMessage(content="done")])
+        await collect(agent)
+        assert set(model.requests[1]["tools"]) == ALL_TOOLS
+
+    async def test_a_tool_outside_the_loaded_skill_can_be_called(self):
+        model, agent = build([
+            tool_turn(load("material-events")),
+            tool_turn(call("get_company_news")),
+            AIMessage(content="done"),
+        ])
+        events = await collect(agent)
+
+        assert {m.content for m in tool_messages(model.requests[2])} >= {"get_company_news result"}
+        assert events[-1] == {"type": "response", "message": "done"}
+
+    async def test_the_catalogue_says_all_tools_are_available(self):
+        model, agent = build([AIMessage(content="ok")])
+        await collect(agent)
+        system = model.requests[0]["messages"][0].content
+        assert "All tools are available" in system
+        assert "unlock" not in render_catalogue(SKILLS)
+
+    async def test_tools_missing_from_the_session_are_not_invented(self):
+        no_research = known_tool_names() - set(SKILLS["news-research"].tools)
+        model, agent = build([AIMessage(content="ok")], tools=fake_tools(no_research))
+        await collect(agent)
+        assert set(model.requests[0]["tools"]) == {LOAD_SKILL_TOOL, *no_research}
+
+    @pytest.mark.parametrize("value", ["", "false", "0", "no"])
+    async def test_other_flag_values_keep_all_tools(self, monkeypatch, value):
+        monkeypatch.setenv("SKILLS_FILTER_TOOLS", value)
+        model, agent = build([AIMessage(content="ok")])
+        await collect(agent)
+        assert set(model.requests[0]["tools"]) == ALL_TOOLS
+
+
+class TestFilteredToolsMode:
+    """SKILLS_FILTER_TOOLS=true: the previous per-skill tool unlocking."""
+
+    @pytest.fixture(autouse=True)
+    def _filter_on(self, monkeypatch):
+        monkeypatch.setenv("SKILLS_FILTER_TOOLS", "true")
+
+    @pytest.mark.parametrize("value", ["TRUE", " 1 ", "yes"])
+    async def test_other_truthy_values_also_filter(self, monkeypatch, value):
+        monkeypatch.setenv("SKILLS_FILTER_TOOLS", value)
+        model, agent = build([AIMessage(content="ok")])
+        await collect(agent)
+        assert model.requests[0]["tools"] == [LOAD_SKILL_TOOL]
+
+    async def test_the_catalogue_says_tools_unlock_on_load(self):
+        model, agent = build([AIMessage(content="ok")])
+        await collect(agent)
+        expected = render_base_prompt(TICKER) + "\n\n" + render_catalogue(SKILLS, filter_tools=True)
+        assert model.requests[0]["messages"][0].content == expected
+        assert "unlock its tools" in expected
+
     async def test_only_load_skill_is_visible_before_any_skill_is_loaded(self):
         model, agent = build([AIMessage(content="ok")])
         await collect(agent)
