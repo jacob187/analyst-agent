@@ -1,7 +1,7 @@
 """AC5: `report` renders a valid PDF containing every question id."""
 
 import re
-import zlib
+
 import pytest
 
 from evals.benchmark.cli import DEFAULT_REPORT_DIR, main
@@ -10,6 +10,7 @@ from evals.benchmark.report import flatten_markdown, pdf_text, render_report, wr
 from evals.benchmark.runs import load_run, write_model
 from evals.benchmark.summary import build_summary
 from tests.benchmark.helpers import FIXTURE_QUESTIONS, UNPRICED, FakeJudge, write_run
+from tests.benchmark.helpers import pdf_text_blob as _pdf_text_blob
 
 pytestmark = pytest.mark.eval_unit
 
@@ -32,18 +33,6 @@ Source: [10-K](https://example.com/10-k)
 # Far longer than a page, plus a token wider than the column.
 LONG_ANSWER = "\n".join(f"Paragraph {i}: " + "lorem ipsum dolor sit amet " * 12 for i in range(120))
 UNBROKEN = "x" * 400
-
-
-def _pdf_text_blob(pdf: bytes) -> str:
-    """All page-content text: inflate every stream, keep the text-showing operators."""
-    chunks = []
-    for raw in re.findall(rb"stream\r?\n(.*?)\r?\nendstream", pdf, re.S):
-        try:
-            chunks.append(zlib.decompress(raw))
-        except zlib.error:
-            chunks.append(raw)
-    blob = b"\n".join(chunks).decode("latin-1")
-    return blob.replace("\\(", "(").replace("\\)", ")").replace("\\\\", "\\")  # PDF string escapes
 
 
 def _page_count(pdf: bytes) -> int:
