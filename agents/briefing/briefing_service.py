@@ -12,6 +12,7 @@ from cachetools import TTLCache
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
 
 from agents.llm_utils import parse_llm_response
@@ -197,6 +198,7 @@ class BriefingService:
         user_id: str,
         model_id: str,
         previous_briefing: Optional[dict] = None,
+        config: Optional[RunnableConfig] = None,
     ) -> BriefingResult:
         """Build briefing for the given tickers.
 
@@ -210,6 +212,9 @@ class BriefingService:
         ``api.db.get_recent_briefings``), a "since last briefing" diff is
         attached to the resulting analysis. Pass ``None`` if no prior
         briefing exists.
+
+        ``config`` is the LangChain run config for the LLM call (e.g. budget
+        callbacks). A cache hit makes no LLM call and so never touches it.
         """
         cache_key = (user_id, model_id, tuple(sorted(tickers)))
         cached = _briefing_cache.get(cache_key)
@@ -220,7 +225,7 @@ class BriefingService:
         regime_data = self._get_market_regime()
         news_data = self._gather_news(tickers)
 
-        result = self._synthesize(ticker_data, regime_data, news_data)
+        result = self._synthesize(ticker_data, regime_data, news_data, config)
 
         if previous_briefing:
             diff_lines = _compute_diff(previous_briefing, result.analysis)
@@ -463,6 +468,7 @@ class BriefingService:
         ticker_data: list[dict[str, Any]],
         regime_data: dict[str, Any],
         news_data: dict[str, list[NewsItem]],
+        config: Optional[RunnableConfig] = None,
     ) -> BriefingResult:
         """Invoke LLM, capture thinking, then parse structured output.
 
@@ -486,7 +492,7 @@ class BriefingService:
             news_context=self._format_news_context(news_data),
             format_instructions=self.parser.get_format_instructions(),
         )
-        raw_response = (prompt_chain | self.llm).invoke({})
+        raw_response = (prompt_chain | self.llm).invoke({}, config=config)
 
         # Step 2: separate thinking from text using the reusable module
         parsed = parse_llm_response(raw_response)

@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
 
+import api.db as db_module
 from api import clerk_auth
 from api.dependencies import (
     ApiKeys,
@@ -590,6 +591,16 @@ class TestTokenIdentityEndpoint:
         assert len(resp.json()["messages"]) == 1
 
 
+@pytest.fixture
+async def fresh_db(tmp_path, monkeypatch):
+    """Fresh temp SQLite so /env-keys never touches the real data/chats.db."""
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr(db_module, "_db", None)
+    await db_module.init_db()
+    yield
+    await db_module.close_db()
+
+
 class TestEnvKeyGate:
     """With Clerk enabled, the operator's env keys are lent only to verified
     signed-in users — never to anonymous callers. This is the cost boundary:
@@ -664,7 +675,7 @@ class TestEnvKeyGate:
         assert result.google_api_key is None
 
     @pytest.mark.eval_unit
-    async def test_env_keys_endpoint_hides_provider_from_anon(self, clerk_env, monkeypatch):
+    async def test_env_keys_endpoint_hides_provider_from_anon(self, clerk_env, fresh_db, monkeypatch):
         # /env-keys must not advertise the operator key to anonymous callers,
         # or the UI renders chat/filings affordances the backend then refuses.
         from api.routes.models import env_keys
@@ -676,9 +687,10 @@ class TestEnvKeyGate:
         )
         body = await env_keys(keys)
         assert body["google"] is False
+        assert body["operator_models"] == []
 
     @pytest.mark.eval_unit
-    async def test_env_keys_endpoint_shows_provider_to_verified(self, clerk_env, rsa_keypair, monkeypatch):
+    async def test_env_keys_endpoint_shows_provider_to_verified(self, clerk_env, rsa_keypair, fresh_db, monkeypatch):
         from api.routes.models import env_keys
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
         priv, _ = rsa_keypair
@@ -690,6 +702,7 @@ class TestEnvKeyGate:
         )
         body = await env_keys(keys)
         assert body["google"] is True
+        assert body["operator_models"]  # the lendable Gemini models
 
 
 class TestClerkWsVerification:
@@ -1058,7 +1071,7 @@ class TestFreeTrial:
         assert free_trial_key() == "env-key"
 
     @pytest.mark.eval_unit
-    async def test_env_keys_endpoint_reports_free_trial_to_anon(self, clerk_env, monkeypatch):
+    async def test_env_keys_endpoint_reports_free_trial_to_anon(self, clerk_env, fresh_db, monkeypatch):
         # Even though clerk_env gates the ordinary provider booleans away from
         # anon (google=False), the free-trial model id is still surfaced — the
         # one deliberate exception to that gate.

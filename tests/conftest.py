@@ -70,6 +70,25 @@ def _reset_llm_semaphore():
     yield
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _close_db_at_session_end():
+    """Close any aiosqlite connection a test left open.
+
+    aiosqlite runs each connection on a non-daemon worker thread; one still
+    open at interpreter exit (e.g. a test that failed before its fixture
+    teardown, or a route that opened the default DB) keeps pytest from exiting.
+    Closing from a fresh loop is safe — the thread hands results back
+    thread-safely.
+    """
+    yield
+    import asyncio
+
+    from api import db
+
+    if db._db is not None:
+        asyncio.run(db.close_db())
+
+
 @pytest.fixture(autouse=True)
 def _reset_rate_limit_state():
     """Clear in-memory rate-limit caches between tests so REST tests that
