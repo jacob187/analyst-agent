@@ -296,12 +296,12 @@ async def chat(websocket: WebSocket, ticker: str):
 
         # Initialise agent
         try:
-            from agents.graph import agent_architecture, build_agent
+            from agents.graph.analyst_graph import create_sec_qa_agent
 
             llm, synthesizer_llm = create_llm_pair(model_id, api_key)
 
-            agent = build_agent(
-                agent_architecture(), ticker, llm,
+            agent = create_sec_qa_agent(
+                ticker, llm,
                 tavily_api_key=tavily_api_key,
                 synthesizer_llm=synthesizer_llm,
                 user_id=user_id,

@@ -36,10 +36,6 @@ SPAN_ATTRIBUTE_CAP = 64_000
 EVIDENCE_OUTPUT_CAP = 30_000  # one tool output
 EVIDENCE_INPUT_CAP = 2_000  # one tool input
 EVIDENCE_TOTAL_CAP = 120_000  # inputs + outputs of all of a question's tool calls
-# Tools whose output is scaffolding for the agent, not data an answer is built from
-# (agents.graph.skills_agent.LOAD_SKILL_TOOL: the skill's instructions). They stay
-# in ``tool_calls``; they are not evidence.
-INTERNAL_TOOLS = frozenset({"load_skill"})
 
 _INPUT = SpanAttributes.INPUT_VALUE
 _OUTPUT = SpanAttributes.OUTPUT_VALUE
@@ -143,7 +139,6 @@ def extract_evidence(
 ) -> tuple[list[ToolEvidence], bool]:
     """Bounded tool inputs/outputs for the judge, in call order.
 
-    * Internal tools (``INTERNAL_TOOLS``) are skipped.
     * A TOOL span nested inside another TOOL span (``web_search`` ->
       ``tavily_search``) is skipped: the outermost span's output is the evidence.
     * One output is cut at ``EVIDENCE_OUTPUT_CAP``, one input at
@@ -157,7 +152,7 @@ def extract_evidence(
     items: list[ToolEvidence] = []
     for span in sorted(tool_spans, key=lambda s: s.start_time or 0):
         name = _tool_name(span)
-        if name in INTERNAL_TOOLS or _is_nested_tool(span, by_id):
+        if _is_nested_tool(span, by_id):
             continue
         attrs = span.attributes or {}
         is_error = span.status.status_code == StatusCode.ERROR
