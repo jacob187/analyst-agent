@@ -175,6 +175,67 @@ def baseline_tokens(estimate_from: Path | None, reference_plan: RunPlan) -> Base
 
 
 @dataclass
+class JudgeBaseline:
+    """Judge tokens per judged question, used to price the judging still to do."""
+
+    input_tokens: float
+    output_tokens: float
+    label: str  # how the figures were obtained, shown beside the judge line of the estimate
+    assumed: bool
+
+
+def _measured_judge_baseline(sources: list[tuple[str, Judgement]]) -> JudgeBaseline | None:
+    """Mean recorded judge tokens per question over ``sources`` (path, judgement); None if none recorded."""
+    rows = [
+        (path, j.judge_model, q)
+        for path, j in sources
+        for q in j.questions
+        if q.judge_input_tokens is not None
+    ]
+    if not rows:
+        return None
+    n = len(rows)
+    mean_in = sum(q.judge_input_tokens for _, _, q in rows) / n
+    mean_out = sum(q.judge_output_tokens or 0 for _, _, q in rows) / n
+    models = ", ".join(sorted({model for _, model, _ in rows}))
+    origin = ", ".join(sorted({path for path, _, _ in rows}))
+    return JudgeBaseline(
+        mean_in,
+        mean_out,
+        f"measured: mean {mean_in:,.0f} in / {mean_out:,.0f} out tokens per question over {n} judged "
+        f"question(s) from {origin}, judge {models}",
+        assumed=False,
+    )
+
+
+def baseline_judge_tokens(out: Path, estimate_judge_from: Path | None) -> JudgeBaseline:
+    """Judge tokens per question: ``--estimate-judge-from``, else judgements already in ``out``, else an assumption."""
+    if estimate_judge_from is not None:
+        baseline = _measured_judge_baseline([(str(estimate_judge_from), load_judgement(estimate_judge_from))])
+        if baseline is None:
+            raise BenchmarkError(
+                f"--estimate-judge-from {estimate_judge_from} has no judged question with recorded token usage."
+            )
+        return baseline
+    sources: list[tuple[str, Judgement]] = []
+    for path in sorted((out / JUDGEMENTS_DIR).glob(f"*/{JUDGEMENT_FILE}")):
+        try:
+            sources.append((str(path.parent), load_judgement(path.parent)))
+        except BenchmarkError:
+            continue  # an unreadable earlier judgement just cannot contribute a measurement
+    baseline = _measured_judge_baseline(sources)
+    if baseline is not None:
+        return baseline
+    return JudgeBaseline(
+        ASSUMED_JUDGE_INPUT_TOKENS_PER_PAIR,
+        ASSUMED_JUDGE_OUTPUT_TOKENS_PER_PAIR,
+        f"assumed {ASSUMED_JUDGE_INPUT_TOKENS_PER_PAIR:,} in / {ASSUMED_JUDGE_OUTPUT_TOKENS_PER_PAIR:,} out tokens "
+        "per question: no earlier judgement with recorded usage",
+        assumed=True,
+    )
+
+
+@dataclass
 class CostLine:
     label: str
     model_id: str
@@ -188,6 +249,7 @@ class Estimate:
     baseline: Baseline
     lines: list[CostLine]
     free_tier_id: str | None
+    judge_baseline: JudgeBaseline
 
     @property
     def total_known(self) -> float:
@@ -213,6 +275,7 @@ def build_estimate(
     judge_model: ModelDef,
     n_questions: int,
     baseline: Baseline,
+    judge_baseline: JudgeBaseline,
 ) -> Estimate:
     lines: list[CostLine] = []
     for plan in run_plans:
@@ -223,20 +286,20 @@ def build_estimate(
         lines.append(CostLine(f"run {plan.model.id}", plan.model.id, usd, not plan.complete, pricing.prices_as_of))
     if judges_pending:
         pricing = pricing_from_model(judge_model)
+        pairs = n_questions * judges_pending
         usd = estimate_cost(
             pricing,
-            ASSUMED_JUDGE_INPUT_TOKENS_PER_PAIR * n_questions * judges_pending,
-            ASSUMED_JUDGE_OUTPUT_TOKENS_PER_PAIR * n_questions * judges_pending,
+            round(judge_baseline.input_tokens * pairs),
+            round(judge_baseline.output_tokens * pairs),
         )
         lines.append(
             CostLine(
-                f"judge x{judges_pending} (assumed {ASSUMED_JUDGE_INPUT_TOKENS_PER_PAIR:,} in / "
-                f"{ASSUMED_JUDGE_OUTPUT_TOKENS_PER_PAIR:,} out tokens per question)",
+                f"judge x{judges_pending} ({judge_baseline.label})",
                 judge_model.id, usd, True, pricing.prices_as_of,
             )
         )
     free = get_free_tier_model()
-    return Estimate(baseline, lines, free.id if free else None)
+    return Estimate(baseline, lines, free.id if free else None, judge_baseline)
 
 
 def estimate_text(estimate: Estimate, n_questions: int) -> str:
@@ -254,6 +317,8 @@ def estimate_text(estimate: Estimate, n_questions: int) -> str:
     out.append(f"  TOTAL: {total}")
     if estimate.baseline.rough:
         out.append("  (the token counts are a rough guess; the real cost may differ a lot)")
+    if estimate.judge_baseline.assumed and any(line.pending and line.label.startswith("judge") for line in estimate.lines):
+        out.append("  (the judge token counts are assumed, not measured; judge a pair once to measure them)")
     return "\n".join(out)
 
 
@@ -329,11 +394,12 @@ def _judgement_file(out: Path, model: ModelDef, reference: ModelDef) -> Path:
     return out / JUDGEMENTS_DIR / judgement_dirname(model.id, reference.id) / JUDGEMENT_FILE
 
 
-def estimate_plan(plan: Plan, estimate_from: Path | None) -> Estimate:
+def estimate_plan(plan: Plan, estimate_from: Path | None, estimate_judge_from: Path | None = None) -> Estimate:
     reference_plan = next(p for p in plan.run_plans if p.model.id == plan.reference.id)
     baseline = baseline_tokens(estimate_from, reference_plan)
+    judge_baseline = baseline_judge_tokens(plan.out, estimate_judge_from)
     return build_estimate(
-        plan.run_plans, len(plan.judges_pending), plan.judge_model, len(plan.selected_ids), baseline
+        plan.run_plans, len(plan.judges_pending), plan.judge_model, len(plan.selected_ids), baseline, judge_baseline
     )
 
 
@@ -380,7 +446,8 @@ async def execute(
             judge_llm = judge_llm or judge_llm_factory()
             progress(f"Judging {model_id} against {plan.reference.id}")
             judgement = await judge_runs(
-                model_run, reference_run, judge_llm, plan.judge_model.id, secrets.randbits(32), progress=progress
+                model_run, reference_run, judge_llm, plan.judge_model.id, secrets.randbits(32),
+                pricing=pricing_from_model(plan.judge_model), progress=progress,
             )
             write_model(path, judgement)
             errors = sum(q.status == "error" for q in judgement.questions)

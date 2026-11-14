@@ -6,6 +6,7 @@ the judge is the `FakeJudge`; no test can reach a real LLM or the network. The `
 `prepare_environment` is neutralised the way `TestCliErrors` does it.
 """
 
+import asyncio
 import io
 import json
 import sys
@@ -28,6 +29,7 @@ from evals.benchmark.compare import (
     default_out_dir,
     select_models,
 )
+from evals.benchmark.judge import judge_runs
 from evals.benchmark.runs import load_judgement, load_run, write_model
 from tests.benchmark.helpers import FakeAgent, FakeJudge, pdf_text_blob, write_run
 
@@ -57,6 +59,8 @@ TOKENS_IN, TOKENS_OUT = 250, 30
 STYLE: dict[str, str] = {}
 BUILDS: list[str] = []
 JUDGE_LLMS: list[object] = []
+# {"tokens": (in, out)} makes the fake judge report that usage per call (absent: no usage reported).
+JUDGE_USAGE: dict[str, tuple[int, int]] = {}
 
 
 async def _build(ticker: str, model_id: str):
@@ -85,9 +89,10 @@ def env(monkeypatch):
     STYLE.clear()
     BUILDS.clear()
     JUDGE_LLMS.clear()
+    JUDGE_USAGE.clear()
 
     def judge_factory(model):
-        judge = FakeJudge()
+        judge = FakeJudge(usage=JUDGE_USAGE.get("tokens"))
         JUDGE_LLMS.append(judge)
         return judge
 
@@ -492,3 +497,121 @@ class TestGuards:
         assert compare(qfile, out, "--models", FREE.id, f"--chat-cost-multiple={bad}") == 2
         assert "--chat-cost-multiple" in capsys.readouterr().err
         assert not out.exists()
+
+
+JUDGE_TOKENS_IN, JUDGE_TOKENS_OUT = 2000, 50
+
+
+def _judge_line(printed: str) -> str:
+    return next(line.strip() for line in printed.splitlines() if line.strip().startswith("judge x"))
+
+
+class TestJudgeCost:
+    """AC2/AC3: judge cost lands in summary.json and the PDF, and the estimate uses measured judge tokens."""
+
+    def test_the_judges_measured_cost_is_in_the_judgement_summary_pdf_and_total(
+        self, monkeypatch, qfile, out, capsys
+    ):
+        give_keys(monkeypatch, FREE)
+        JUDGE_USAGE["tokens"] = (JUDGE_TOKENS_IN, JUDGE_TOKENS_OUT)
+        assert compare(qfile, out, "--models", PAID.id, "--yes") == 0
+
+        # The judge model is the free-tier model, which has prices: cost = measured tokens x its prices.
+        expected = N * (JUDGE_TOKENS_IN * FREE.input_price_per_mtok + JUDGE_TOKENS_OUT * FREE.output_price_per_mtok) / 1e6
+        judgement = load_judgement(out / "judgements" / f"{PAID.id}-vs-{FREE.id}")
+        assert judgement.judge_input_tokens == N * JUDGE_TOKENS_IN
+        assert judgement.judge_output_tokens == N * JUDGE_TOKENS_OUT
+        assert judgement.judge_cost_usd == pytest.approx(expected)
+        assert judgement.judge_prices_as_of == FREE.prices_as_of
+        assert all(q.judge_input_tokens == JUDGE_TOKENS_IN for q in judgement.questions)
+
+        summary = json.loads((out / "summary.json").read_text())
+        run_cost = sum(m["totals"]["cost_usd"] for m in summary["models"].values())
+        assert summary["costs"]["judge_usd"] == pytest.approx(expected)
+        assert summary["costs"]["runs_usd"] == pytest.approx(run_cost)
+        assert summary["costs"]["total_usd"] == pytest.approx(run_cost + expected)
+        assert summary["models"][PAID.id]["judge"]["cost_usd"] == pytest.approx(expected)
+
+        text = pdf_text_blob((out / "report.pdf").read_bytes())
+        assert f"Judge cost: ${expected:.4f}." in text
+        assert f"Total (runs + judging): ${run_cost + expected:.4f}." in text
+        assert f"judging ${expected:.4f} = total ${run_cost + expected:.4f}" in capsys.readouterr().out
+
+    def test_an_unpriced_judge_model_is_unknown_everywhere_never_zero(self, monkeypatch, qfile, out, capsys):
+        give_keys(monkeypatch, FREE, UNPRICED_MODEL)
+        JUDGE_USAGE["tokens"] = (JUDGE_TOKENS_IN, JUDGE_TOKENS_OUT)
+        assert compare(qfile, out, "--models", PAID.id, "--judge-model", UNPRICED_MODEL.id, "--yes") == 0
+
+        judgement = load_judgement(out / "judgements" / f"{PAID.id}-vs-{FREE.id}")
+        assert judgement.judge_input_tokens == N * JUDGE_TOKENS_IN and judgement.judge_cost_usd is None
+        summary = json.loads((out / "summary.json").read_text())
+        assert summary["costs"]["judge_usd"] is None and summary["costs"]["total_usd"] is None
+        assert "Judge cost: unknown. Total (runs + judging): unknown." in pdf_text_blob((out / "report.pdf").read_bytes())
+        assert "judging unknown = total unknown" in capsys.readouterr().out
+
+    def test_the_estimate_uses_measured_judge_tokens_from_a_judgement_already_in_out(
+        self, monkeypatch, qfile, out, capsys
+    ):
+        give_keys(monkeypatch, FREE)
+        JUDGE_USAGE["tokens"] = (JUDGE_TOKENS_IN, JUDGE_TOKENS_OUT)
+        assert compare(qfile, out, "--models", PAID.id, "--yes") == 0
+        capsys.readouterr()
+
+        assert compare(qfile, out, "--models", f"{PAID.id},{PAID2.id}", "--dry-run") == 0
+        line = _judge_line(capsys.readouterr().out)
+        expected = N * (JUDGE_TOKENS_IN * FREE.input_price_per_mtok + JUDGE_TOKENS_OUT * FREE.output_price_per_mtok) / 1e6
+        assert line.startswith("judge x1 (measured: mean 2,000 in / 50 out tokens per question over 7 judged question(s)")
+        assert f"judge {FREE.id}" in line
+        assert f"${expected:.4f}" in line
+        assert "assumed" not in line
+
+    def test_the_estimate_falls_back_to_the_labelled_assumption_without_a_measurement(
+        self, monkeypatch, qfile, out, capsys
+    ):
+        give_keys(monkeypatch, FREE)
+        assert compare(qfile, out, "--models", PAID.id, "--dry-run") == 0  # nothing in out yet
+        printed = capsys.readouterr().out
+        line = _judge_line(printed)
+        assumed = N * (
+            ASSUMED_JUDGE_INPUT_TOKENS_PER_PAIR * FREE.input_price_per_mtok
+            + ASSUMED_JUDGE_OUTPUT_TOKENS_PER_PAIR * FREE.output_price_per_mtok
+        ) / 1e6
+        assert f"assumed {ASSUMED_JUDGE_INPUT_TOKENS_PER_PAIR:,} in / {ASSUMED_JUDGE_OUTPUT_TOKENS_PER_PAIR:,} out" in line
+        assert f"${assumed:.4f}" in line
+        assert "the judge token counts are assumed, not measured" in printed
+
+    def test_an_earlier_judgement_without_recorded_usage_does_not_count_as_a_measurement(
+        self, monkeypatch, qfile, out, capsys
+    ):
+        give_keys(monkeypatch, FREE)
+        assert compare(qfile, out, "--models", PAID.id, "--yes") == 0  # the fake judge reports no usage
+        capsys.readouterr()
+        assert compare(qfile, out, "--models", f"{PAID.id},{PAID2.id}", "--dry-run") == 0
+        line = _judge_line(capsys.readouterr().out)
+        assert "assumed" in line and "measured" not in line
+
+    def test_estimate_judge_from_points_at_a_judgement_outside_out(self, monkeypatch, qfile, out, tmp_path, capsys):
+        give_keys(monkeypatch, FREE)
+        a = load_run(write_run(tmp_path, "run-a"))
+        b = load_run(write_run(tmp_path, "run-b"))
+        prior = tmp_path / "prior-judgement"
+        write_model(
+            prior / "judgement.json",
+            asyncio.run(judge_runs(a, b, FakeJudge(usage=(10_000, 200)), "prior-judge", 0, progress=lambda _m: None)),
+        )
+
+        assert compare(qfile, out, "--models", PAID.id, "--estimate-judge-from", str(prior), "--dry-run") == 0
+        line = _judge_line(capsys.readouterr().out)
+        assert "measured: mean 10,000 in / 200 out tokens per question over 5 judged question(s)" in line
+        assert f"from {prior}" in line and "judge prior-judge" in line
+
+    def test_estimate_judge_from_a_judgement_without_usage_is_refused(
+        self, monkeypatch, qfile, out, tmp_path, capsys
+    ):
+        give_keys(monkeypatch, FREE)
+        a = load_run(write_run(tmp_path, "run-a"))
+        b = load_run(write_run(tmp_path, "run-b"))
+        prior = tmp_path / "prior-judgement"
+        write_model(prior / "judgement.json", asyncio.run(judge_runs(a, b, FakeJudge(), "j", 0, progress=lambda _m: None)))
+        assert compare(qfile, out, "--models", PAID.id, "--estimate-judge-from", str(prior), "--dry-run") == 2
+        assert "no judged question with recorded token usage" in capsys.readouterr().err

@@ -149,15 +149,24 @@ def render_comparison_report(
             "-" if vs is None else str(vs["judge_errors"]),
             _num(means["llm_calls"], ".1f"), _num(means["total_tokens"], ".0f"),
             _num(means["latency_s"], ".1f"), _cost_text(means["cost_usd"]),
+            "-" if not m.get("judge") else _cost_text(m["judge"]["cost_usd"]),  # summary.json from before judge cost: absent
             m["prices_as_of"] or "unknown",
         ])
     _table(
         pdf,
         ["Model", "Answered", "W/T/L", "Win+tie", "Unique errors (own / ref)", "Judge errors",
-         "LLM calls", "Tokens", "Latency s", "Cost / question", "Prices as of"],
+         "LLM calls", "Tokens", "Latency s", "Cost / question", "Judging cost", "Prices as of"],
         rows,
-        [46, 18, 18, 16, 28, 16, 16, 18, 18, 22, 22],
+        [44, 17, 17, 15, 26, 15, 15, 17, 17, 20, 20, 21],
     )
+    costs = summary.get("costs")
+    if costs:
+        _paragraph(
+            pdf,
+            f"Run cost: {_cost_text(costs['runs_usd'])}. Judge cost: {_cost_text(costs['judge_usd'])}. "
+            f"Total (runs + judging): {_cost_text(costs['total_usd'])}.",
+            style="B",
+        )
     pdf.ln(3)
 
     _heading(pdf, "Recommendations", 12)

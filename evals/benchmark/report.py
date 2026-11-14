@@ -265,6 +265,17 @@ def render_report(
             f"A: {jb['a_counts']['wins']} wins, B: {jb['b_counts']['wins']} wins, "
             f"{jb['a_counts']['ties']} ties, {jb['a_counts']['skipped_or_errored']} not judged.",
         )
+        usage, costs = jb["judge_usage"], summary["costs"]
+        tokens = (
+            "usage not recorded"
+            if usage["input_tokens"] is None
+            else f"{usage['input_tokens']} in / {usage['output_tokens']} out tokens"
+        )
+        _paragraph(pdf, f"Judge cost: {_cost_text(usage['cost_usd'])} ({tokens}).", style="B")
+        _paragraph(
+            pdf,
+            f"Run cost: {_cost_text(costs['runs_usd'])}. Runs + judging total: {_cost_text(costs['total_usd'])}.",
+        )
 
     pdf.ln(3)
     _paragraph(

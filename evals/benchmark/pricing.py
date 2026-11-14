@@ -44,3 +44,8 @@ def estimate_cost(
         input_tokens * pricing.input_price_per_mtok
         + output_tokens * pricing.output_price_per_mtok
     ) / _MTOK
+
+
+def cost_text(value: float | None) -> str:
+    """A USD amount for display; None is "unknown", never $0."""
+    return "unknown" if value is None else f"${value:.4f}"

@@ -11,7 +11,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
-from evals.benchmark.pricing import estimate_cost
+from evals.benchmark.pricing import cost_text, estimate_cost
 from evals.benchmark.runs import LoadedRun
 from evals.benchmark.schemas import Judgement, Pricing, QuestionResult
 
@@ -67,6 +67,24 @@ def judgement_counts(judgement: Judgement, side: str) -> dict[str, int]:
     }
 
 
+def sum_known(values: list[float | None]) -> float | None:
+    """Sum of ``values``, or None when any is unknown (an unknown cost is never counted as 0)."""
+    known = [v for v in values if v is not None]
+    return round(sum(known), 6) if len(known) == len(values) else None
+
+
+def judge_usage_block(judgement: Judgement) -> dict[str, Any]:
+    """The judge's own spend as recorded in the judgement (None fields on older files)."""
+    return {
+        "judge_model": judgement.judge_model,
+        "input_tokens": judgement.judge_input_tokens,
+        "output_tokens": judgement.judge_output_tokens,
+        "cost_usd": None if judgement.judge_cost_usd is None else round(judgement.judge_cost_usd, 6),
+        "calls_without_usage": judgement.judge_calls_without_usage,
+        "prices_as_of": judgement.judge_prices_as_of,
+    }
+
+
 def _judgement_block(judgement: Judgement) -> dict[str, Any]:
     by_category: dict[str, dict[str, int]] = defaultdict(lambda: {"a_wins": 0, "b_wins": 0, "ties": 0})
     for q in judgement.questions:
@@ -83,6 +101,7 @@ def _judgement_block(judgement: Judgement) -> dict[str, Any]:
         "b": judgement.b.model_dump(),
         "a_counts": judgement_counts(judgement, "a"),
         "b_counts": judgement_counts(judgement, "b"),
+        "judge_usage": judge_usage_block(judgement),
         "by_category": dict(by_category),
         # Evidence the judge saw: None date/budget on judgements made before it saw any.
         "as_of_date": judgement.as_of_date,
@@ -146,17 +165,29 @@ def build_summary(runs: list[LoadedRun], judgement: Judgement | None = None) -> 
     if judgement is not None and not any(b["judgement"] for b in run_blocks):
         warnings.append("The judgement does not match any of the given runs (run_id mismatch).")
 
+    prices_as_of = {r.meta.pricing.prices_as_of for r in runs if r.meta.pricing.prices_as_of}
+    if judgement is not None and judgement.judge_prices_as_of:
+        prices_as_of.add(judgement.judge_prices_as_of)
+    runs_usd = sum_known([b["totals"]["cost_usd"] for b in run_blocks])
+    judge_usd = None if judgement is None else judgement.judge_cost_usd
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "prices_as_of": sorted({r.meta.pricing.prices_as_of for r in runs if r.meta.pricing.prices_as_of}),
+        "prices_as_of": sorted(prices_as_of),
         "warnings": warnings,
         "runs": run_blocks,
         "judgement": None if judgement is None else _judgement_block(judgement),
+        # Run cost plus the judge's own cost; None = unknown (a price or usage is missing).
+        # Without a judgement the total is the runs alone (judge_included is false).
+        "costs": {
+            "runs_usd": runs_usd,
+            "judge_usd": None if judge_usd is None else round(judge_usd, 6),
+            "judge_included": judgement is not None,
+            "total_usd": runs_usd if judgement is None else sum_known([runs_usd, judge_usd]),
+        },
     }
 
 
-def _cost_text(value: float | None) -> str:
-    return "unknown" if value is None else f"${value:.4f}"
+_cost_text = cost_text
 
 
 def summary_text(summary: dict[str, Any]) -> str:
@@ -169,6 +200,17 @@ def summary_text(summary: dict[str, Any]) -> str:
             f"{run['questions']['answered']}/{run['questions']['selected']} answered, "
             f"mean {m['llm_calls'] or 0:.1f} LLM calls, {m['total_tokens'] or 0:.0f} tokens, "
             f"{m['latency_s'] or 0:.1f}s; total cost {_cost_text(t['cost_usd'])}"
+        )
+    if summary["judgement"] is not None:
+        usage = summary["judgement"]["judge_usage"]
+        tokens = (
+            "usage not recorded"
+            if usage["input_tokens"] is None
+            else f"{usage['input_tokens']} in / {usage['output_tokens']} out tokens"
+        )
+        lines.append(
+            f"judging [{usage['judge_model']}]: cost {_cost_text(usage['cost_usd'])} ({tokens}); "
+            f"runs + judging total {_cost_text(summary['costs']['total_usd'])}"
         )
     as_of = summary["prices_as_of"]
     lines.append("prices_as_of: " + (", ".join(as_of) if as_of else "unknown (no price data)"))

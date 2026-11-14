@@ -114,6 +114,13 @@ class JudgedQuestion(BaseModel):
     b_evidence_trimmed: bool | None = None
     # The verdict exactly as the judge returned it, in first/second terms.
     raw_verdict: dict | None = None
+    # The judge's own LLM usage for this question, from the spans of its call
+    # (counts include calls that failed to parse). None = not measured: skipped
+    # questions, judgements written before this was tracked, or a call that
+    # reported no usage. The cost is also None when the judge model has no prices.
+    judge_input_tokens: int | None = None
+    judge_output_tokens: int | None = None
+    judge_cost_usd: float | None = None
 
 
 class RunRef(BaseModel):
@@ -137,3 +144,13 @@ class Judgement(BaseModel):
     # per-side evidence character budget it was held to. None on older files.
     as_of_date: str | None = None
     evidence_budget_chars: int | None = None
+    # The judge's own LLM usage, summed over the questions it was asked about
+    # (judged and errored). None on judgements written before this was tracked.
+    # Token totals are a lower bound when ``judge_calls_without_usage`` > 0, and
+    # the cost is None whenever a price or any call's usage is missing, never 0.
+    judge_input_tokens: int | None = None
+    judge_output_tokens: int | None = None
+    judge_cost_usd: float | None = None
+    judge_calls_without_usage: int | None = None
+    # Price snapshot date of the judge model at judging time.
+    judge_prices_as_of: str | None = None
