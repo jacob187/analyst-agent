@@ -70,8 +70,25 @@ def _reset_llm_semaphore():
     yield
 
 
+@pytest.fixture(scope="session")
+def _default_db_guard():
+    """Fail the session if any test created the default dev DB (`data/chats.db`).
+
+    Tests must point `api.db.DB_PATH` at a temp file. When the file already
+    existed (a dev checkout that has run the app) there is nothing to assert.
+    """
+    from api import db
+
+    path = db.DB_PATH
+    existed = path.exists()
+    yield
+    assert existed or not path.exists(), (
+        f"a test created {path}; point api.db.DB_PATH at a tmp_path file instead"
+    )
+
+
 @pytest.fixture(scope="session", autouse=True)
-def _close_db_at_session_end():
+def _close_db_at_session_end(_default_db_guard):
     """Close any aiosqlite connection a test left open.
 
     aiosqlite runs each connection on a non-daemon worker thread; one still

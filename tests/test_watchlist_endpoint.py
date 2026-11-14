@@ -14,6 +14,17 @@ from api.main import app
 
 client = TestClient(app)
 
+
+@pytest.fixture(autouse=True)
+def _temp_db(tmp_path, monkeypatch):
+    """Routes that reach the DB (e.g. ticker enrichment) must not open data/chats.db."""
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "default.db")
+    monkeypatch.setattr(db_module, "_db", None)
+    asyncio.run(db_module.init_db())
+    yield
+    asyncio.run(db_module.close_db())
+
+
 USER_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 HEADERS = {"X-User-Id": USER_ID}
 
@@ -301,8 +312,8 @@ class _CountingFakeLLM:
 
 
 @pytest.fixture
-def budget_env(tmp_path, monkeypatch):
-    """Temp DB, a one-ticker watchlist, and a fake LLM at the provider boundary.
+def budget_env(monkeypatch):
+    """Temp DB (the autouse `_temp_db`), a one-ticker watchlist, and a fake LLM at the provider boundary.
 
     The real BriefingService and route run; only the LLM (FakeListChatModel)
     and the yfinance/Tavily/regime fetches are faked.
@@ -316,10 +327,6 @@ def budget_env(tmp_path, monkeypatch):
         DailyBriefingAnalysis,
         TickerBriefing,
     )
-
-    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "watchlist.db")
-    monkeypatch.setattr(db_module, "_db", None)
-    asyncio.run(db_module.init_db())
 
     analysis = DailyBriefingAnalysis(
         market_regime="Neutral",
