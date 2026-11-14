@@ -12,6 +12,7 @@ import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from agents.llm_factory import structured_llm
 from agents.model_registry import ModelDef
 from api.tracing import capture_spans
 from evals.benchmark.common import BenchmarkError, provider_api_key, scrub_secrets
@@ -269,7 +270,7 @@ async def judge_runs(
     check_comparable(run_a, run_b)
     prompts = load_judge_prompt()
     today = as_of_date(run_a, run_b).isoformat()
-    structured = judge_llm.with_structured_output(JudgeVerdict)
+    structured = structured_llm(judge_llm, JudgeVerdict)
 
     judged: list[JudgedQuestion] = []
     total_in = total_out = calls_without_usage = 0

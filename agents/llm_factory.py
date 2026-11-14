@@ -23,6 +23,24 @@ from agents.model_registry import get_default_model, get_model
 logger = logging.getLogger(__name__)
 
 
+def structured_llm(llm: BaseChatModel, schema):
+    """``llm.with_structured_output(schema)`` using a method every provider accepts.
+
+    The default for Anthropic is forced tool calling (``tool_choice`` "tool"),
+    which newer Claude models with always-on adaptive thinking reject
+    ("tool_choice: type "tool" and "any" are not supported for this model").
+    Claude's native structured output (``method="json_schema"``) works on
+    them, so Anthropic models use it; other providers keep their default.
+    """
+    try:
+        from langchain_anthropic import ChatAnthropic
+    except ImportError:  # provider package not installed
+        ChatAnthropic = None
+    if ChatAnthropic is not None and isinstance(llm, ChatAnthropic):
+        return llm.with_structured_output(schema, method="json_schema")
+    return llm.with_structured_output(schema)
+
+
 # ---------------------------------------------------------------------------
 # Provider → API key kwarg mapping for init_chat_model
 # ---------------------------------------------------------------------------

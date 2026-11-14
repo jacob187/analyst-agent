@@ -5,6 +5,8 @@ from typing import List, Literal
 from pydantic import BaseModel, Field
 from langchain_core.language_models.chat_models import BaseChatModel
 
+from agents.llm_factory import structured_llm
+
 from agents.prompts import (
     QUERY_PLANNER_SYSTEM_PROMPT,
     QUERY_CLASSIFIER_PROMPT,
@@ -76,8 +78,8 @@ class QueryPlanner:
         self.llm = llm
         self.ticker = ticker
         self.has_research_tools = has_research_tools
-        self.plan_llm = llm.with_structured_output(QueryPlan)
-        self.classify_llm = llm.with_structured_output(QueryClassification)
+        self.plan_llm = structured_llm(llm, QueryPlan)
+        self.classify_llm = structured_llm(llm, QueryClassification)
 
     def classify_query(self, query: str) -> QueryClassification:
         """
