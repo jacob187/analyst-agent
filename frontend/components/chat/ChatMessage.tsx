@@ -5,7 +5,9 @@ import { ChevronDown } from "lucide-react";
 import { marked } from "marked";
 import DOMPurify from "isomorphic-dompurify";
 import { cn } from "@/lib/utils";
+import { useElapsedSeconds } from "@/hooks/useElapsedSeconds";
 import type { StreamingMessage } from "@/types";
+import { latestThinkingPreview } from "./thinkingPreview";
 
 marked.setOptions({ breaks: true });
 
@@ -17,6 +19,10 @@ export function ChatMessage({ message }: ChatMessageProps) {
   const contentRef = useRef<HTMLDivElement>(null);
   const [thinkingOpen, setThinkingOpen] = useState(false);
   const isUser = message.role === "user";
+  // Progress UI (status pill, elapsed counter, live thinking) only before answer tokens arrive
+  const showProgress = !isUser && !!message.isStreaming && !message.content;
+  const elapsed = useElapsedSeconds(showProgress);
+  const thinkingPreview = showProgress ? latestThinkingPreview(message.thinking) : "";
 
   // Safely inject sanitized markdown HTML via DOM ref (avoids dangerouslySetInnerHTML)
   useEffect(() => {
@@ -61,10 +67,38 @@ export function ChatMessage({ message }: ChatMessageProps) {
         )}
 
         {/* Streaming status pill */}
-        {message.isStreaming && message.status && !message.content && (
-          <div className="flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 px-3 py-1 text-xs text-muted-foreground">
-            <span className="streaming-dot" />
-            {message.status}
+        {showProgress && (
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2 empty:hidden">
+              {message.status && (
+                <div className="flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 px-3 py-1 text-xs text-muted-foreground">
+                  <span className="streaming-dot" />
+                  {message.status}
+                </div>
+              )}
+              {elapsed >= 1 && (
+                <span
+                  className="text-xs tabular-nums text-muted-foreground/70"
+                  aria-label={`${elapsed} seconds elapsed`}
+                >
+                  {elapsed}s
+                </span>
+              )}
+            </div>
+            {/* Live region stays mounted while streaming so updates are announced */}
+            <div aria-live="polite" className="empty:hidden">
+              {thinkingPreview && (
+                <p className="line-clamp-2 whitespace-pre-line px-1 text-xs italic leading-relaxed text-muted-foreground/70">
+                  {thinkingPreview}
+                  <span
+                    aria-hidden="true"
+                    className="ml-0.5 inline-block motion-safe:animate-pulse"
+                  >
+                    …
+                  </span>
+                </p>
+              )}
+            </div>
           </div>
         )}
 
