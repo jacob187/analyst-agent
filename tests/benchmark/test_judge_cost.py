@@ -6,6 +6,7 @@ OpenInference spans via `capture_spans`.
 """
 
 import json
+import logging
 
 import pytest
 
@@ -107,6 +108,14 @@ class TestJudgeUsageIsRecorded:
         assert judgement.questions[1].judge_input_tokens == 1000
         assert judgement.judge_input_tokens == 5000
 
+    async def test_a_long_prompt_does_not_flood_the_log_with_attribute_truncation_warnings(self, tmp_path, caplog):
+        a = write_run(tmp_path, "run-a", answers={qid: "plain " * 3000 for qid in IDS})  # far past the 8192 span cap
+        b = write_run(tmp_path, "run-b", answers={qid: "GOOD " * 3000 for qid in IDS})
+        with caplog.at_level(logging.WARNING):
+            judgement = await _judge((load_run(a), load_run(b)), FakeJudge(usage=(1000, 100)))
+        assert judgement.judge_input_tokens == 5000
+        assert [r for r in caplog.records if "truncating" in r.getMessage()] == []
+
     async def test_skipped_questions_cost_nothing_and_are_not_counted(self, tmp_path):
         a = write_run(tmp_path, "run-a", answers={"q-tech": None})
         b = write_run(tmp_path, "run-b")
@@ -179,3 +188,18 @@ class TestJudgeCli:
         assert judgement.judge_cost_usd == pytest.approx(expected)
         assert judgement.judge_prices_as_of == str(model.prices_as_of)
         assert f"Judge usage: 5000 in / 500 out tokens, cost ${expected:.4f}" in capsys.readouterr().out
+
+    def test_a_judge_that_reports_no_usage_prints_usage_not_recorded(self, monkeypatch, tmp_path, capsys):
+        model = get_free_tier_model()
+        monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
+        monkeypatch.setattr("evals.benchmark.cli.prepare_environment", lambda: None)
+        monkeypatch.setenv(provider_env_var(model), "fake-key-value-0123")
+        monkeypatch.setattr("langchain.chat_models.init_chat_model", lambda spec, **kw: FakeJudge())
+        write_run(tmp_path, "run-a", answers={"q-risk": "plain"})
+        write_run(tmp_path, "run-b", answers={"q-risk": "GOOD"})
+
+        code = main(["judge", "--a", str(tmp_path / "run-a"), "--b", str(tmp_path / "run-b"),
+                     "--seed", "0", "--out", str(tmp_path / "judged")])
+
+        assert code == 0
+        assert "Judge usage: usage not recorded, cost unknown." in capsys.readouterr().out

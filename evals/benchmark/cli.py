@@ -130,13 +130,17 @@ def _cmd_judge(args: argparse.Namespace) -> int:
     )
     write_model(args.out / JUDGEMENT_FILE, judgement)
     judged = [q for q in judgement.questions if q.status == "judged"]
+    tokens = (
+        "usage not recorded"
+        if judgement.judge_input_tokens is None
+        else f"{judgement.judge_input_tokens} in / {judgement.judge_output_tokens} out tokens"
+        + (" (some calls reported no usage)" if judgement.judge_calls_without_usage else "")
+    )
     print(
         f"Judged {len(judged)}/{len(judgement.questions)} questions "
         f"(A wins {sum(q.winner == 'a' for q in judged)}, B wins {sum(q.winner == 'b' for q in judged)}, "
         f"ties {sum(q.winner == 'tie' for q in judged)}); seed {seed}. "
-        f"Judge usage: {judgement.judge_input_tokens} in / {judgement.judge_output_tokens} out tokens"
-        f"{' (some calls reported no usage)' if judgement.judge_calls_without_usage else ''}, "
-        f"cost {cost_text(judgement.judge_cost_usd)}. Wrote {args.out / JUDGEMENT_FILE}"
+        f"Judge usage: {tokens}, cost {cost_text(judgement.judge_cost_usd)}. Wrote {args.out / JUDGEMENT_FILE}"
     )
     return 0
 

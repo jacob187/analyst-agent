@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from agents.model_registry import ModelDef
 from api.tracing import capture_spans
 from evals.benchmark.common import BenchmarkError, provider_api_key, scrub_secrets
+from evals.benchmark.isolation import quiet_attribute_truncation
 from evals.benchmark.metrics import extract_metrics
 from evals.benchmark.pricing import estimate_cost
 from evals.benchmark.runs import LoadedRun
@@ -232,7 +233,9 @@ async def _ask_judge(structured: Any, messages: list[Any]) -> tuple[JudgeVerdict
     """One judge call under ``capture_spans``: the verdict or the error, plus what it spent."""
     verdict: JudgeVerdict | None = None
     error: Exception | None = None
-    with capture_spans() as captured:
+    # Only the token counts are read; the judge prompt (answers + evidence) is far past the span
+    # attribute cap, so the SDK's per-attribute truncation warnings are silenced as in runs.
+    with quiet_attribute_truncation(), capture_spans() as captured:
         try:
             verdict = _coerce(await structured.ainvoke(messages))
         except Exception as e:  # one bad judge call must not abort the rest
