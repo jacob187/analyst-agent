@@ -7,9 +7,11 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import api.db as db_module
+from agents.model_registry import get_free_tier_model
 from api.main import app
 from api import dependencies
 from api.routes import models as models_route
+from tests.conftest import clear_operator_keys, set_operator_key
 
 
 client = TestClient(app)
@@ -96,21 +98,21 @@ class TestEnvKeys:
 class TestEnvKeysFreeTrial:
     @pytest.mark.eval_unit
     def test_trial_advertised_while_global_cap_has_room(self, monkeypatch):
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        set_operator_key(monkeypatch, get_free_tier_model())
         body = client.get("/env-keys").json()
         assert body["free_trial_model_id"] == models_route.free_trial_model_id()
 
     @pytest.mark.eval_unit
     def test_trial_hidden_once_global_cap_is_spent(self, monkeypatch):
         # Otherwise the frontend lets anon into a chat that can only error.
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        set_operator_key(monkeypatch, get_free_tier_model())
         monkeypatch.setattr(dependencies, "ANON_FREE_DAILY_CAP", 1)
         asyncio.run(db_module.increment_llm_usage(dependencies.FREE_TRIAL_GLOBAL_USAGE_KEY))
         assert client.get("/env-keys").json()["free_trial_model_id"] is None
 
     @pytest.mark.eval_unit
     def test_trial_hidden_without_operator_key(self, monkeypatch):
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        clear_operator_keys(monkeypatch)
         assert client.get("/env-keys").json()["free_trial_model_id"] is None
 
 
@@ -174,7 +176,10 @@ class TestEnvKeysOperatorModels:
         assert not set(_provider_model_ids("openai")) & set(body["operator_models"])
 
     @pytest.mark.eval_unit
-    def test_anonymous_covers_nothing_but_keeps_free_trial(self, operator_keys, clerk_on):
+    def test_anonymous_covers_nothing_but_keeps_free_trial(
+        self, operator_keys, clerk_on, monkeypatch
+    ):
+        set_operator_key(monkeypatch, get_free_tier_model())
         body = client.get("/env-keys").json()
         assert body["operator_models"] == []
         assert (body["google"], body["openai"], body["anthropic"]) == (False, False, False)

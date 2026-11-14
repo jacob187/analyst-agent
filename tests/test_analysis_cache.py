@@ -14,6 +14,7 @@ import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 import api.db as db_module
+from agents.model_registry import get_default_model
 from agents.sec_workflow import analysis_cache
 from agents.sec_workflow.analysis_cache import (
     DEFAULT_FRESHNESS_TTL_SECONDS,
@@ -24,6 +25,7 @@ from agents.sec_workflow.analysis_cache import (
 )
 from agents.tools.sec_tools import create_sec_tools
 from api.llm_concurrency import LLMCallCharger
+from tests.conftest import byok_header
 from tests.sec_fakes import CountingChatModel, FakeEdgar, eightk, tenk, tenq
 
 TICKER = "TSTC"
@@ -413,7 +415,7 @@ def page(monkeypatch, llm):
 
     monkeypatch.setattr("agents.llm_factory.create_llm", lambda model_id, api_key: llm)
     transport = httpx.ASGITransport(app=app)
-    headers = {"X-Google-Api-Key": "byok-test-key", "X-User-Id": USER}
+    headers = {**byok_header(get_default_model().provider, "byok-test-key"), "X-User-Id": USER}
 
     async def get() -> dict:
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

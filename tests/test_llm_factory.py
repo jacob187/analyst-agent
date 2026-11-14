@@ -180,9 +180,9 @@ class TestCreateLlm:
         mock_init.return_value = MagicMock()
         create_llm("nonexistent-model", "fake-key")
 
-        # Should fall back to the default model (gemini-3.6-flash)
+        # Should fall back to the default model (claude-haiku-5-5)
         call_args = mock_init.call_args
-        assert "google_genai:gemini-3.6-flash" in call_args[0]
+        assert "anthropic:claude-haiku-5-5" in call_args[0]
 
 
 class TestCreateLlmPair:
