@@ -128,8 +128,8 @@
     "thinking_capable": true,
     "default": false,
     "operator_lendable": false,
-    "input_price_per_mtok": null,
-    "output_price_per_mtok": null,
-    "prices_as_of": null
+    "input_price_per_mtok": 5.0,
+    "output_price_per_mtok": 25.0,
+    "prices_as_of": "2026-11-13"
   }
 ]
