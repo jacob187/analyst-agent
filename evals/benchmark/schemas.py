@@ -35,6 +35,9 @@ class RunMeta(BaseModel):
     question_ids: list[str]
     tavily_enabled: bool
     pricing: Pricing
+    # "isolated": the run used its own fresh SQLite database (no shared cached analyses).
+    # None on runs recorded before isolation existed.
+    db: str | None = None
     notes: list[str] = Field(default_factory=list)
 
 

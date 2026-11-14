@@ -21,6 +21,7 @@ from evals.benchmark.common import (
     resolve_model,
     scrub_secrets,
 )
+from evals.benchmark.isolation import DB_ISOLATED, isolated_db
 from evals.benchmark.metrics import ROOT_SPAN_NAME, SpanMetrics, extract_metrics
 from evals.benchmark.pricing import pricing_from_model
 from evals.benchmark.questions import Question, question_set_hash
@@ -32,8 +33,9 @@ _ERROR_TEXT_LIMIT = 500
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _RUN_NOTES = [
-    "Questions run sequentially in one process; sec_tools caches LLM filing analyses "
-    "per process, so later questions on the same ticker can be cheaper than the first.",
+    "Questions run sequentially in one process against a fresh temporary SQLite database "
+    "created for this run. Filing analyses are cached in that database, so later questions "
+    "on the same filing can be cheaper than the first, but nothing carries over between runs.",
     "Token counts come from LLM spans; calls whose span has no usage are counted in "
     "llm_calls_without_usage and make that question's cost unknown.",
 ]
@@ -158,6 +160,22 @@ async def run_benchmark(
         selected = [q for q in questions if q.id in set(only)]
 
     builder = get_builder(graph)
+    # Entered before run.json is written: a failure to set up the database must
+    # not leave behind a run directory that blocks the re-run.
+    async with isolated_db():
+        return await _run_selected(graph, builder, model, questions, selected, out_dir, timeout_s, progress)
+
+
+async def _run_selected(
+    graph: str,
+    builder: Builder,
+    model: ModelDef,
+    questions: list[Question],
+    selected: list[Question],
+    out_dir: Path,
+    timeout_s: float,
+    progress: Callable[[str], None],
+) -> RunMeta:
     sha, dirty = git_state()
     meta = RunMeta(
         run_id=uuid.uuid4().hex,
@@ -170,6 +188,7 @@ async def run_benchmark(
         question_ids=[q.id for q in selected],
         tavily_enabled=bool((os.getenv("TAVILY_API_KEY") or "").strip()),
         pricing=pricing_from_model(model),
+        db=DB_ISOLATED,
         notes=list(_RUN_NOTES),
     )
     write_model(out_dir / RUN_FILE, meta)
