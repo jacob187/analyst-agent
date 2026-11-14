@@ -151,16 +151,27 @@ def render_base_prompt(ticker: str, template: str | None = None) -> str:
     return (template if template is not None else BASE_SYSTEM_PROMPT).replace("{ticker}", ticker)
 
 
-def render_catalogue(skills: Mapping[str, Skill]) -> str:
-    """The name + description list the model picks skills from."""
-    lines = [
-        "## Skills",
-        "",
-        "Call `load_skill` with a skill name to get its instructions and unlock its "
-        "tools. Load every skill the question needs before answering; you can load "
-        "several at once.",
-        "",
-    ]
+def render_catalogue(skills: Mapping[str, Skill], *, filter_tools: bool = False) -> str:
+    """The name + description list the model picks skills from.
+
+    ``filter_tools`` matches the agent's mode: when tools are filtered, a skill's
+    tools unlock only once it is loaded; otherwise every tool is always offered
+    and a skill supplies the instructions for using its tools.
+    """
+    if filter_tools:
+        intro = (
+            "Call `load_skill` with a skill name to get its instructions and unlock its "
+            "tools. Load every skill the question needs before answering; you can load "
+            "several at once."
+        )
+    else:
+        intro = (
+            "Call `load_skill` with a skill name to get its instructions for choosing and "
+            "reading its tools. All tools are available whether or not a skill is loaded, "
+            "so use any tool the question needs, from any domain. Load every skill the "
+            "question touches before answering; you can load several at once."
+        )
+    lines = ["## Skills", "", intro, ""]
     lines.extend(f"- **{s.name}**: {s.description}" for s in skills.values())
     return "\n".join(lines)
 

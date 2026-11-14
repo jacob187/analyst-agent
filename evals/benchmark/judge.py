@@ -163,11 +163,27 @@ def _unshuffle(verdict: JudgeVerdict, a_first: bool) -> dict[str, Any]:
     }
 
 
+def _unwrap_verdict(result: dict[str, Any]) -> dict[str, Any]:
+    """Peel a ``{"JudgeVerdict": {...}}`` wrapper some models put around the verdict.
+
+    Only a single-key dict is unwrapped: when the key is the schema name, or when
+    its sole value is a dict carrying the verdict's own fields.
+    """
+    if len(result) != 1:
+        return result
+    ((key, inner),) = result.items()
+    if not isinstance(inner, dict):
+        return result
+    if key == JudgeVerdict.__name__ or "winner" in inner:
+        return inner
+    return result
+
+
 def _coerce(result: Any) -> JudgeVerdict:
     if isinstance(result, JudgeVerdict):
         return result
     if isinstance(result, dict):
-        return JudgeVerdict.model_validate(result)
+        return JudgeVerdict.model_validate(_unwrap_verdict(result))
     raise ValueError(f"judge returned no parsable verdict ({type(result).__name__})")
 
 

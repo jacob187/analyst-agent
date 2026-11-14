@@ -121,6 +121,35 @@ class TestRobustness:
         assert statuses == ["judged", "error", "judged", "judged", "judged"]
         assert "provider 500" in judgement.questions[1].reason
 
+    @pytest.mark.parametrize("wrapper_key", ["JudgeVerdict", "verdict"])
+    async def test_a_verdict_wrapped_in_a_single_key_is_unwrapped(self, runs, wrapper_key):
+        def wrapped(text):
+            first, second = block(text, "FIRST"), block(text, "SECOND")
+            winner = "first" if "GOOD" in first and "GOOD" not in second else (
+                "second" if "GOOD" in second and "GOOD" not in first else "tie"
+            )
+            return {
+                wrapper_key: {
+                    "winner": winner,
+                    "first_has_unique_factual_error": "WRONG" in first,
+                    "second_has_unique_factual_error": "WRONG" in second,
+                    "evidence_issues": "",
+                    "rationale": f"wrapped {winner}",
+                }
+            }
+
+        judgement, _ = await _judge(runs, judge=FakeJudge(decide=wrapped))
+        plain, _ = await _judge(runs)
+        assert {q.status for q in judgement.questions} == {"judged"}
+        assert [(q.winner, q.a_unique_factual_error, q.b_unique_factual_error) for q in judgement.questions] == [
+            (q.winner, q.a_unique_factual_error, q.b_unique_factual_error) for q in plain.questions
+        ]
+        assert all(q.rationale.startswith("wrapped") for q in judgement.questions)
+
+    async def test_a_single_key_dict_without_verdict_fields_is_still_an_error(self, runs):
+        judgement, _ = await _judge(runs, judge=FakeJudge(decide=lambda text: {"result": {"foo": "bar"}}))
+        assert {q.status for q in judgement.questions} == {"error"}
+
     async def test_an_unparsable_verdict_is_an_error_not_a_win(self, runs):
         judgement, _ = await _judge(runs, judge=FakeJudge(decide=lambda text: None))
         assert {q.status for q in judgement.questions} == {"error"}

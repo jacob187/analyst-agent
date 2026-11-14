@@ -25,6 +25,7 @@ Use this skill for recent news, current events, anything that happened after the
 
 ## Answering
 
+- News is only half the picture: also check how the price and fundamentals reacted (technicals skill), and the relevant filing if the news refers to one.
 - Attribute claims to their sources and give dates; news can be stale or wrong.
 - If news describes an SEC filing (for example an 8-K), the filing is authoritative. Describe the event once, and if the news and the filing disagree, say so explicitly.
 - If a research tool reports that web research is unavailable (for example the daily search limit is reached), say so and answer from SEC filings and market data instead.

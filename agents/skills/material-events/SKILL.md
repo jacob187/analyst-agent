@@ -18,6 +18,10 @@ Use this skill for any question about the company's most recent 8-K, an earnings
 - `get_8k_item` returns the raw text of one 8-K item. Pass the item number as the input (for example `2.02` for earnings, `1.01` for material agreements, `5.02` for leadership changes). Use it only when the user needs the original wording of a specific item or to verify a detail; for analysis use `analyze_latest_8k`.
 - If `analyze_latest_8k` reports that no 8-K was found, say so plainly instead of guessing.
 
+## Add context from other domains
+
+An 8-K is a single data point. Unless the question is purely about the filing's wording, also load the news-research and technicals skills and check how the event was covered (`get_company_news`) and how the stock reacted (`get_stock_info`, `get_stock_price_history`). Report the filing first, then the coverage and price reaction as supporting context, with dates.
+
 ## Cross-checking (one filing, one description)
 
 Several sources can describe the same filing: the 8-K analysis, the raw item text, and news or research results if those skills are loaded. Treat them as describing one event:

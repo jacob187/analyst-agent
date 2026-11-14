@@ -3,7 +3,8 @@
 The alternative to the router/planner/synthesizer graph in ``analyst_graph``.
 One model runs a ReAct loop (``langchain.agents.create_agent``); a
 ``SkillsMiddleware`` shows it a catalogue of skills (``agents/skills/``) and
-only the tools of the skills it has loaded with ``load_skill``.
+every tool; ``load_skill`` returns a skill's instructions on demand. Set
+``SKILLS_FILTER_TOOLS=true`` to expose only the tools of loaded skills instead.
 
 Model choice: the whole loop runs on the thinking-enabled LLM from
 ``create_llm_pair`` (medium thinking, thoughts included). The same model now
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from contextvars import ContextVar
 from typing import Annotated, Any, Awaitable, Callable, Dict, List, Mapping, NotRequired, Optional
@@ -44,6 +46,12 @@ from api.llm_concurrency import llm_slot
 logger = logging.getLogger(__name__)
 
 LOAD_SKILL_TOOL = "load_skill"
+FILTER_TOOLS_ENV = "SKILLS_FILTER_TOOLS"
+
+
+def filter_tools_enabled() -> bool:
+    """``SKILLS_FILTER_TOOLS=true`` restores the old behaviour (tools unlock per loaded skill)."""
+    return os.getenv(FILTER_TOOLS_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 # =============================================================================
@@ -138,9 +146,10 @@ def _make_load_skill_tool(
 
     @tool(LOAD_SKILL_TOOL)
     def load_skill(skill_name: str, runtime: ToolRuntime) -> Command | str:
-        """Load a skill by name: returns its instructions and unlocks its tools.
+        """Load a skill by name: returns its instructions for using its tools.
 
-        Pick skill names from the skills catalogue in the system prompt.
+        Pick skill names from the skills catalogue in the system prompt. You can
+        load more than one skill.
         """
         skill = skills.get(skill_name.strip())
         if skill is None:
@@ -160,35 +169,45 @@ def _make_load_skill_tool(
 
 
 class SkillsMiddleware(AgentMiddleware[SkillsState]):
-    """Shows the model the skill catalogue and only the tools it has unlocked.
+    """Adds the skill catalogue to the system message; optionally filters tools.
 
-    Before any skill is loaded the model sees just ``load_skill``; after
-    ``load_skill("<name>")`` it also sees that skill's tools. Skills none of
-    whose tools exist in this session (e.g. research without a Tavily key)
-    are left out of the catalogue.
+    By default the model always sees every tool plus ``load_skill``; skills only
+    supply instructions on demand. With ``SKILLS_FILTER_TOOLS=true`` it sees just
+    ``load_skill`` until ``load_skill("<name>")`` unlocks that skill's tools. Skills
+    none of whose tools exist in this session (e.g. research without a Tavily
+    key) are left out of the catalogue.
     """
 
     state_schema = SkillsState
 
-    def __init__(self, skills: Mapping[str, Skill], available_tools: set[str], ticker: str):
+    def __init__(
+        self,
+        skills: Mapping[str, Skill],
+        available_tools: set[str],
+        ticker: str,
+        filter_tools: Optional[bool] = None,
+    ):
         super().__init__()
+        self.filter_tools = filter_tools_enabled() if filter_tools is None else filter_tools
         self.skills = {
             name: skill
             for name, skill in skills.items()
             if any(t in available_tools for t in skill.tools)
         }
-        self.catalogue = render_catalogue(self.skills)
+        self.catalogue = render_catalogue(self.skills, filter_tools=self.filter_tools)
         self.tools = [_make_load_skill_tool(self.skills, available_tools, ticker)]
 
     def _prepare(self, request: Any) -> Any:
+        base = request.system_message.text if request.system_message else ""
+        system = f"{base}\n\n{self.catalogue}" if base else self.catalogue
+        if not self.filter_tools:
+            return request.override(system_message=SystemMessage(content=system))
         loaded = request.state.get("skills_loaded") or []
         allowed = {LOAD_SKILL_TOOL}
         for name in loaded:
             if name in self.skills:
                 allowed.update(self.skills[name].tools)
         tools = [t for t in request.tools if not isinstance(t, dict) and t.name in allowed]
-        base = request.system_message.text if request.system_message else ""
-        system = f"{base}\n\n{self.catalogue}" if base else self.catalogue
         return request.override(tools=tools, system_message=SystemMessage(content=system))
 
     async def awrap_model_call(self, request: Any, handler: Callable[[Any], Awaitable[Any]]) -> Any:

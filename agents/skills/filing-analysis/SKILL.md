@@ -38,4 +38,6 @@ Use this skill for risks, management outlook, financial statements and other per
 
 - Say which filing (10-K or 10-Q) and period the data comes from when the tool reports it.
 - Separate what the filing states from your interpretation.
-- For investment-decision questions, combine this skill with technicals and news/research so the answer covers fundamentals, risks, technicals and recent developments.
+- Quote the specific figures (revenue, margins, debt, growth rates) with their filing type and period.
+- Filings are backward-looking. Also load the news-research and technicals skills to check what happened since the filing (recent news) and how the stock is trading (price, valuation), and add that as context unless the question is purely about the filing text.
+- For investment-decision questions, make sure the answer covers fundamentals, risks, technicals and recent developments.
