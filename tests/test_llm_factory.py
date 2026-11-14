@@ -101,6 +101,7 @@ class TestCreateLlm:
             "anthropic:claude-sonnet-4-6",
             temperature=0,
             anthropic_api_key="fake-anthropic-key",
+            max_tokens=16_000,
         )
 
     @pytest.mark.parametrize("model_id", ["claude-opus-4-8", "claude-sonnet-5", "claude-opus-5"])
@@ -113,6 +114,7 @@ class TestCreateLlm:
         mock_init.assert_called_once_with(
             f"anthropic:{model_id}",
             anthropic_api_key="fake-anthropic-key",
+            max_tokens=16_000,
         )
 
     @patch("langchain.chat_models.init_chat_model")
@@ -128,6 +130,7 @@ class TestCreateLlm:
             "anthropic:claude-sonnet-4-6",
             anthropic_api_key="fake-anthropic-key",
             thinking={"type": "enabled", "budget_tokens": 4096},
+            max_tokens=16_000,
         )
 
     @patch("langchain.chat_models.init_chat_model")

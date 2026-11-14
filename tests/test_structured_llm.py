@@ -34,6 +34,15 @@ def test_anthropic_models_use_native_structured_output_not_forced_tools():
         assert "tool_choice" not in kwargs, model_id
 
 
+def test_anthropic_models_get_an_explicit_output_limit_above_the_4096_fallback():
+    from agents.llm_factory import ThinkingConfig, create_llm
+
+    for model in [m for m in get_all_models() if m.provider == "anthropic"]:
+        for thinking in (None, ThinkingConfig(enabled=True, level="medium")):
+            llm = create_llm(model.id, "test-key", thinking=thinking)
+            assert llm.max_tokens >= 16_000, (model.id, thinking)
+
+
 def test_other_providers_keep_their_default_method():
     google_id = next(m.id for m in get_all_models() if m.provider == "google_genai")
     llm = ChatGoogleGenerativeAI(model=google_id, google_api_key="test-key")

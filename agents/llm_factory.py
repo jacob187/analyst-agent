@@ -51,6 +51,10 @@ _PROVIDER_KEY_KWARG: dict[str, str] = {
     "anthropic": "anthropic_api_key",
 }
 
+# Output-token ceiling for Anthropic models (thinking + answer). Well under the
+# max output of every Claude model in the registry.
+_ANTHROPIC_MAX_OUTPUT_TOKENS = 16_000
+
 # Thinking budget tiers for Anthropic (token counts per level)
 _ANTHROPIC_THINKING_BUDGETS: dict[str, int] = {
     "low": 1024,
@@ -157,11 +161,18 @@ def create_llm(
     ):
         sampling_kwargs = {}
 
+    # langchain-anthropic only knows output limits for models it has a profile
+    # for; newer Claude models fall back to max_tokens=4096. With adaptive
+    # thinking a long synthesis spends that on thinking and stops before any
+    # answer text (stop_reason "max_tokens"), so set the limit explicitly.
+    output_kwargs = {"max_tokens": _ANTHROPIC_MAX_OUTPUT_TOKENS} if model.provider == "anthropic" else {}
+
     return init_chat_model(
         f"{model.provider}:{model.id}",
         **{key_kwarg_name: api_key},
         **sampling_kwargs,
         **thinking_kwargs,
+        **output_kwargs,
     )
 
 
