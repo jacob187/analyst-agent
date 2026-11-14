@@ -23,9 +23,17 @@ from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 from starlette.websockets import WebSocketDisconnect
 
+from agents.model_registry import get_all_models, get_default_model, get_free_tier_model, get_model
 from api import dependencies
+from api.dependencies import PROVIDER_ENV_VARS
 from api.main import app
 from api.routes import chat
+from tests.conftest import (
+    byok_auth_field,
+    clear_operator_keys,
+    non_lendable_model,
+    set_operator_key,
+)
 from tests.test_dependencies import (  # noqa: F401  (clerk_env / rsa_keypair are fixtures)
     TEST_SUB,
     _make_token,
@@ -344,9 +352,7 @@ class TestTokenDerivedIdentity:
     ):
         # No BYOK key: the operator's env key resolves off the verified id.
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
-        monkeypatch.setenv("OPENAI_API_KEY", "operator-key")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "operator-key")
+        _set_operator_keys(monkeypatch)
         priv, _ = rsa_keypair
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -368,6 +374,11 @@ def _trial_query(ws):
             return ev
 
 
+def _enable_trial(monkeypatch):
+    """Give the operator a key for the free-trial model's provider."""
+    set_operator_key(monkeypatch, get_free_tier_model())
+
+
 class TestAnonFreeTrial:
     """Anonymous visitors with no BYOK key may still chat using the
     designated free-trial model, capped per-IP at ANON_FREE_QUERIES per UTC
@@ -385,7 +396,7 @@ class TestAnonFreeTrial:
 
     def test_anon_no_key_uses_free_trial_model(self, client, temp_db, monkeypatch):
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
             ws.send_text(json.dumps({"type": "auth"}))  # no keys, no user_id
@@ -404,18 +415,19 @@ class TestAnonFreeTrial:
         # steered onto the free-trial model — they get the normal default,
         # paid for by their own key.
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
-            ws.send_text(json.dumps({"type": "auth", "google_api_key": "byok-key"}))
+            ws.send_text(json.dumps({
+                "type": "auth", **byok_auth_field(get_default_model().provider),
+            }))
             ok = _drain_until(ws, "auth_success")
             assert ok["free_trial"] is False
-            from agents.model_registry import get_default_model
             assert ok["model_id"] == get_default_model().id
 
     def test_anon_free_trial_quota_exhausted(self, client, temp_db, monkeypatch):
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -431,7 +443,7 @@ class TestAnonFreeTrial:
 
     def test_free_trial_served_query_is_logged(self, client, temp_db, monkeypatch, caplog):
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
 
         with caplog.at_level(logging.INFO, logger="api.routes.chat"):
             with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -447,7 +459,7 @@ class TestAnonFreeTrial:
 
     def test_free_trial_exhaustion_is_logged(self, client, temp_db, monkeypatch, caplog):
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
 
         with caplog.at_level(logging.INFO, logger="api.routes.chat"):
@@ -472,7 +484,7 @@ class TestAnonFreeTrial:
         # quota keyed on it, rotating the header would mint unlimited free
         # queries on the operator's key.
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
 
         with client.websocket_connect(
@@ -493,9 +505,9 @@ class TestAnonFreeTrial:
             assert "Free trial limit reached" in err["message"]
 
     def test_anon_without_operator_key_still_requires_byok(self, client, temp_db, monkeypatch):
-        # No GOOGLE_API_KEY configured → no free trial to fall back to.
+        # No operator key configured → no free trial to fall back to.
         _patch_agent(monkeypatch)
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        clear_operator_keys(monkeypatch)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
             ws.send_text(json.dumps({"type": "auth"}))
@@ -509,8 +521,8 @@ class TestAnonFreeTrial:
         # DEFAULT_MODEL_ID is an operator knob, not a caller's model choice —
         # setting it must not make the free-trial branch unreachable.
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
-        monkeypatch.setenv("DEFAULT_MODEL_ID", "gemini-3.1-pro-preview")
+        _enable_trial(monkeypatch)
+        monkeypatch.setenv("DEFAULT_MODEL_ID", non_lendable_model().id)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
             ws.send_text(json.dumps({"type": "auth"}))
@@ -518,26 +530,28 @@ class TestAnonFreeTrial:
             assert ok["free_trial"] is True
             assert ok["model_id"] == chat.free_trial_model_id()
 
-    def test_anon_with_non_google_key_gets_a_model_for_that_provider(
+    def test_anon_with_non_default_provider_key_gets_a_model_for_that_provider(
         self, client, temp_db, monkeypatch
     ):
-        # They brought an OpenAI key and picked no model: use it, rather than
-        # steering them onto the Google default and refusing for a missing key.
+        # They brought a key for another provider and picked no model: use it,
+        # rather than steering them onto the default and refusing for a missing key.
         _patch_agent(monkeypatch)
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        clear_operator_keys(monkeypatch)
+        other_provider = next(
+            m.provider for m in get_all_models() if m.provider != get_default_model().provider
+        )
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
-            ws.send_text(json.dumps({"type": "auth", "openai_api_key": "byok-key"}))
+            ws.send_text(json.dumps({"type": "auth", **byok_auth_field(other_provider)}))
             ok = _drain_until(ws, "auth_success")
             assert ok["free_trial"] is False
-            from agents.model_registry import get_model
-            assert get_model(ok["model_id"]).provider == "openai"
+            assert get_model(ok["model_id"]).provider == other_provider
 
     def test_oversized_query_does_not_burn_a_trial_credit(
         self, client, temp_db, monkeypatch
     ):
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -561,7 +575,7 @@ class TestAnonFreeTrial:
         # len() of a list counts elements, so a list of huge strings would slip
         # past the length check and reach the operator's key.
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -579,17 +593,19 @@ class TestAnonFreeTrial:
     def test_stale_saved_model_id_does_not_block_the_trial(self, client, temp_db, monkeypatch):
         # An id saved before a model rename isn't an explicit choice.
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
+        stale_id = "model-retired-from-the-registry"
+        assert get_model(stale_id) is None
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
-            ws.send_text(json.dumps({"type": "auth", "model_id": "gemini-3-flash-preview"}))
+            ws.send_text(json.dumps({"type": "auth", "model_id": stale_id}))
             ok = _drain_until(ws, "auth_success")
             assert ok["free_trial"] is True
             assert ok["model_id"] == chat.free_trial_model_id()
 
     def test_trial_logs_never_contain_the_raw_ip(self, client, temp_db, monkeypatch, caplog):
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
 
         with caplog.at_level(logging.INFO, logger="api.routes.chat"):
@@ -609,11 +625,12 @@ class TestAnonFreeTrial:
         # The free trial only covers the one designated light model — picking
         # a different model without a key is still refused.
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "operator-anthropic-key")
+        _enable_trial(monkeypatch)
+        other = non_lendable_model()
+        set_operator_key(monkeypatch, other)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
-            ws.send_text(json.dumps({"type": "auth", "model_id": "claude-opus-5"}))
+            ws.send_text(json.dumps({"type": "auth", "model_id": other.id}))
             err = ws.receive_json()
             assert err["type"] == "error"
             assert "API key required" in err["message"]
@@ -627,7 +644,7 @@ class TestAnonFreeTrial:
         import api.db as db_module
         from api.rate_limit import clear_rate_limits
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -648,7 +665,7 @@ class TestAnonFreeTrial:
     def test_per_ip_quota_resets_at_utc_midnight(self, client, temp_db, monkeypatch):
         import api.db as db_module
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
         monkeypatch.setattr(db_module, "_today_utc", lambda: "2026-09-24")
 
@@ -666,7 +683,7 @@ class TestAnonFreeTrial:
         # the last global credit, the second is refused mid-session even though
         # their own per-IP quota is untouched.
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_DAILY_CAP", 1)
         monkeypatch.setattr(dependencies, "ANON_FREE_DAILY_CAP", 1)
 
@@ -689,7 +706,7 @@ class TestAnonFreeTrial:
         # Refused per-IP queries must not count toward the global cap, or one
         # visitor hammering "send" could lock everyone else out.
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
         monkeypatch.setattr(chat, "ANON_FREE_DAILY_CAP", 2)
         monkeypatch.setattr(dependencies, "ANON_FREE_DAILY_CAP", 2)
@@ -713,7 +730,7 @@ class TestAnonFreeTrial:
     def test_connect_refused_once_global_cap_is_spent(self, client, temp_db, monkeypatch):
         import api.db as db_module
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_DAILY_CAP", 1)
         monkeypatch.setattr(dependencies, "ANON_FREE_DAILY_CAP", 1)
         asyncio.run(db_module.increment_llm_usage(chat.FREE_TRIAL_GLOBAL_USAGE_KEY))
@@ -727,20 +744,22 @@ class TestAnonFreeTrial:
     def test_global_cap_does_not_affect_byok(self, client, temp_db, monkeypatch):
         import api.db as db_module
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_DAILY_CAP", 1)
         monkeypatch.setattr(dependencies, "ANON_FREE_DAILY_CAP", 1)
         asyncio.run(db_module.increment_llm_usage(chat.FREE_TRIAL_GLOBAL_USAGE_KEY))
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
-            ws.send_text(json.dumps({"type": "auth", "google_api_key": "byok-key"}))
+            ws.send_text(json.dumps({
+                "type": "auth", **byok_auth_field(get_free_tier_model().provider),
+            }))
             ok = _drain_until(ws, "auth_success")
             assert ok["free_trial"] is False
             assert _trial_query(ws)["type"] == "response"
 
     def test_quota_rows_do_not_store_raw_ips(self, client, temp_db, monkeypatch):
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
 
         with client.websocket_connect(
             "/ws/chat/AAPL", headers={"x-forwarded-for": "203.0.113.7"}
@@ -774,7 +793,7 @@ class TestAnonFreeTrial:
 
     def test_trial_borrows_operator_tavily_key_with_a_meter(self, client, temp_db, monkeypatch):
         captured = self._capture_agent_kwargs(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setenv("TAVILY_API_KEY", "operator-tavily")
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -788,7 +807,7 @@ class TestAnonFreeTrial:
 
     def test_trial_search_meter_enforces_the_daily_cap(self, client, temp_db, monkeypatch):
         captured = self._capture_agent_kwargs(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setenv("TAVILY_API_KEY", "operator-tavily")
         monkeypatch.setattr(chat, "ANON_FREE_SEARCH_DAILY_CAP", 2)
 
@@ -806,7 +825,7 @@ class TestAnonFreeTrial:
         # unavailable rather than plan steps that can only fail.
         import api.db as db_module
         captured = self._capture_agent_kwargs(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setenv("TAVILY_API_KEY", "operator-tavily")
         monkeypatch.setattr(chat, "ANON_FREE_SEARCH_DAILY_CAP", 1)
         asyncio.run(db_module.increment_llm_usage(chat.FREE_TRIAL_SEARCH_USAGE_KEY))
@@ -824,10 +843,13 @@ class TestAnonFreeTrial:
         # The Tavily lend is part of the free trial only — an anonymous BYOK
         # user (not on the trial) still needs their own Tavily key.
         captured = self._capture_agent_kwargs(monkeypatch)
+        _enable_trial(monkeypatch)
         monkeypatch.setenv("TAVILY_API_KEY", "operator-tavily")
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
-            ws.send_text(json.dumps({"type": "auth", "google_api_key": "byok-key"}))
+            ws.send_text(json.dumps({
+                "type": "auth", **byok_auth_field(get_free_tier_model().provider),
+            }))
             ok = _drain_until(ws, "auth_success")
             assert ok["free_trial"] is False
             assert "Web research disabled" in ok["message"]
@@ -837,7 +859,7 @@ class TestAnonFreeTrial:
 
     def test_trial_user_with_own_tavily_key_is_not_metered(self, client, temp_db, monkeypatch):
         captured = self._capture_agent_kwargs(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setenv("TAVILY_API_KEY", "operator-tavily")
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -852,13 +874,16 @@ class TestAnonFreeTrial:
 
 # ── Operator key only pays for operator_lendable models ─────────────────────
 
-# claude-opus-5 is not operator_lendable; gemini-3.6-flash (the default) is.
-_NON_LENDABLE = "claude-opus-5"
-_LENDABLE = "gemini-3.6-flash"
+# The free-trial model is operator_lendable by registry validation; the
+# non-lendable one is whichever the registry flags as such.
+_LENDABLE_MODEL = get_free_tier_model()
+_LENDABLE = _LENDABLE_MODEL.id
+_NON_LENDABLE_MODEL = non_lendable_model()
+_NON_LENDABLE = _NON_LENDABLE_MODEL.id
 
 
 def _set_operator_keys(monkeypatch):
-    for var in ("GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+    for var in PROVIDER_ENV_VARS.values():
         monkeypatch.setenv(var, "operator-key")
 
 
@@ -880,9 +905,13 @@ class TestOperatorKeyAllowlist:
         with client.websocket_connect("/ws/chat/AAPL") as ws:
             ws.send_text(json.dumps(auth))
             err = ws.receive_json()
+            provider = _NON_LENDABLE_MODEL.provider.replace("_", " ").title()
             assert err == {
                 "type": "error",
-                "message": "Anthropic API key required for Claude Opus 5. Add your key in Settings.",
+                "message": (
+                    f"{provider} API key required for {_NON_LENDABLE_MODEL.display_name}. "
+                    "Add your key in Settings."
+                ),
             }
             with pytest.raises(WebSocketDisconnect):
                 ws.receive_json()
@@ -907,7 +936,8 @@ class TestOperatorKeyAllowlist:
         priv, _ = rsa_keypair
         auth = {
             "type": "auth", "clerk_session_token": _make_token(priv),
-            "model_id": _NON_LENDABLE, "anthropic_api_key": "their-key",
+            "model_id": _NON_LENDABLE,
+            **byok_auth_field(_NON_LENDABLE_MODEL.provider, "their-key"),
         }
         ok = _first_frame(client, auth)
         assert ok["type"] == "auth_success"
@@ -915,7 +945,10 @@ class TestOperatorKeyAllowlist:
 
     def test_anon_byok_key_runs_non_lendable_model(self, client, temp_db, clerk_env, monkeypatch):
         _patch_agent(monkeypatch)
-        auth = {"type": "auth", "model_id": _NON_LENDABLE, "anthropic_api_key": "their-key"}
+        auth = {
+            "type": "auth", "model_id": _NON_LENDABLE,
+            **byok_auth_field(_NON_LENDABLE_MODEL.provider, "their-key"),
+        }
         ok = _first_frame(client, auth)
         assert ok["type"] == "auth_success"
         assert ok["model_id"] == _NON_LENDABLE
@@ -931,7 +964,6 @@ class TestOperatorKeyAllowlist:
         priv, _ = rsa_keypair
         ok = _first_frame(client, {"type": "auth", "clerk_session_token": _make_token(priv)})
         assert ok["type"] == "auth_success"
-        from agents.model_registry import get_model
         assert get_model(ok["model_id"]).operator_lendable is True
 
     def test_self_host_may_use_any_model_on_env_keys(self, client, temp_db, monkeypatch):
@@ -1009,7 +1041,7 @@ _SIGNED_IN = "user_percallbudget"
 class TestPerCallBudget:
     def test_operator_paid_query_charges_each_llm_call(self, client, temp_db, monkeypatch):
         _wire_real_graph(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        set_operator_key(monkeypatch, _LENDABLE_MODEL)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
             ws.send_text(json.dumps({"type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE}))
@@ -1021,7 +1053,7 @@ class TestPerCallBudget:
 
     def test_history_compression_call_is_charged(self, client, temp_db, monkeypatch):
         _wire_real_graph(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        set_operator_key(monkeypatch, _LENDABLE_MODEL)
         monkeypatch.setattr(chat, "get_token_threshold", lambda _model_id: 0)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -1038,7 +1070,7 @@ class TestPerCallBudget:
         from api import llm_concurrency
 
         _wire_real_graph(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        set_operator_key(monkeypatch, _LENDABLE_MODEL)
         monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 3)
         for _ in range(3):
             asyncio.run(db_module.increment_llm_usage(_SIGNED_IN))
@@ -1057,7 +1089,7 @@ class TestPerCallBudget:
         from api import llm_concurrency
 
         _wire_real_graph(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        set_operator_key(monkeypatch, _LENDABLE_MODEL)
         monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 3)
         for _ in range(2):
             asyncio.run(db_module.increment_llm_usage(_SIGNED_IN))
@@ -1072,12 +1104,12 @@ class TestPerCallBudget:
 
     def test_byok_query_charges_nothing(self, client, temp_db, monkeypatch):
         _wire_real_graph(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        set_operator_key(monkeypatch, _LENDABLE_MODEL)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
             ws.send_text(json.dumps({
                 "type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE,
-                "google_api_key": "their-key",
+                **byok_auth_field(_LENDABLE_MODEL.provider, "their-key"),
             }))
             _drain_until(ws, "auth_success")
             ws.send_text(json.dumps({"type": "query", "message": "what is 2 + 3?"}))

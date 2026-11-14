@@ -286,3 +286,49 @@ def golden_queries():
     """Load golden_queries.json — 4 end-to-end quality cases."""
     with open(DATASETS_DIR / "golden_queries.json") as f:
         return json.load(f)
+
+
+# ---------------------------------------------------------------------------
+# Provider-agnostic operator-key helpers
+#
+# Tests of free-trial mechanics, default-model fallback and operator-key
+# lending shouldn't care which vendor the registry picks. Derive the model
+# from agents.model_registry and use these to wire up its provider's key.
+# ---------------------------------------------------------------------------
+
+
+def set_operator_key(monkeypatch, model, value="operator-key"):
+    """Configure the operator's env key for `model`'s provider."""
+    from api.dependencies import PROVIDER_ENV_VARS
+
+    monkeypatch.setenv(PROVIDER_ENV_VARS[model.provider], value)
+
+
+def clear_operator_keys(monkeypatch):
+    """Remove every provider's operator env key (no trial, no env fallback)."""
+    from api.dependencies import PROVIDER_ENV_VARS
+
+    for env_var in PROVIDER_ENV_VARS.values():
+        monkeypatch.delenv(env_var, raising=False)
+
+
+def byok_auth_field(provider, value="byok-key"):
+    """WS auth-frame entry carrying a caller-supplied key for `provider`."""
+    from api.dependencies import _PROVIDER_KEY_FIELDS
+
+    return {_PROVIDER_KEY_FIELDS[provider]: value}
+
+
+def byok_header(provider, value="byok-key"):
+    """REST header carrying a caller-supplied key for `provider`."""
+    from api.dependencies import _PROVIDER_KEY_FIELDS
+
+    name = "-".join(w.capitalize() for w in _PROVIDER_KEY_FIELDS[provider].split("_"))
+    return {f"X-{name}": value}
+
+
+def non_lendable_model():
+    """A registry model the operator's key may not pay for."""
+    from agents.model_registry import get_all_models
+
+    return next(m for m in get_all_models() if not m.operator_lendable)

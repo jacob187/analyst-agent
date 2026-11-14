@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 import api.db as db_module
 from api import clerk_auth
+from agents.model_registry import get_default_model, get_free_tier_model
 from api.dependencies import (
     ApiKeys,
     _validate_user_id,
@@ -20,6 +21,7 @@ from api.dependencies import (
     resolve_ws_identity,
     resolve_ws_keys,
 )
+from tests.conftest import clear_operator_keys, set_operator_key
 
 
 @pytest.fixture(autouse=True)
@@ -1053,7 +1055,7 @@ class TestFreeTrial:
         # lending the operator's key for the default model.
         import agents.model_registry as registry
         monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
-        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        set_operator_key(monkeypatch, get_default_model())
         monkeypatch.setattr(registry, "_FREE_TIER_MODEL", None)
         assert free_trial_model_id() is None
         assert free_trial_key() is None
@@ -1061,37 +1063,37 @@ class TestFreeTrial:
     @pytest.mark.eval_unit
     def test_no_key_when_operator_has_not_configured_provider(self, monkeypatch):
         monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        clear_operator_keys(monkeypatch)
         assert free_trial_key() is None
 
     @pytest.mark.eval_unit
     def test_key_resolves_when_operator_has_configured_provider(self, monkeypatch):
         monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
-        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        set_operator_key(monkeypatch, get_free_tier_model(), "env-key")
         assert free_trial_key() == "env-key"
 
     @pytest.mark.eval_unit
     async def test_env_keys_endpoint_reports_free_trial_to_anon(self, clerk_env, fresh_db, monkeypatch):
         # Even though clerk_env gates the ordinary provider booleans away from
-        # anon (google=False), the free-trial model id is still surfaced — the
+        # anon (all False), the free-trial model id is still surfaced — the
         # one deliberate exception to that gate.
         from api.routes.models import env_keys
         monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
-        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        set_operator_key(monkeypatch, get_free_tier_model(), "env-key")
         keys = await get_api_keys(
             x_google_api_key=None, x_openai_api_key=None,
             x_anthropic_api_key=None, x_tavily_api_key=None,
             x_user_id=None, x_clerk_session_token=None,
         )
         body = await env_keys(keys)
-        assert body["google"] is False
+        assert (body["google"], body["openai"], body["anthropic"]) == (False, False, False)
         assert body["free_trial_model_id"] == free_trial_model_id()
 
     @pytest.mark.eval_unit
     async def test_env_keys_endpoint_omits_free_trial_without_operator_key(self, clerk_env, monkeypatch):
         from api.routes.models import env_keys
         monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        clear_operator_keys(monkeypatch)
         keys = await get_api_keys(
             x_google_api_key=None, x_openai_api_key=None,
             x_anthropic_api_key=None, x_tavily_api_key=None,

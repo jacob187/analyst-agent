@@ -8,8 +8,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 import api.db as db_module
+from agents.model_registry import get_default_model
 from api import dependencies, llm_concurrency
 from api.main import app
+from tests.conftest import byok_header
 
 
 client = TestClient(app)
@@ -138,7 +140,7 @@ class TestBriefingTimeout:
 
         resp = client.get(
             "/watchlist/briefing",
-            headers={**HEADERS, "X-Google-Api-Key": "test"},
+            headers={**HEADERS, **byok_header(get_default_model().provider)},
         )
 
         assert resp.status_code == 504
@@ -184,7 +186,7 @@ class TestBriefingTimeout:
         with patch("api.routes.watchlist.save_briefing", new_callable=AsyncMock):
             resp = client.get(
                 "/watchlist/briefing",
-                headers={**HEADERS, "X-Google-Api-Key": "test"},
+                headers={**HEADERS, **byok_header(get_default_model().provider)},
             )
         assert resp.status_code == 200
 
