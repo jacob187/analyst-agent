@@ -39,8 +39,25 @@ async def build_current(ticker: str, model_id: str) -> Any:
     )
 
 
+async def build_skills(ticker: str, model_id: str) -> Any:
+    """One tool-calling agent guided by on-demand skills (``agents/skills/``)."""
+    from agents.graph import build_agent
+    from agents.llm_factory import create_llm_pair
+
+    model = resolve_model(model_id)
+    llm, synthesizer_llm = create_llm_pair(model.id, provider_api_key(model))
+    return build_agent(
+        "skills",
+        ticker,
+        llm,
+        tavily_api_key=(os.getenv("TAVILY_API_KEY") or "").strip() or None,
+        synthesizer_llm=synthesizer_llm,
+    )
+
+
 ARCHITECTURES: dict[str, Builder] = {
     "current": build_current,
+    "skills": build_skills,
 }
 
 
