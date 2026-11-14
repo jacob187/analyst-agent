@@ -51,7 +51,7 @@ def _aggregate(results: list[QuestionResult], pricing: Pricing) -> dict[str, Any
     }
 
 
-def _counts(judgement: Judgement, side: str) -> dict[str, int]:
+def judgement_counts(judgement: Judgement, side: str) -> dict[str, int]:
     other = "b" if side == "a" else "a"
     judged = [q for q in judgement.questions if q.status == "judged"]
     return {
@@ -81,8 +81,8 @@ def _judgement_block(judgement: Judgement) -> dict[str, Any]:
         "question_set_hash": judgement.question_set_hash,
         "a": judgement.a.model_dump(),
         "b": judgement.b.model_dump(),
-        "a_counts": _counts(judgement, "a"),
-        "b_counts": _counts(judgement, "b"),
+        "a_counts": judgement_counts(judgement, "a"),
+        "b_counts": judgement_counts(judgement, "b"),
         "by_category": dict(by_category),
     }
 
@@ -129,7 +129,7 @@ def build_summary(runs: list[LoadedRun], judgement: Judgement | None = None) -> 
         }
         block["judgement"] = None
         if judgement is not None and meta.run_id in (judgement.a.run_id, judgement.b.run_id):
-            block["judgement"] = _counts(judgement, "a" if meta.run_id == judgement.a.run_id else "b")
+            block["judgement"] = judgement_counts(judgement, "a" if meta.run_id == judgement.a.run_id else "b")
         run_blocks.append(block)
 
     if judgement is not None and not any(b["judgement"] for b in run_blocks):

@@ -60,6 +60,15 @@ def provider_api_key(model: ModelDef) -> str:
     return key
 
 
+def has_provider_key(model: ModelDef) -> bool:
+    """Whether the environment holds ``model``'s provider key (the value is not exposed)."""
+    try:
+        provider_api_key(model)
+    except BenchmarkError:
+        return False
+    return True
+
+
 def prepare_environment() -> None:
     """What ``api/main.py`` does at startup that a bare CLI process lacks.
 

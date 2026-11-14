@@ -1,4 +1,4 @@
-"""``uv run python -m evals.benchmark <run|judge|summarize|report>``."""
+"""``uv run python -m evals.benchmark <run|judge|summarize|report|compare-models|compare-report>``."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from evals.benchmark.common import DEFAULT_TIMEOUT_S, BenchmarkError, prepare_environment, provider_api_key, resolve_model
+from evals.benchmark.compare_summary import DEFAULT_CHAT_COST_MULTIPLE, comparison_text
 from evals.benchmark.questions import DEFAULT_QUESTIONS_PATH, load_questions
 
 # Anchored to the repo root (gitignored), wherever the command is run from.
@@ -50,6 +51,36 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--runs", type=Path, nargs="+", required=True)
     report.add_argument("--judgement", type=Path, help="judgement directory")
     report.add_argument("--out", type=Path, help="PDF file (default: benchmark_reports/benchmark-<timestamp>.pdf in the repo root)")
+
+    compare = sub.add_parser(
+        "compare-models",
+        help="run the question set per model, judge each against a reference, summarise and write a PDF",
+    )
+    compare.add_argument("--graph", required=True, help=f"architecture: {', '.join(sorted(ARCHITECTURES))}")
+    compare.add_argument(
+        "--models", type=_ids, help="comma-separated registry model ids (default: every model whose provider key is set)"
+    )
+    compare.add_argument("--reference", help="reference model id (default: the free-tier model; run if not in --models)")
+    compare.add_argument(
+        "--out", type=Path, help="output directory (default: benchmark_reports/compare-<graph>; re-running resumes it)"
+    )
+    compare.add_argument("--estimate-from", type=Path, help="existing run directory whose token counts drive the cost estimate")
+    compare.add_argument("--dry-run", action="store_true", help="print the cost estimate and exit without running anything")
+    compare.add_argument("--yes", action="store_true", help="skip the cost confirmation prompt")
+    compare.add_argument("--judge-model", help="judge model id (default: the free-tier model)")
+    compare.add_argument(
+        "--chat-cost-multiple", type=float, default=DEFAULT_CHAT_COST_MULTIPLE,
+        help="chat_default / filing_analysis may cost up to this multiple of the reference's cost per question",
+    )
+    compare.add_argument("--questions", type=Path, default=DEFAULT_QUESTIONS_PATH, help="question YAML file")
+    compare.add_argument("--only", type=_ids, help="comma-separated question ids to run")
+    compare.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S, help="seconds allowed per question")
+
+    compare_report = sub.add_parser(
+        "compare-report", help="re-render report.pdf from a finished compare-models directory"
+    )
+    compare_report.add_argument("--dir", type=Path, required=True, help="the compare-models --out directory")
+    compare_report.add_argument("--out", type=Path, help="PDF file (default: <dir>/report.pdf)")
     return parser
 
 
@@ -121,11 +152,59 @@ def _cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_compare_models(args: argparse.Namespace) -> int:
+    from evals.benchmark import compare
+
+    if args.chat_cost_multiple <= 0:
+        raise BenchmarkError("--chat-cost-multiple must be greater than 0.")
+    prepare_environment()
+    reference, models = compare.select_models(args.models, args.reference)
+    questions = load_questions(args.questions)
+    out = args.out or compare.default_out_dir(DEFAULT_REPORT_DIR, args.graph)
+    plan = compare.build_plan(args.graph, models, reference, args.judge_model, questions, args.only, out)
+    estimate = compare.estimate_plan(plan, args.estimate_from)
+
+    print(f"Models: {', '.join(m.id + (' (reference)' if m.id == reference.id else '') for m in models)}")
+    print(f"Output directory: {out}")
+    print(compare.estimate_text(estimate, len(plan.selected_ids)))
+    if args.dry_run:
+        print("Dry run: nothing was run.")
+        return 0
+    if estimate.needs_confirmation and not args.yes:
+        if not compare.confirm("Run these models and spend the estimated cost? [y/N] "):
+            raise BenchmarkError("Not confirmed, nothing was run. Pass --yes to skip the prompt.")
+
+    summary = asyncio.run(
+        compare.execute(
+            plan,
+            lambda: compare.make_judge_llm(plan.judge_model),
+            timeout_s=args.timeout,
+            chat_cost_multiple=args.chat_cost_multiple,
+        )
+    )
+    print(comparison_text(summary))
+    print(f"Wrote {out / compare.SUMMARY_FILE} and {out / compare.REPORT_FILE}")
+    return 0
+
+
+def _cmd_compare_report(args: argparse.Namespace) -> int:
+    from evals.benchmark import compare
+    from evals.benchmark.compare_report import write_comparison_report
+
+    summary, runs, judgements = compare.load_comparison(args.dir)
+    out = args.out or args.dir / compare.REPORT_FILE
+    write_comparison_report(out, summary, runs, judgements)
+    print(f"Wrote {out}")
+    return 0
+
+
 _COMMANDS = {
     "run": _cmd_run,
     "judge": _cmd_judge,
     "summarize": _cmd_summarize,
     "report": _cmd_report,
+    "compare-models": _cmd_compare_models,
+    "compare-report": _cmd_compare_report,
 }
 
 

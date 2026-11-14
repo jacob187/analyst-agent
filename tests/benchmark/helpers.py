@@ -7,6 +7,7 @@ Nothing here calls a real LLM or the network. The only fake is the chat model
 from __future__ import annotations
 
 import re
+import zlib
 from pathlib import Path
 
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -129,6 +130,18 @@ class FakeAgent:
         yield {"type": "node", "node": "react_agent", "message": "thinking"}
         result = await self._agent.ainvoke(inputs)
         yield {"type": "response", "message": result["messages"][-1].content}
+
+
+def pdf_text_blob(pdf: bytes) -> str:
+    """All page-content text: inflate every stream, keep the text-showing operators."""
+    chunks = []
+    for raw in re.findall(rb"stream\r?\n(.*?)\r?\nendstream", pdf, re.S):
+        try:
+            chunks.append(zlib.decompress(raw))
+        except zlib.error:
+            chunks.append(raw)
+    blob = b"\n".join(chunks).decode("latin-1")
+    return blob.replace("\\(", "(").replace("\\)", ")").replace("\\\\", "\\")  # PDF string escapes
 
 
 def block(prompt: str, name: str) -> str:
