@@ -567,7 +567,7 @@ class TestAnonFreeTrial:
         self, client, temp_db, monkeypatch, caplog
     ):
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
 
         with caplog.at_level(logging.INFO, logger="api.routes.chat"):
             with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -1282,7 +1282,7 @@ class TestQueryLog:
         self, client, temp_db, monkeypatch, caplog
     ):
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        set_operator_key(monkeypatch, _LENDABLE_MODEL)
 
         with caplog.at_level(logging.INFO, logger="api.routes.chat"):
             with client.websocket_connect("/ws/chat/AAPL") as ws:
