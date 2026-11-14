@@ -121,6 +121,9 @@ def test_app_refuses_to_start_in_prod_with_disable_auth(monkeypatch):
 def test_app_starts_in_prod_with_clerk_configured(monkeypatch):
     monkeypatch.setenv("ENV", "production")
     monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
+    # Production also requires a real SEC identity; set it here so the test
+    # doesn't silently depend on a developer's .env.
+    monkeypatch.setenv("SEC_HEADER", "Real Person real@example.com")
     monkeypatch.delenv("DISABLE_AUTH", raising=False)
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
