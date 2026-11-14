@@ -23,6 +23,8 @@ export interface EnvKeysResponse {
   tavily: boolean;
   free_trial_model_id: string | null;
   free_trial_queries: number;
+  /** Model ids the operator's server keys cover for this caller. */
+  operator_models?: string[];
 }
 
 // ─── API Keys ──────────────────────────────────────────────────────────────────
