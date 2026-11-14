@@ -19,15 +19,16 @@ The bug in issue #30 had two compounding causes:
 
 These unit tests prove that fix (2) holds: each tool that wraps an LLM
 analysis returns parseable JSON containing **every** field of its Pydantic
-model. The tests pre-populate the in-process ``_processed_cache`` with a
-hand-crafted ``model_dump()`` dict so the tool's return path runs without
-any LLM call. This is a fake (a real dict in a real cache), not a mock of
-project code — see CLAUDE.md testing philosophy.
+model. The tests seed the ``filing_analyses`` table (a real temp SQLite) with
+a hand-crafted ``model_dump()`` for the latest filing of an in-memory EDGAR
+(tests/sec_fakes.py), so the tool's return path runs without any LLM call.
+These are fakes, not mocks of project code — see CLAUDE.md testing philosophy.
 """
 
 import json
 import pytest
 
+import api.db as db_module
 from agents.tools import sec_tools
 from agents.sec_workflow.sec_llm_models import (
     EarningsAnalysis,
@@ -36,23 +37,59 @@ from agents.sec_workflow.sec_llm_models import (
     RiskFactorAnalysis,
     BalanceSheetAnalysis,
 )
+from tests.sec_fakes import FakeEdgar, eightk, tenk, tenq
 
 
 TICKER = "TESTCO"
+TENK_ACC = "0000320193-25-000101"
+TENQ_ACC = "0000320193-26-000111"
+EIGHTK_ACC = "0000320193-26-000121"
+
+# Which (form, accession, analysis_type) row each tool reads for the fake
+# EDGAR below: risk falls back to the 10-K (10-Q risk text is boilerplate),
+# MD&A uses the substantive 10-Q.
+_ROW = {
+    "risk": ("10-K", TENK_ACC, "risk_10k"),
+    "mda": ("10-Q", TENQ_ACC, "mda_10q"),
+    "balance": ("10-K", TENK_ACC, "balance"),
+    "earnings": ("8-K", EIGHTK_ACC, "earnings"),
+    "event": ("8-K", EIGHTK_ACC, "event"),
+}
 
 
 @pytest.fixture(autouse=True)
-def reset_cache():
-    """Each test gets an empty processed cache so seeded fixtures don't leak."""
-    sec_tools._processed_cache.clear()
+async def fresh_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr(db_module, "_db", None)
+    await db_module.init_db()
     yield
-    sec_tools._processed_cache.clear()
+    await db_module.close_db()
 
 
-def _seed(ticker: str, key: str, model: object) -> None:
-    """Seed the in-process cache with a Pydantic model's ``model_dump()``."""
-    sec_tools._processed_cache.setdefault(ticker, {})
-    sec_tools._processed_cache[ticker][f"{ticker}_{key}"] = model.model_dump()
+def _edgar(monkeypatch, *, has_earnings: bool = True, has_8k: bool = True) -> FakeEdgar:
+    fake = FakeEdgar()
+    fake.publish(tenk(TENK_ACC, "2025-11-01", "10-K risk factors text"))
+    fake.publish(tenq(
+        TENQ_ACC, "2026-02-01",
+        "There have been no material changes to the risk factors previously disclosed.",
+        mda="Services revenue grew 12% year over year.",
+    ))
+    if has_8k:
+        fake.publish(eightk(EIGHTK_ACC, "2026-04-07", earnings=has_earnings))
+    return fake.install(monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def edgar(monkeypatch):
+    return _edgar(monkeypatch)
+
+
+async def _seed(_ticker: str, key: str, model: object) -> None:
+    """Seed ``filing_analyses`` with a Pydantic model's ``model_dump()``."""
+    form, accession, analysis_type = _ROW[key]
+    await db_module.save_filing_analysis(
+        TICKER, form, accession, analysis_type, json.dumps(model.model_dump()),
+    )
 
 
 def _full_earnings_analysis() -> EarningsAnalysis:
@@ -180,62 +217,66 @@ def _full_balance_sheet_analysis() -> BalanceSheetAnalysis:
 # ── Per-tool JSON shape tests ────────────────────────────────────────────────
 
 
+async def _earnings_8k() -> dict:
+    return json.loads(await sec_tools._tool_analyze_latest_8k(TICKER, llm=None))
+
+
 @pytest.mark.eval_unit
 class TestEarningsSummaryReturnsFullModel:
-    """_tool_earnings_summary returns JSON containing every EarningsAnalysis field."""
+    """analyze_latest_8k (earnings 8-K) returns JSON containing every EarningsAnalysis field."""
 
-    def test_returns_valid_json(self):
-        _seed(TICKER, "earnings_summary", _full_earnings_analysis())
-        out = sec_tools._tool_earnings_summary(TICKER, llm=None)
-        parsed = json.loads(out)
-        assert isinstance(parsed, dict)
+    async def test_returns_valid_json(self):
+        await _seed(TICKER, "earnings", _full_earnings_analysis())
+        assert isinstance(await _earnings_8k(), dict)
 
-    def test_preserves_all_pydantic_fields(self):
-        model = _full_earnings_analysis()
-        _seed(TICKER, "earnings_summary", model)
-        parsed = json.loads(sec_tools._tool_earnings_summary(TICKER, llm=None))
+    async def test_preserves_all_pydantic_fields(self):
+        await _seed(TICKER, "earnings", _full_earnings_analysis())
+        parsed = await _earnings_8k()
         for field in EarningsAnalysis.model_fields:
             assert field in parsed, f"Tool dropped field {field!r}"
 
-    def test_preserves_all_key_metrics(self):
+    async def test_preserves_all_key_metrics(self):
         """The old f-string truncated key_metrics to 5 — must now keep all 8."""
         model = _full_earnings_analysis()
-        _seed(TICKER, "earnings_summary", model)
-        parsed = json.loads(sec_tools._tool_earnings_summary(TICKER, llm=None))
+        await _seed(TICKER, "earnings", model)
+        parsed = await _earnings_8k()
         assert parsed["key_metrics"] == model.key_metrics
         assert len(parsed["key_metrics"]) == 8
 
-    def test_preserves_sentiment_analysis(self):
+    async def test_preserves_sentiment_analysis(self):
         """The old f-string dropped sentiment_analysis entirely — proves it returns now."""
         model = _full_earnings_analysis()
-        _seed(TICKER, "earnings_summary", model)
-        parsed = json.loads(sec_tools._tool_earnings_summary(TICKER, llm=None))
+        await _seed(TICKER, "earnings", model)
+        parsed = await _earnings_8k()
         assert parsed["sentiment_analysis"] == model.sentiment_analysis
 
 
 @pytest.mark.eval_unit
 class TestMaterialEventSummaryReturnsFullModel:
-    """_tool_material_event_summary returns JSON containing every field."""
+    """analyze_latest_8k (non-earnings 8-K) returns JSON containing every field."""
 
-    def test_returns_valid_json(self):
-        _seed(TICKER, "material_event_summary", _full_material_event_analysis())
-        parsed = json.loads(sec_tools._tool_material_event_summary(TICKER, llm=None))
-        assert isinstance(parsed, dict)
+    @pytest.fixture(autouse=True)
+    def edgar(self, monkeypatch):
+        return _edgar(monkeypatch, has_earnings=False)
 
-    def test_preserves_all_pydantic_fields(self):
-        _seed(TICKER, "material_event_summary", _full_material_event_analysis())
-        parsed = json.loads(sec_tools._tool_material_event_summary(TICKER, llm=None))
+    async def test_returns_valid_json(self):
+        await _seed(TICKER, "event", _full_material_event_analysis())
+        assert isinstance(await _earnings_8k(), dict)
+
+    async def test_preserves_all_pydantic_fields(self):
+        await _seed(TICKER, "event", _full_material_event_analysis())
+        parsed = await _earnings_8k()
         for field in MaterialEventAnalysis.model_fields:
             assert field in parsed, f"Tool dropped field {field!r}"
 
-    def test_preserves_event_type_and_filing_metadata(self):
+    async def test_preserves_event_type_and_filing_metadata(self):
         """These two fields are what makes cross-tool reconciliation possible —
         they identify which filing the analysis describes."""
-        model = _full_material_event_analysis()
-        _seed(TICKER, "material_event_summary", model)
-        parsed = json.loads(sec_tools._tool_material_event_summary(TICKER, llm=None))
+        await _seed(TICKER, "event", _full_material_event_analysis())
+        parsed = await _earnings_8k()
         assert parsed["event_type"] == "executive_compensation"
         assert parsed["filing_metadata"]["filing_date"] == "2026-04-07"
+        assert parsed["filing_reference"]["accession"] == EIGHTK_ACC
 
 
 @pytest.mark.eval_unit
@@ -244,18 +285,18 @@ class TestMDASummaryReturnsFullModel:
     crucially ``financial_highlights`` (where dollar amounts live) which the
     old f-string return dropped entirely."""
 
-    def test_preserves_all_pydantic_fields(self):
-        _seed(TICKER, "mda_summary", _full_mda_analysis())
-        parsed = json.loads(sec_tools._tool_mda_summary(TICKER, llm=None))
+    async def test_preserves_all_pydantic_fields(self):
+        await _seed(TICKER, "mda", _full_mda_analysis())
+        parsed = json.loads(await sec_tools._tool_mda_summary(TICKER, llm=None))
         for field in MDnAAnalysis.model_fields:
             assert field in parsed, f"Tool dropped field {field!r}"
 
-    def test_preserves_financial_highlights(self):
+    async def test_preserves_financial_highlights(self):
         """``financial_highlights`` is where Diluted EPS / Operating Income /
         capex numbers live for MD&A. The old f-string dropped the entire field."""
         model = _full_mda_analysis()
-        _seed(TICKER, "mda_summary", model)
-        parsed = json.loads(sec_tools._tool_mda_summary(TICKER, llm=None))
+        await _seed(TICKER, "mda", model)
+        parsed = json.loads(await sec_tools._tool_mda_summary(TICKER, llm=None))
         assert parsed["financial_highlights"] == model.financial_highlights
         assert len(parsed["financial_highlights"]) == 4
 
@@ -265,16 +306,16 @@ class TestRiskSummaryReturnsFullModel:
     """_tool_risk_factors_summary returns JSON containing the categorized
     ``risk_categories`` dict — which the old f-string return dropped."""
 
-    def test_preserves_all_pydantic_fields(self):
-        _seed(TICKER, "risk_summary", _full_risk_analysis())
-        parsed = json.loads(sec_tools._tool_risk_factors_summary(TICKER, llm=None))
+    async def test_preserves_all_pydantic_fields(self):
+        await _seed(TICKER, "risk", _full_risk_analysis())
+        parsed = json.loads(await sec_tools._tool_risk_factors_summary(TICKER, llm=None))
         for field in RiskFactorAnalysis.model_fields:
             assert field in parsed, f"Tool dropped field {field!r}"
 
-    def test_preserves_risk_categories(self):
+    async def test_preserves_risk_categories(self):
         model = _full_risk_analysis()
-        _seed(TICKER, "risk_summary", model)
-        parsed = json.loads(sec_tools._tool_risk_factors_summary(TICKER, llm=None))
+        await _seed(TICKER, "risk", model)
+        parsed = json.loads(await sec_tools._tool_risk_factors_summary(TICKER, llm=None))
         assert parsed["risk_categories"] == model.risk_categories
 
 
@@ -284,16 +325,16 @@ class TestBalanceSheetSummaryReturnsFullModel:
     fields the old f-string dropped: ``liquidity_analysis``, ``solvency_analysis``,
     ``growth_trends``, ``financial_highlights``."""
 
-    def test_preserves_all_pydantic_fields(self):
-        _seed(TICKER, "balance_summary", _full_balance_sheet_analysis())
-        parsed = json.loads(sec_tools._tool_balance_sheet_summary(TICKER, llm=None))
+    async def test_preserves_all_pydantic_fields(self):
+        await _seed(TICKER, "balance", _full_balance_sheet_analysis())
+        parsed = json.loads(await sec_tools._tool_balance_sheet_summary(TICKER, llm=None))
         for field in BalanceSheetAnalysis.model_fields:
             assert field in parsed, f"Tool dropped field {field!r}"
 
-    def test_preserves_liquidity_solvency_growth(self):
+    async def test_preserves_liquidity_solvency_growth(self):
         model = _full_balance_sheet_analysis()
-        _seed(TICKER, "balance_summary", model)
-        parsed = json.loads(sec_tools._tool_balance_sheet_summary(TICKER, llm=None))
+        await _seed(TICKER, "balance", model)
+        parsed = json.loads(await sec_tools._tool_balance_sheet_summary(TICKER, llm=None))
         assert parsed["liquidity_analysis"] == model.liquidity_analysis
         assert parsed["solvency_analysis"] == model.solvency_analysis
         assert parsed["growth_trends"] == model.growth_trends
@@ -302,62 +343,32 @@ class TestBalanceSheetSummaryReturnsFullModel:
 # ── Dispatcher routing tests ────────────────────────────────────────────────
 
 
-class _StubRetriever:
-    """Stand-in for ``SECDataRetrieval`` used to exercise dispatcher routing.
-
-    A fake (real class with hand-built return values), not a mock — see
-    CLAUDE.md testing philosophy. Only the methods the dispatcher calls are
-    implemented; reaching for any other method would raise AttributeError,
-    which is the correct failure mode for an under-specified fake.
-    """
-
-    def __init__(self, has_earnings: bool, found: bool = True):
-        self._has_earnings = has_earnings
-        self._found = found
-
-    def get_8k_overview(self):
-        if not self._found:
-            return {"found": False}
-        return {
-            "found": True,
-            "has_earnings": self._has_earnings,
-            "items": ["2.02"] if self._has_earnings else ["5.02"],
-            "content_type": "earnings" if self._has_earnings else "director_change",
-            "context": "stub overview",
-            "metadata": {},
-        }
-
-
 @pytest.mark.eval_unit
 class TestDispatcherRouting:
     """_tool_analyze_latest_8k routes to exactly one analyzer based on the
     overview's ``has_earnings`` flag — proves the planner cannot end up with
-    two contradictory 8-K analyses for the same filing."""
+    two contradictory 8-K analyses for the same filing. Both analyses are
+    cached, so the routing alone decides which one is served."""
 
-    def test_routes_to_earnings_when_has_earnings_true(self, monkeypatch):
-        _seed(TICKER, "earnings_summary", _full_earnings_analysis())
-        monkeypatch.setattr(
-            sec_tools, "_get_shared_retriever",
-            lambda ticker: _StubRetriever(has_earnings=True),
-        )
-        parsed = json.loads(sec_tools._tool_analyze_latest_8k(TICKER, llm=None))
+    async def _seed_both(self):
+        await _seed(TICKER, "earnings", _full_earnings_analysis())
+        await _seed(TICKER, "event", _full_material_event_analysis())
+
+    async def test_routes_to_earnings_when_has_earnings_true(self, monkeypatch):
+        _edgar(monkeypatch, has_earnings=True)
+        await self._seed_both()
+        parsed = await _earnings_8k()
         assert "key_metrics" in parsed, "Expected earnings shape (key_metrics)"
         assert "event_type" not in parsed, "Should not include material-event shape"
 
-    def test_routes_to_material_event_when_has_earnings_false(self, monkeypatch):
-        _seed(TICKER, "material_event_summary", _full_material_event_analysis())
-        monkeypatch.setattr(
-            sec_tools, "_get_shared_retriever",
-            lambda ticker: _StubRetriever(has_earnings=False),
-        )
-        parsed = json.loads(sec_tools._tool_analyze_latest_8k(TICKER, llm=None))
+    async def test_routes_to_material_event_when_has_earnings_false(self, monkeypatch):
+        _edgar(monkeypatch, has_earnings=False)
+        await self._seed_both()
+        parsed = await _earnings_8k()
         assert "event_type" in parsed, "Expected material-event shape (event_type)"
         assert "key_metrics" not in parsed, "Should not include earnings shape"
 
-    def test_returns_json_when_no_filing_found(self, monkeypatch):
-        monkeypatch.setattr(
-            sec_tools, "_get_shared_retriever",
-            lambda ticker: _StubRetriever(has_earnings=False, found=False),
-        )
-        parsed = json.loads(sec_tools._tool_analyze_latest_8k(TICKER, llm=None))
+    async def test_returns_json_when_no_filing_found(self, monkeypatch):
+        _edgar(monkeypatch, has_8k=False)
+        parsed = await _earnings_8k()
         assert parsed["found"] is False

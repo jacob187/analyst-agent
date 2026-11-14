@@ -1,62 +1,41 @@
 """Tests for bounded module-level caches in the tool modules.
 
-Verifies that `_shared_retrievers`, `_shared_processors`, `_processed_cache`
-(sec_tools), `_research_cache` (research_tools), and `_retriever_cache`
+Verifies that `_shared_retrievers` / `_latest_filings` and the per-key lock
+stores (sec_workflow.analysis_cache — shared by the SEC tools and the filings
+endpoint), `_research_cache` (research_tools), and `_retriever_cache`
 (indicator_window — shared between chart and stock tools) are size-capped via
 `cachetools` so unique-key rotation cannot grow process memory without bound.
+SEC analyses themselves live in the `filing_analyses` table, not in-process.
 """
 
 from cachetools import LRUCache, TTLCache
 
-from agents.tools import research_tools, sec_tools
+from agents.sec_workflow import analysis_cache
+from agents.tools import research_tools
 from agents.technical_workflow import indicator_window
 
 
-class TestSecToolCachesBounded:
-    def setup_method(self):
-        sec_tools._shared_retrievers.clear()
-        sec_tools._shared_processors.clear()
-        sec_tools._processed_cache.clear()
-
+class TestSecAnalysisCachesBounded:
     def test_shared_retrievers_bounded_at_128(self):
         for i in range(1000):
-            sec_tools._shared_retrievers[f"T{i}"] = object()
-        assert len(sec_tools._shared_retrievers) <= 128
+            analysis_cache._shared_retrievers[f"T{i}"] = object()
+        assert len(analysis_cache._shared_retrievers) <= 128
 
-    def test_shared_processors_bounded_at_128(self):
-        for i in range(1000):
-            sec_tools._shared_processors[f"PROC{i}"] = object()
-        assert len(sec_tools._shared_processors) <= 128
+    def test_latest_filings_bounded_at_1024(self):
+        for i in range(5000):
+            analysis_cache._latest_filings[(f"T{i}", "10-K")] = (None, 0.0, None)
+        assert len(analysis_cache._latest_filings) <= 1024
 
-    def test_processed_cache_outer_bounded_at_512(self):
-        for i in range(1000):
-            sec_tools._processed_cache[f"T{i}"] = {"risk_summary": {"v": i}}
-        assert len(sec_tools._processed_cache) <= 512
-
-    def test_processed_cache_setdefault_survives_outer_eviction(self):
-        # Simulate the race the setdefault fix protects against:
-        # outer TTL evicts the ticker between the read-check and the write.
-        sec_tools._processed_cache["AAPL"] = {"risk_summary": {"v": 1}}
-        del sec_tools._processed_cache["AAPL"]  # simulate TTL eviction
-        # The production write site uses setdefault, so this must not raise.
-        sec_tools._processed_cache.setdefault("AAPL", {})["mda_summary"] = {"v": 2}
-        assert sec_tools._processed_cache["AAPL"] == {"mda_summary": {"v": 2}}
-
-    def test_processed_cache_ttl_forces_eviction(self):
-        # cachetools.TTLCache.expire(time) evicts entries whose expiry time
-        # is at or before the passed clock value. We push the clock past TTL
-        # to verify eviction without sleeping.
-        sec_tools._processed_cache["AAPL"] = {"risk_summary": {"v": 1}}
-        assert "AAPL" in sec_tools._processed_cache
-        future = sec_tools._processed_cache.timer() + sec_tools._processed_cache.ttl + 1
-        sec_tools._processed_cache.expire(future)
-        assert "AAPL" not in sec_tools._processed_cache
+    def test_lock_stores_bounded(self):
+        for i in range(5000):
+            analysis_cache._lock_for(analysis_cache._analysis_locks, (f"T{i}",))
+        assert len(analysis_cache._analysis_locks) <= 4096
 
     def test_caches_are_cachetools_types(self):
-        assert isinstance(sec_tools._shared_retrievers, LRUCache)
-        assert isinstance(sec_tools._shared_processors, LRUCache)
-        assert isinstance(sec_tools._processed_cache, TTLCache)
-        assert sec_tools._processed_cache.ttl == 3600
+        assert isinstance(analysis_cache._shared_retrievers, LRUCache)
+        assert isinstance(analysis_cache._latest_filings, LRUCache)
+        assert isinstance(analysis_cache._latest_locks, TTLCache)
+        assert isinstance(analysis_cache._analysis_locks, TTLCache)
 
 
 class TestResearchCacheBounded:

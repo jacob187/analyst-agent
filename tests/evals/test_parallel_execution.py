@@ -13,6 +13,7 @@ These tests verify two performance/architecture properties:
    - Runs risk, MD&A, and balance sheet summaries concurrently.
 """
 
+import asyncio
 import time
 
 import pytest
@@ -340,15 +341,20 @@ class TestExtractFilingRef:
 class TestParallelAllSummaries:
     """Test that _tool_all_summaries runs its three sub-calls concurrently."""
 
-    def test_output_structure_preserved(self, mocker):
+    async def test_output_structure_preserved(self, mocker):
         """Output should contain all three section headers regardless of execution order."""
-        mocker.patch("agents.tools.sec_tools._tool_risk_factors_summary", return_value="risk data")
-        mocker.patch("agents.tools.sec_tools._tool_mda_summary", return_value="mda data")
-        mocker.patch("agents.tools.sec_tools._tool_balance_sheet_summary", return_value="balance data")
+        def returning(text):
+            async def summary(ticker, llm):
+                return text
+            return summary
+
+        mocker.patch("agents.tools.sec_tools._tool_risk_factors_summary", new=returning("risk data"))
+        mocker.patch("agents.tools.sec_tools._tool_mda_summary", new=returning("mda data"))
+        mocker.patch("agents.tools.sec_tools._tool_balance_sheet_summary", new=returning("balance data"))
 
         from agents.tools.sec_tools import _tool_all_summaries
 
-        result = _tool_all_summaries("TEST", None)
+        result = await _tool_all_summaries("TEST", None)
 
         assert "=== RISK ANALYSIS ===" in result
         assert "=== MANAGEMENT OUTLOOK ===" in result
@@ -357,20 +363,20 @@ class TestParallelAllSummaries:
         assert "mda data" in result
         assert "balance data" in result
 
-    def test_runs_concurrently(self, mocker):
+    async def test_runs_concurrently(self, mocker):
         """Three slow mocked summaries should complete in ~1x delay, not ~3x."""
-        def slow_summary(ticker, llm):
-            time.sleep(0.2)
+        async def slow_summary(ticker, llm):
+            await asyncio.sleep(0.2)
             return "summary"
 
-        mocker.patch("agents.tools.sec_tools._tool_risk_factors_summary", side_effect=slow_summary)
-        mocker.patch("agents.tools.sec_tools._tool_mda_summary", side_effect=slow_summary)
-        mocker.patch("agents.tools.sec_tools._tool_balance_sheet_summary", side_effect=slow_summary)
+        mocker.patch("agents.tools.sec_tools._tool_risk_factors_summary", new=slow_summary)
+        mocker.patch("agents.tools.sec_tools._tool_mda_summary", new=slow_summary)
+        mocker.patch("agents.tools.sec_tools._tool_balance_sheet_summary", new=slow_summary)
 
         from agents.tools.sec_tools import _tool_all_summaries
 
         start = time.monotonic()
-        result = _tool_all_summaries("TEST", None)
+        result = await _tool_all_summaries("TEST", None)
         elapsed = time.monotonic() - start
 
         assert "summary" in result

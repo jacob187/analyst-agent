@@ -5,8 +5,10 @@ into a single JSON response with no LLM calls (< 1s).
 
 Filings endpoint runs LLM analysis on SEC filings with DB-first caching:
 first load is slow (LLM calls), every subsequent load is instant (SQLite).
-Cache invalidation is automatic — keyed by accession number, so new filings
-trigger fresh analysis without TTL.
+Analyses are keyed by accession number; which accession is "latest" comes
+from the shared freshness check in ``agents/sec_workflow/analysis_cache.py``
+(the same one the chat SEC tools use), which asks EDGAR at most once per
+``FILING_FRESHNESS_TTL_SECONDS``.
 """
 
 import asyncio
@@ -19,6 +21,14 @@ from cachetools import TTLCache
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from agents.sec_workflow.analysis_cache import (
+    FilingRef,
+    eightk_input,
+    get_or_analyze,
+    get_retriever,
+    latest_filing,
+    run_analysis,
+)
 from api.dependencies import ApiKeys, get_api_keys
 from api.llm_concurrency import (
     LLMBudgetExceeded,
@@ -262,10 +272,11 @@ def _fetch_filing_data(ticker: str, fetch_raw: bool = True) -> dict[str, Any]:
     For foreign private issuers (BP, BABA, TSM), falls back to 20-F when
     no 10-K is available. 6-K is NOT a 10-Q replacement — edgartools' SixK
     class is a press-release wrapper without structured section access.
-    """
-    from agents.sec_workflow.get_SEC_data import SECDataRetrieval
 
-    retriever = SECDataRetrieval(ticker)
+    Reads the shared per-ticker retriever; ``_load_filing_data`` syncs it with
+    EDGAR's latest filings first.
+    """
+    retriever = get_retriever(ticker)
     result: dict[str, Any] = {"ticker": ticker}
 
     # --- 10-K (or 20-F for foreign filers) ---
@@ -362,39 +373,43 @@ def _fetch_filing_data(ticker: str, fetch_raw: bool = True) -> dict[str, Any]:
             kind = "earnings" if overview.get("has_earnings") else "event"
             if not fetch_raw:
                 result["eightk"] = {"kind": kind, "raw": {}, "metadata": metadata}
-            elif kind == "earnings":
-                earnings = retriever.get_earnings_data()
-                result["eightk"] = {
-                    "kind": "earnings",
-                    "raw": {**earnings, "metadata": metadata},
-                    "metadata": metadata,
-                }
             else:
-                # Match the dict shape `_tool_material_event_summary` builds
-                # so `analyze_material_event` accepts it directly.
-                items = overview.get("items", [])
-                primary_item = items[0] if items else None
-                item_text = ""
-                if primary_item:
-                    item_result = retriever.get_8k_item(primary_item)
-                    item_text = item_result.get("text", "") if item_result.get("found") else ""
-                result["eightk"] = {
-                    "kind": "event",
-                    "raw": {
-                        "content_type": overview.get("content_type", "other"),
-                        "items": items,
-                        "context": overview.get("context", ""),
-                        "text": item_text,
-                        "metadata": metadata,
-                    },
-                    "metadata": metadata,
-                }
-                if not item_text:
+                # Same input builder the chat 8-K tool uses.
+                kind, raw = eightk_input(retriever, overview, metadata)
+                result["eightk"] = {"kind": kind, "raw": raw, "metadata": metadata}
+                if kind == "event" and not raw["text"]:
+                    primary_item = raw["items"][0] if raw["items"] else None
                     result["eightk"]["reason"] = f"8-K item {primary_item} could not be extracted"
     except (ValueError, Exception) as e:
         result["eightk"] = {"kind": "none", "reason": f"No 8-K available ({e})"}
 
     return result
+
+
+async def _load_filing_data(ticker: str, fetch_raw: bool) -> dict[str, Any]:
+    """Point the shared retriever at EDGAR's latest 10-K/20-F, 10-Q and 8-K
+    (the freshness check chat uses too — TTL-cached, so usually no SEC
+    request), then run ``_fetch_filing_data`` off the event loop."""
+    forms = ("10-K", "10-Q", "8-K")
+    refs = await asyncio.gather(
+        *(latest_filing(ticker, form) for form in forms), return_exceptions=True,
+    )
+    for form, ref in zip(forms, refs):
+        if isinstance(ref, Exception):
+            logger.warning("[%s] latest %s lookup failed: %s", ticker, form, ref)
+    if refs[0] is None:
+        # No 10-K: foreign private issuers file a 20-F instead.
+        try:
+            await latest_filing(ticker, "20-F")
+        except Exception as e:
+            logger.warning("[%s] latest 20-F lookup failed: %s", ticker, e)
+    return await asyncio.to_thread(_fetch_filing_data, ticker, fetch_raw)
+
+
+def _filing_ref(filing_data: dict[str, Any], p: dict[str, Any]) -> FilingRef:
+    """The cache key filing for a planned section."""
+    metadata = filing_data.get(p["section"], {}).get("metadata", {})
+    return FilingRef(p["form"], p["accession"], metadata.get("filing_date", ""))
 
 
 def _plan_sections(filing_data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -498,16 +513,18 @@ async def _reported_eightk_kind(
 
 
 async def _analyze_or_cache(
-    ticker: str, form_type: str, accession: str, analysis_type: str,
+    ticker: str, filing: FilingRef, analysis_type: str,
     llm_input: dict[str, Any], model_id: str, api_key: str | None,
     on_progress=None, cache_only: bool = False, charge_user_id: str | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     """Resolve one filing section — the single source of truth for the
     cache → keyless-gate → generate flow shared by the JSON and SSE endpoints (#10).
+    Cache read/generate/save is the shared ``get_or_analyze`` the chat tools use.
 
     Returns ``(status, data)``: 'cached'|'needs_key'|'unavailable'|'done'|'failed'.
-    ``data`` is None for everything but cached/done. ``cache_only`` (input failed
-    to extract) serves a cache hit but returns 'unavailable' on a miss, silently.
+    ``data`` (the analysis plus its ``filing_reference``) is None for everything
+    but cached/done. ``cache_only`` (input failed to extract) serves a cache
+    hit but returns 'unavailable' on a miss, silently.
     ``on_progress(status, extra)`` (optional) is called as the state advances so the SSE endpoint can stream progress; the
     JSON endpoint passes None. ``charge_user_id`` (operator-paid requests
     only) is charged one daily-budget unit when this section actually runs
@@ -515,49 +532,54 @@ async def _analyze_or_cache(
     caller's pre-flight (`_ensure_budget_if_generating`) decides whether
     the request may generate at all.
     """
-    from api.db import get_filing_analysis, save_filing_analysis
+    form_type = filing.form
 
     def progress(status: str, **extra):
         if on_progress:
             on_progress(status, extra)
 
-    cached = await get_filing_analysis(ticker, form_type, accession, analysis_type)
-    if cached:
-        logger.info("[%s] CACHE HIT  %s/%s", ticker, form_type, analysis_type)
-        progress("cached")
-        return "cached", json.loads(cached["analysis_json"])
+    started: list[float] = []
 
-    if cache_only:
-        return "unavailable", None
+    async def generate() -> dict[str, Any]:
+        from agents.llm_factory import create_llm
 
-    if not api_key:
-        # Cache miss with no key to generate — anonymous / keyless caller.
-        progress("needs_key")
-        return "needs_key", None
-
-    progress("processing")
-    logger.info("[%s] LLM CALL   %s/%s — calling %s", ticker, form_type, analysis_type, model_id)
-    t0 = time.monotonic()
-    try:
+        progress("processing")
+        logger.info("[%s] LLM CALL   %s/%s — calling %s", ticker, form_type, analysis_type, model_id)
+        started.append(time.monotonic())
         async with llm_slot():
             # Charged only once a slot is held: a saturated pool fails the
             # section before any LLM call, so it costs nothing.
             if charge_user_id:
                 await charge_llm_call(charge_user_id)
-            analysis = await asyncio.to_thread(
-                _run_llm_analysis, ticker, analysis_type, llm_input, model_id, api_key,
-            )
-        await save_filing_analysis(
-            ticker, form_type, accession, analysis_type, json.dumps(analysis),
+            llm = await asyncio.to_thread(create_llm, model_id, api_key)
+            return await run_analysis(llm, ticker, analysis_type, llm_input)
+
+    try:
+        result = await get_or_analyze(
+            ticker, filing, analysis_type,
+            None if cache_only or not api_key else generate,
         )
-        duration = round(time.monotonic() - t0, 1)
-        logger.info("[%s] LLM DONE   %s/%s (%.1fs)", ticker, form_type, analysis_type, duration)
-        progress("done", duration=duration)
-        return "done", analysis
     except Exception as e:
         logger.error("[%s] LLM FAILED %s/%s: %s", ticker, form_type, analysis_type, e)
         progress("failed")
         return "failed", None
+
+    if result is None:
+        if cache_only:
+            return "unavailable", None
+        # Cache miss with no key to generate — anonymous / keyless caller.
+        progress("needs_key")
+        return "needs_key", None
+
+    if not result.generated:
+        logger.info("[%s] CACHE HIT  %s/%s", ticker, form_type, analysis_type)
+        progress("cached")
+        return "cached", result.served()
+
+    duration = round(time.monotonic() - started[0], 1)
+    logger.info("[%s] LLM DONE   %s/%s (%.1fs)", ticker, form_type, analysis_type, duration)
+    progress("done", duration=duration)
+    return "done", result.served()
 
 
 def _budget_user(keys: ApiKeys, api_key: str | None, provider: str) -> str | None:
@@ -589,59 +611,6 @@ async def _ensure_budget_if_generating(
         await ensure_budget_available(charge_user_id)
 
 
-def _run_llm_analysis(
-    ticker: str, analysis_type: str, raw_data: dict[str, Any],
-    model_id: str, api_key: str,
-) -> dict[str, Any]:
-    """Run a single LLM analysis and return the Pydantic model as a dict.
-
-    analysis_type is one of: 'risk_10k', 'mda_10k', 'balance', 'risk_10q',
-    'mda_10q', 'earnings', 'event', 'business', 'cybersecurity', 'legal',
-    'market_risk', 'income_stmt', 'cashflow'.
-    """
-    from agents.llm_factory import create_llm
-    from agents.sec_workflow.sec_llm_models import SECDocumentProcessor
-
-    llm = create_llm(model_id, api_key)
-    processor = SECDocumentProcessor(llm)
-
-    if analysis_type == "risk_10k":
-        result = processor.analyze_risk_factors(ticker, raw_data)
-    elif analysis_type == "mda_10k":
-        result = processor.analyze_mda(ticker, raw_data)
-    elif analysis_type == "balance":
-        # Balance sheet expects separate tenk/tenq dicts
-        result = processor.analyze_balance_sheet(
-            ticker, raw_data.get("tenk", {}), raw_data.get("tenq", {})
-        )
-    elif analysis_type == "risk_10q":
-        result = processor.analyze_risk_factors(ticker, raw_data)
-    elif analysis_type == "mda_10q":
-        result = processor.analyze_mda(ticker, raw_data)
-    elif analysis_type == "earnings":
-        result = processor.analyze_earnings(ticker, raw_data)
-    elif analysis_type == "event":
-        result = processor.analyze_material_event(ticker, raw_data)
-    elif analysis_type == "business":
-        result = processor.analyze_business_overview(ticker, raw_data)
-    elif analysis_type == "cybersecurity":
-        result = processor.analyze_cybersecurity(ticker, raw_data)
-    elif analysis_type == "legal":
-        result = processor.analyze_legal_proceedings(ticker, raw_data)
-    elif analysis_type == "market_risk":
-        result = processor.analyze_market_risk(ticker, raw_data)
-    elif analysis_type == "income_stmt":
-        # Income statement combines tenk + tenq XBRL data
-        result = processor.analyze_income_statement(ticker, raw_data)
-    elif analysis_type == "cashflow":
-        # Cash flow combines tenk + tenq XBRL data
-        result = processor.analyze_cashflow(ticker, raw_data)
-    else:
-        raise ValueError(f"Unknown analysis type: {analysis_type}")
-
-    return result.model_dump()
-
-
 @router.get("/{ticker}/filings")
 async def get_company_filings(
     ticker: str,
@@ -653,7 +622,8 @@ async def get_company_filings(
     First call for a ticker runs LLM analysis (~5-15s; up to 12 calls, ~70-100k
     input tokens — about $0.07 per company on gemini-3.1-flash-lite).
     Subsequent calls return instantly from SQLite (keyed by accession
-    number — automatic cache invalidation when new filings are published).
+    number; a newly published filing is picked up within
+    FILING_FRESHNESS_TTL_SECONDS and analysed on its first request).
 
     Cached analyses are public (no auth) for discoverability. Generating a
     fresh analysis on a cache miss needs an LLM API key — BYOK, or the
@@ -690,7 +660,7 @@ async def get_company_filings(
     # extracted only when there's a key to generate with.
     logger.info("[%s] Fetching filings from EDGAR (raw=%s)...", ticker, bool(api_key))
     t0 = time.monotonic()
-    filing_data = await asyncio.to_thread(_fetch_filing_data, ticker, api_key is not None)
+    filing_data = await _load_filing_data(ticker, api_key is not None)
     logger.info("[%s] EDGAR fetch complete (%.1fs)", ticker, time.monotonic() - t0)
 
     plan = _plan_sections(filing_data)
@@ -705,10 +675,10 @@ async def get_company_filings(
         raise HTTPException(status_code=429, detail=str(e))
 
     # Resolve every section concurrently — cache hits return instantly, misses
-    # with a key run the LLM in parallel threads.
+    # with a key run their LLM calls concurrently.
     results = await asyncio.gather(*[
         _analyze_or_cache(
-            ticker, p["form"], p["accession"], p["atype"], p["input"], model.id, api_key,
+            ticker, _filing_ref(filing_data, p), p["atype"], p["input"], model.id, api_key,
             cache_only=p["cache_only"], charge_user_id=charge_user_id,
         )
         for p in plan
@@ -814,7 +784,7 @@ async def stream_company_filings(
             yield _sse({"type": "progress", "step": "edgar_fetch", "status": "fetching"})
             try:
                 t0 = time.monotonic()
-                filing_data = await asyncio.to_thread(_fetch_filing_data, ticker, api_key is not None)
+                filing_data = await _load_filing_data(ticker, api_key is not None)
                 logger.info("[%s] EDGAR fetch complete (%.1fs)", ticker, time.monotonic() - t0)
                 yield _sse({
                     "type": "progress",
@@ -863,7 +833,7 @@ async def stream_company_filings(
                     queue.put_nowait(_sse({"type": "progress", "step": step, "status": status, **extra}))
 
                 _status, data = await _analyze_or_cache(
-                    ticker, p["form"], p["accession"], p["atype"], p["input"],
+                    ticker, _filing_ref(filing_data, p), p["atype"], p["input"],
                     model.id, api_key, on_progress=on_progress, cache_only=p["cache_only"],
                     charge_user_id=charge_user_id,
                 )

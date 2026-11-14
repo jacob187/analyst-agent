@@ -28,6 +28,9 @@ _TENQ_ITEM_KEYS: Dict[str, str] = {
     "5":  "Item 5",   # Other Information (Part II — insider trading etc.)
 }
 
+# Form → lazy-cache attribute stem on SECDataRetrieval (``_{stem}_filing`` etc.).
+_FORM_SLOTS: Dict[str, str] = {"10-K": "tenk", "10-Q": "tenq", "8-K": "eightk", "20-F": "twentyf"}
+
 
 class FilingMetadata:
     """Metadata for SEC filings to track provenance."""
@@ -264,6 +267,40 @@ class SECDataRetrieval:
             company_name=filing.company,
         )
         return filing
+
+    def refresh_latest_filing(self, form: Literal["10-K", "10-Q", "8-K", "20-F"]) -> Optional[FilingMetadata]:
+        """Re-read the company's filing index from EDGAR and return the latest
+        ``form`` filing's metadata (None if the company has none).
+
+        edgartools' ``Company`` loads its submissions once and caches them, so a
+        long-lived retriever never sees a newly published filing. This builds a
+        fresh ``Company`` (one submissions request) and, when the latest
+        accession differs from the cached one, swaps in the new filing and drops
+        that form's parsed object so section getters read the new filing.
+        """
+        slot = _FORM_SLOTS[form]
+        company = Company(self.ticker)
+        if form == "8-K":
+            filing = company.get_filings(form="8-K").latest(1)
+        else:
+            filing = company.latest(form=form)
+        self.company = company
+        if filing is None:
+            return None
+        meta = FilingMetadata(
+            form=filing.form,
+            cik=str(filing.cik),
+            accession=filing.accession_number,
+            filing_date=str(filing.filing_date),
+            period_of_report=str(filing.period_of_report),
+            company_name=filing.company,
+        )
+        current = getattr(self, f"_{slot}_metadata")
+        if current is None or current.accession != meta.accession:
+            setattr(self, f"_{slot}_filing", filing)
+            setattr(self, f"_{slot}_obj", None)
+            setattr(self, f"_{slot}_metadata", meta)
+        return getattr(self, f"_{slot}_metadata")
 
     # ── 8-K public methods ────────────────────────────────────────────────
 
