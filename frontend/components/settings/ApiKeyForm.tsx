@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Eye, EyeOff, CheckCircle2 } from "lucide-react";
+import { Eye, EyeOff, CheckCircle2, KeyRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,12 +13,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { useApiKeys } from "@/hooks/useApiKeys";
+import { PROVIDER_KEY_FIELD, modelNeedsOwnKey, useApiKeys } from "@/hooks/useApiKeys";
 import { useModels } from "@/hooks/useModels";
+import { authDisabled, useAuth } from "@/lib/auth";
 import { PROVIDER_LABELS, type Provider } from "@/lib/constants";
-import type { ApiKeys } from "@/types";
+import type { ApiKeys, Model } from "@/types";
 
 export function ApiKeyForm() {
+  const { isSignedIn } = useAuth();
   const { keys, setKeys } = useApiKeys();
   const { models, envKeys } = useModels();
   const [local, setLocal] = useState<ApiKeys | null>(null);
@@ -44,11 +46,14 @@ export function ApiKeyForm() {
   }
 
   const providers: Provider[] = ["google_genai", "openai", "anthropic"];
-  const keyField: Record<Provider, keyof ApiKeys> = {
-    google_genai: "google_api_key",
-    openai: "openai_api_key",
-    anthropic: "anthropic_api_key",
-  };
+  const keyField = PROVIDER_KEY_FIELD;
+
+  // The server lends its keys only for operator-lendable models, and only to
+  // signed-in users; self-host (auth disabled) runs every model on its keys.
+  const enforcesOwnKey = !!isSignedIn && !authDisabled;
+  const needsOwnKey = (m: Model) => enforcesOwnKey && modelNeedsOwnKey(m, draft);
+  const selectedModel =
+    models.find((m) => m.id === draft.model_id) ?? models.find((m) => m.default);
 
   return (
     <form onSubmit={handleSave} className="space-y-6">
@@ -147,10 +152,19 @@ export function ApiKeyForm() {
                     {m.display_name}
                     {m.default ? " (default)" : ""}
                     {m.thinking_capable ? " ✦" : ""}
+                    {needsOwnKey(m) ? " — your key required" : ""}
                   </option>
                 ))}
               </select>
-              <p className="text-xs text-muted-foreground">✦ = supports extended thinking</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-xs text-muted-foreground">✦ = supports extended thinking</p>
+                {selectedModel && needsOwnKey(selectedModel) && (
+                  <Badge variant="outline" className="text-xs">
+                    <KeyRound className="mr-1 h-3 w-3" />
+                    Your {PROVIDER_LABELS[selectedModel.provider]} key required
+                  </Badge>
+                )}
+              </div>
             </div>
           )}
         </CardContent>

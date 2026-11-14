@@ -13,7 +13,7 @@ import { ChatWindow } from "@/components/chat/ChatWindow";
 import { api } from "@/lib/api";
 import { useApiKeys } from "@/hooks/useApiKeys";
 import { formatCurrency, formatPercent } from "@/lib/utils";
-import { PERIOD_MAP, type Period, type Indicator } from "@/lib/constants";
+import { PERIOD_MAP, PROVIDER_LABELS, type Period, type Indicator } from "@/lib/constants";
 import type { CompanyProfileResponse, ChartResponse, FilingsResponse, FilingProgressEvent } from "@/types";
 
 interface CompanyDashboardProps {
@@ -22,7 +22,7 @@ interface CompanyDashboardProps {
 }
 
 export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardProps) {
-  const { keys, loaded: keysLoaded, hasRequiredKeys } = useApiKeys();
+  const { keys, loaded: keysLoaded, hasRequiredKeys, ownKeyModel } = useApiKeys();
 
   // Profile — fetched client-side so it doesn't block the initial page render
   const [profile, setProfile] = useState<CompanyProfileResponse | null>(null);
@@ -287,9 +287,15 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
             <div className="h-[560px]">
               {keysLoaded && !hasRequiredKeys() ? (
                 <div className="flex h-full flex-col items-center justify-center gap-4 rounded-xl border border-border/60 bg-card p-8 text-center">
-                  <p className="text-sm font-medium">Sign in or add your API keys</p>
+                  <p className="text-sm font-medium">
+                    {ownKeyModel
+                      ? `Your API key is required for ${ownKeyModel.display_name}`
+                      : "Sign in or add your API keys"}
+                  </p>
                   <p className="text-xs text-muted-foreground">
-                    Sign in to chat with our model, or add your own provider key in Settings.
+                    {ownKeyModel
+                      ? `Add your ${PROVIDER_LABELS[ownKeyModel.provider]} key in Settings, or pick a different model.`
+                      : "Sign in to chat with our model, or add your own provider key in Settings."}
                   </p>
                   <a
                     href="/settings"
