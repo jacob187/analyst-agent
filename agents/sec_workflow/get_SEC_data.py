@@ -335,9 +335,20 @@ class SECDataRetrieval:
         'Item 2.02', or 'item_202'.  Returns the same dict shape as
         ``get_section`` for consistency.
         """
+        item = (item or "").strip()
+        metadata = self._eightk_metadata.to_dict() if self._eightk_metadata else {}
+        if not item:
+            # A blank key would ask edgartools for item '' — a FutureWarning
+            # today and a SectionNotFoundError in edgartools 6.0.
+            return {"text": "No 8-K item number given (e.g. '2.02').", "metadata": metadata, "found": False}
         try:
             eightk = self.get_eightk()
-            text = eightk[item]
+            try:
+                text = eightk[item]
+            except KeyError:
+                # edgartools 6.0 raises SectionNotFoundError (a KeyError) for
+                # an item the filing doesn't contain; today it returns None.
+                text = None
             found = text is not None and bool(str(text).strip())
             return {
                 "text": str(text) if found else f"Item {item} not found in 8-K",
