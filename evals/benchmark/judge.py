@@ -13,9 +13,13 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from agents.model_registry import ModelDef
+from api.tracing import capture_spans
 from evals.benchmark.common import BenchmarkError, provider_api_key, scrub_secrets
+from evals.benchmark.isolation import quiet_attribute_truncation
+from evals.benchmark.metrics import extract_metrics
+from evals.benchmark.pricing import estimate_cost
 from evals.benchmark.runs import LoadedRun
-from evals.benchmark.schemas import Judgement, JudgedQuestion, RunRef, ToolEvidence
+from evals.benchmark.schemas import Judgement, JudgedQuestion, Pricing, RunRef, ToolEvidence
 
 PROMPT_PATH = Path(__file__).parent / "prompts" / "judge.yaml"
 _ERROR_TEXT_LIMIT = 500
@@ -195,6 +199,50 @@ def check_comparable(run_a: LoadedRun, run_b: LoadedRun) -> None:
         )
 
 
+@dataclass(frozen=True)
+class JudgeUsage:
+    """What one judge call spent, from the OpenInference LLM spans it produced.
+
+    ``input_tokens``/``output_tokens`` are None when no LLM span reported any
+    usage. ``calls_without_usage`` counts the LLM calls that reported none (a
+    call that left no span at all counts as one), so ``> 0`` means the figures
+    are missing or a lower bound.
+    """
+
+    input_tokens: int | None
+    output_tokens: int | None
+    calls_without_usage: int
+
+
+def judge_usage(spans: Any) -> JudgeUsage:
+    """Token usage of the LLM spans captured around one judge call (``extract_metrics``, as for runs).
+
+    The chat model's own span carries ``llm.token_count.*`` from the response's
+    ``usage_metadata`` even under ``with_structured_output`` (the parser runs
+    after the model span closes), for Anthropic, Google and OpenAI chat models.
+    """
+    m = extract_metrics(spans)
+    if m.llm_calls == 0:
+        return JudgeUsage(None, None, 1)
+    if m.llm_calls_without_usage >= m.llm_calls:
+        return JudgeUsage(None, None, m.llm_calls_without_usage)
+    return JudgeUsage(m.input_tokens, m.output_tokens, m.llm_calls_without_usage)
+
+
+async def _ask_judge(structured: Any, messages: list[Any]) -> tuple[JudgeVerdict | None, Exception | None, JudgeUsage]:
+    """One judge call under ``capture_spans``: the verdict or the error, plus what it spent."""
+    verdict: JudgeVerdict | None = None
+    error: Exception | None = None
+    # Only the token counts are read; the judge prompt (answers + evidence) is far past the span
+    # attribute cap, so the SDK's per-attribute truncation warnings are silenced as in runs.
+    with quiet_attribute_truncation(), capture_spans() as captured:
+        try:
+            verdict = _coerce(await structured.ainvoke(messages))
+        except Exception as e:  # one bad judge call must not abort the rest
+            error = e
+    return verdict, error, judge_usage(captured.spans)
+
+
 async def judge_runs(
     run_a: LoadedRun,
     run_b: LoadedRun,
@@ -202,6 +250,7 @@ async def judge_runs(
     judge_model_id: str,
     seed: int,
     *,
+    pricing: Pricing | None = None,
     progress: Callable[[str], None] = print,
 ) -> Judgement:
     """Judge every question both runs have an answer for.
@@ -212,6 +261,10 @@ async def judge_runs(
     Each answer comes with the (budget-trimmed) tool outputs its run retrieved, and
     the prompt states today's date so current filings/prices are not mistaken for
     hallucinations.
+
+    The judge's own token usage is measured per question from the spans of its
+    call and priced with ``pricing`` (the judge model's price snapshot); without
+    prices, or without usage on a call, the cost is None (unknown), never 0.
     """
     check_comparable(run_a, run_b)
     prompts = load_judge_prompt()
@@ -219,6 +272,8 @@ async def judge_runs(
     structured = judge_llm.with_structured_output(JudgeVerdict)
 
     judged: list[JudgedQuestion] = []
+    total_in = total_out = calls_without_usage = 0
+    judge_calls = measured_calls = 0
     shared_ids = [qid for qid in run_a.meta.question_ids if qid in set(run_b.meta.question_ids)]
     for index, qid in enumerate(shared_ids, start=1):
         qa, qb = run_a.questions.get(qid), run_b.questions.get(qid)
@@ -259,11 +314,24 @@ async def judge_runs(
                 )
             ),
         ]
-        try:
-            verdict = _coerce(await structured.ainvoke(messages))
-        except Exception as e:  # one bad judge call must not abort the rest
-            reason = scrub_secrets(f"{type(e).__name__}: {e}")[:_ERROR_TEXT_LIMIT]
-            judged.append(JudgedQuestion(**base, status="error", reason=reason, a_is_first=first_is_a))
+        verdict, error, usage = await _ask_judge(structured, messages)
+        judge_calls += 1
+        measured_calls += usage.input_tokens is not None
+        total_in += usage.input_tokens or 0
+        total_out += usage.output_tokens or 0
+        calls_without_usage += usage.calls_without_usage
+        spent = dict(
+            judge_input_tokens=usage.input_tokens,
+            judge_output_tokens=usage.output_tokens,
+            judge_cost_usd=(
+                None
+                if usage.input_tokens is None
+                else estimate_cost(pricing, usage.input_tokens, usage.output_tokens or 0, usage.calls_without_usage)
+            ),
+        )
+        if error is not None:
+            reason = scrub_secrets(f"{type(error).__name__}: {error}")[:_ERROR_TEXT_LIMIT]
+            judged.append(JudgedQuestion(**base, status="error", reason=reason, a_is_first=first_is_a, **spent))
             progress(f"[{index}/{len(shared_ids)}] {qid}: error ({reason})")
             continue
 
@@ -280,6 +348,7 @@ async def judge_runs(
                 a_evidence_trimmed=a_ev.trimmed,
                 b_evidence_trimmed=b_ev.trimmed,
                 raw_verdict=verdict.model_dump(),
+                **spent,
                 **_unshuffle(verdict, first_is_a),
             )
         )
@@ -303,4 +372,10 @@ async def judge_runs(
         questions=judged,
         as_of_date=today,
         evidence_budget_chars=EVIDENCE_BUDGET_CHARS,
+        # No call reported usage at all: the totals are unknown, not 0 (a partial set is a lower bound).
+        judge_input_tokens=None if judge_calls and not measured_calls else total_in,
+        judge_output_tokens=None if judge_calls and not measured_calls else total_out,
+        judge_cost_usd=estimate_cost(pricing, total_in, total_out, calls_without_usage),
+        judge_calls_without_usage=calls_without_usage,
+        judge_prices_as_of=None if pricing is None else pricing.prices_as_of,
     )

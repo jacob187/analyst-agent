@@ -29,7 +29,8 @@ from typing import Any
 
 from evals.benchmark.runs import LoadedRun
 from evals.benchmark.schemas import Judgement
-from evals.benchmark.summary import build_summary, judgement_counts
+from evals.benchmark.pricing import cost_text
+from evals.benchmark.summary import build_summary, judge_usage_block, judgement_counts, sum_known
 
 MIN_WIN_TIE_RATE = 0.85
 DEFAULT_CHAT_COST_MULTIPLE = 3.0
@@ -98,6 +99,9 @@ def _model_block(
         "run_id": run.meta.run_id,
         "questions": run_block["questions"],
         "vs_reference": None if is_reference else vs_reference(run, reference_run, judgement),
+        # What judging this model against the reference cost, as recorded when it was judged
+        # (a resumed judgement may have been made by another judge model than this invocation's).
+        "judge": None if is_reference or judgement is None else judge_usage_block(judgement),
         "means": run_block["means"],
         "totals": run_block["totals"],
         "cost_unknown_questions": run_block["cost_unknown_questions"],
@@ -257,6 +261,10 @@ def build_comparison_summary(
         )
         for run in runs
     }
+    prices_as_of = set(base["prices_as_of"])
+    prices_as_of.update(j.judge_prices_as_of for j in judgements.values() if j.judge_prices_as_of)
+    runs_usd = sum_known([m["totals"]["cost_usd"] for m in models.values()])
+    judge_usd = sum_known([j.judge_cost_usd for j in judgements.values()])
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "graph": graph,
@@ -264,16 +272,22 @@ def build_comparison_summary(
         "judge_model": judge_model,
         "question_set_hash": reference.meta.question_set_hash,
         "question_ids": list(reference.meta.question_ids),
-        "prices_as_of": base["prices_as_of"],
+        "prices_as_of": sorted(prices_as_of),
         "warnings": base["warnings"],
+        # Everything the comparison cost: every model's run plus all judging. None = unknown
+        # (a price or token usage is missing somewhere), never 0.
+        "costs": {
+            "runs_usd": runs_usd,
+            "judge_usd": judge_usd,
+            "total_usd": sum_known([runs_usd, judge_usd]),
+        },
         "models": models,
         "recommendation_rules": recommendation_rules(chat_cost_multiple),
         "recommendations": recommend(models, reference.meta.model_id, chat_cost_multiple),
     }
 
 
-def _cost(value: float | None) -> str:
-    return "unknown" if value is None else f"${value:.4f}"
+_cost = cost_text
 
 
 def comparison_text(summary: dict[str, Any]) -> str:
@@ -286,7 +300,13 @@ def comparison_text(summary: dict[str, Any]) -> str:
             f"  {model_id}: {record}; mean {m['means']['llm_calls'] or 0:.1f} LLM calls, "
             f"{m['means']['total_tokens'] or 0:.0f} tokens, {m['means']['latency_s'] or 0:.1f}s, "
             f"{_cost(m['means']['cost_usd'])}/question"
+            + ("" if m["judge"] is None else f"; judging {_cost(m['judge']['cost_usd'])}")
         )
+    costs = summary["costs"]
+    lines.append(
+        f"Cost: runs {_cost(costs['runs_usd'])} + judging {_cost(costs['judge_usd'])} "
+        f"= total {_cost(costs['total_usd'])}"
+    )
     lines.append("Recommendations:")
     for key, rec in summary["recommendations"].items():
         lines.append(f"  {key}: {rec['model_id'] or 'none'} - {rec['rationale']}")

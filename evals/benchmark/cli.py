@@ -1,4 +1,4 @@
-"""``uv run python -m evals.benchmark <run|judge|summarize|report|compare-models|compare-report>``."""
+"""``uv run python -m evals.benchmark <run|judge|summarize|report|compare-models|compare-report|compare-judgements>``."""
 
 from __future__ import annotations
 
@@ -66,6 +66,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--out", type=Path, help="output directory (default: benchmark_reports/compare-<graph>; re-running resumes it)"
     )
     compare.add_argument("--estimate-from", type=Path, help="existing run directory whose token counts drive the cost estimate")
+    compare.add_argument(
+        "--estimate-judge-from", type=Path,
+        help="existing judgement directory whose judge token counts drive the judging cost estimate "
+        "(default: judgements already in --out, else an assumption)",
+    )
     compare.add_argument("--dry-run", action="store_true", help="print the cost estimate and exit without running anything")
     compare.add_argument("--yes", action="store_true", help="skip the cost confirmation prompt")
     compare.add_argument("--judge-model", help="judge model id (default: the free-tier model)")
@@ -76,6 +81,14 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--questions", type=Path, default=DEFAULT_QUESTIONS_PATH, help="question YAML file")
     compare.add_argument("--only", type=_ids, help="comma-separated question ids to run")
     compare.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S, help="seconds allowed per question")
+
+    agreement = sub.add_parser(
+        "compare-judgements",
+        help="how well two judgements of the same run pair agree (e.g. a cheaper judge vs an expensive one)",
+    )
+    agreement.add_argument("--a", type=Path, required=True, help="first judgement directory")
+    agreement.add_argument("--b", type=Path, required=True, help="second judgement directory (same two runs)")
+    agreement.add_argument("--out", type=Path, help="write the full agreement report as JSON to this file")
 
     compare_report = sub.add_parser(
         "compare-report", help="re-render report.pdf from a finished compare-models directory"
@@ -103,6 +116,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 def _cmd_judge(args: argparse.Namespace) -> int:
     from evals.benchmark.judge import build_judge_llm, check_comparable, judge_runs
+    from evals.benchmark.pricing import cost_text, pricing_from_model
     from evals.benchmark.runs import JUDGEMENT_FILE, load_run, write_model
 
     prepare_environment()
@@ -111,13 +125,22 @@ def _cmd_judge(args: argparse.Namespace) -> int:
     run_a, run_b = load_run(args.a), load_run(args.b)
     check_comparable(run_a, run_b)
     seed = args.seed if args.seed is not None else secrets.randbits(32)
-    judgement = asyncio.run(judge_runs(run_a, run_b, build_judge_llm(model), model.id, seed))
+    judgement = asyncio.run(
+        judge_runs(run_a, run_b, build_judge_llm(model), model.id, seed, pricing=pricing_from_model(model))
+    )
     write_model(args.out / JUDGEMENT_FILE, judgement)
     judged = [q for q in judgement.questions if q.status == "judged"]
+    tokens = (
+        "usage not recorded"
+        if judgement.judge_input_tokens is None
+        else f"{judgement.judge_input_tokens} in / {judgement.judge_output_tokens} out tokens"
+        + (" (some calls reported no usage)" if judgement.judge_calls_without_usage else "")
+    )
     print(
         f"Judged {len(judged)}/{len(judgement.questions)} questions "
         f"(A wins {sum(q.winner == 'a' for q in judged)}, B wins {sum(q.winner == 'b' for q in judged)}, "
-        f"ties {sum(q.winner == 'tie' for q in judged)}); seed {seed}. Wrote {args.out / JUDGEMENT_FILE}"
+        f"ties {sum(q.winner == 'tie' for q in judged)}); seed {seed}. "
+        f"Judge usage: {tokens}, cost {cost_text(judgement.judge_cost_usd)}. Wrote {args.out / JUDGEMENT_FILE}"
     )
     return 0
 
@@ -163,7 +186,7 @@ def _cmd_compare_models(args: argparse.Namespace) -> int:
     questions = load_questions(args.questions)
     out = args.out or compare.default_out_dir(DEFAULT_REPORT_DIR, args.graph)
     plan = compare.build_plan(args.graph, models, reference, args.judge_model, questions, args.only, out)
-    estimate = compare.estimate_plan(plan, args.estimate_from)
+    estimate = compare.estimate_plan(plan, args.estimate_from, args.estimate_judge_from)
 
     print(f"Models: {', '.join(m.id + (' (reference)' if m.id == reference.id else '') for m in models)}")
     print(f"Output directory: {out}")
@@ -200,6 +223,18 @@ def _cmd_compare_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_compare_judgements(args: argparse.Namespace) -> int:
+    from evals.benchmark.agreement import agreement_text, compare_judgements
+    from evals.benchmark.runs import load_judgement, write_json
+
+    report = compare_judgements(load_judgement(args.a), load_judgement(args.b))
+    print(agreement_text(report))
+    if args.out:
+        write_json(args.out, report)
+        print(f"Wrote {args.out}")
+    return 0
+
+
 _COMMANDS = {
     "run": _cmd_run,
     "judge": _cmd_judge,
@@ -207,6 +242,7 @@ _COMMANDS = {
     "report": _cmd_report,
     "compare-models": _cmd_compare_models,
     "compare-report": _cmd_compare_report,
+    "compare-judgements": _cmd_compare_judgements,
 }
 
 

@@ -9,9 +9,12 @@ from __future__ import annotations
 import re
 import zlib
 from pathlib import Path
+from typing import Any
 
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 
@@ -185,16 +188,59 @@ class _FakeStructured:
         return self._judge.decide(messages)
 
 
-class FakeJudge:
-    """Prefers the answer containing GOOD; flags the answer containing WRONG."""
+class _UsageChatModel(BaseChatModel):
+    """A real chat model whose reply is the fake judge's verdict as a forced tool call.
 
-    def __init__(self, decide=None):
+    `with_structured_output` is the genuine langchain pipeline (bind_tools | tool-call parser), so
+    the OpenInference instrumentation emits a real LLM span carrying the reply's `usage_metadata`,
+    exactly as it does for a provider chat model.
+    """
+
+    judge: Any
+    usage: Any  # (input, output) tokens, or a callable(prompt text) -> (input, output) | None
+
+    @property
+    def _llm_type(self) -> str:
+        return "fake-usage-judge"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        verdict = self.judge.decide(messages)
+        args = verdict.model_dump() if hasattr(verdict, "model_dump") else verdict
+        usage = self.usage(self.judge.prompts[-1]) if callable(self.usage) else self.usage
+        usage_metadata = (
+            None
+            if usage is None
+            else {"input_tokens": usage[0], "output_tokens": usage[1], "total_tokens": usage[0] + usage[1]}
+        )
+        message = AIMessage(
+            content="",
+            tool_calls=[{"name": "JudgeVerdict", "args": args, "id": "call_verdict"}],
+            usage_metadata=usage_metadata,
+        )
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+class FakeJudge:
+    """Prefers the answer containing GOOD; flags the answer containing WRONG.
+
+    With `usage=(input_tokens, output_tokens)` (or a callable taking the prompt text) the verdict
+    comes back through a real chat model that reports that usage, so the judge's token usage is
+    observable in spans. Without it the judge leaves no span and its usage is unknown.
+    """
+
+    def __init__(self, decide=None, usage=None):
         self.prompts: list[str] = []
         self.schemas: list[type] = []
         self._override = decide
+        self._usage = usage
 
     def with_structured_output(self, schema):
         self.schemas.append(schema)
+        if self._usage is not None:
+            return _UsageChatModel(judge=self, usage=self._usage).with_structured_output(schema)
         return _FakeStructured(self)
 
     def decide(self, messages):
