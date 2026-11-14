@@ -18,12 +18,20 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+import api.db as db_module
 from api.main import (
     app,
     check_production_auth_config,
     check_production_sec_config,
     set_sec_identity,
 )
+
+
+@pytest.fixture(autouse=True)
+def _temp_db(tmp_path, monkeypatch):
+    """The lifespan runs init_db(); keep it off the real data/chats.db."""
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "startup.db")
+    monkeypatch.setattr(db_module, "_db", None)
 
 
 @pytest.fixture

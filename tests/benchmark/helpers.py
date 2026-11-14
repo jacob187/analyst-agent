@@ -165,9 +165,11 @@ def evidence_block(prompt: str, name: str) -> str:
 def pdf_text_blob(pdf: bytes) -> str:
     """All page-content text: inflate every stream, keep the text-showing operators."""
     chunks = []
-    for raw in re.findall(rb"stream\r?\n(.*?)\r?\nendstream", pdf, re.S):
+    # No `\r?` before the closing `\n`: a deflate stream whose last byte (its adler32
+    # checksum) is 0x0D would lose that byte to it and then fail to inflate.
+    for raw in re.findall(rb"stream\r?\n(.*?)\nendstream", pdf, re.S):
         try:
-            chunks.append(zlib.decompress(raw))
+            chunks.append(zlib.decompressobj().decompress(raw))
         except zlib.error:
             chunks.append(raw)
     blob = b"\n".join(chunks).decode("latin-1")

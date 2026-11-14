@@ -4,17 +4,30 @@ Mocks yfinance and technical analysis so tests run without network access.
 Follows the same TestClient + patch pattern as test_chart_endpoint.py.
 """
 
+import asyncio
+
 import numpy as np
 import pandas as pd
 import pytest
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 
+import api.db as db_module
 from api.main import app
 
 
 @pytest.fixture
-def client():
+def temp_db(tmp_path, monkeypatch):
+    """Real SQLite in a temp dir so the profile route never touches data/chats.db."""
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "company.db")
+    monkeypatch.setattr(db_module, "_db", None)
+    asyncio.run(db_module.init_db())
+    yield
+    asyncio.run(db_module.close_db())
+
+
+@pytest.fixture
+def client(temp_db):
     return TestClient(app)
 
 

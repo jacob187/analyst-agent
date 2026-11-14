@@ -166,7 +166,7 @@ class TestTracingOn:
         assert not LangChainInstrumentor().is_instrumented_by_opentelemetry
         assert setup_tracing() is not provider
 
-    def test_lifespan_sets_up_and_shuts_down(self, otlp_endpoint, monkeypatch, caplog):
+    def test_lifespan_sets_up_and_shuts_down(self, otlp_endpoint, temp_db, monkeypatch, caplog):
         monkeypatch.setenv("ENV", "development")
         monkeypatch.delenv("CLERK_SECRET_KEY", raising=False)
         monkeypatch.delenv("DISABLE_AUTH", raising=False)
@@ -177,7 +177,7 @@ class TestTracingOn:
             assert tracing._provider is None
         assert "Tracing: ON" in caplog.text
 
-    def test_lifespan_with_tracing_off(self, monkeypatch, caplog):
+    def test_lifespan_with_tracing_off(self, temp_db, monkeypatch, caplog):
         monkeypatch.setenv("ENV", "development")
         monkeypatch.delenv("CLERK_SECRET_KEY", raising=False)
         monkeypatch.delenv("DISABLE_AUTH", raising=False)
