@@ -18,8 +18,19 @@ judgement="$out/judgements/old-vs-new-$label"
 
 bench() { uv run python -m evals.benchmark "$@"; }
 
-bench run --graph current --out "$old"
-bench run --graph skills --out "$new"
+# Re-running with the same label reuses runs that already finished, so a
+# failed judge step can be retried without paying for the runs again.
+run_once() {
+  local graph="$1" dir="$2"
+  if grep -q '"finished_at": *"' "$dir/run.json" 2>/dev/null; then
+    echo "Reusing finished run: $dir"
+  else
+    bench run --graph "$graph" --out "$dir"
+  fi
+}
+
+run_once current "$old"
+run_once skills "$new"
 bench judge ${judge_model:+--model "$judge_model"} --a "$old" --b "$new" --out "$judgement"
 bench summarize --runs "$old" "$new" --judgement "$judgement" --out "$judgement/summary.json"
 bench report --runs "$old" "$new" --judgement "$judgement" --out "$out/old-vs-new-$label.pdf"
