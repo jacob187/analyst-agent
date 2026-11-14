@@ -80,8 +80,8 @@ class QuestionResult(BaseModel):
     llm_time_s: float = 0.0
     tool_calls: list[ToolCall] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
-    # Tool inputs/outputs the answer was built from (internal tools such as
-    # ``load_skill`` excluded; nested duplicate spans collapsed to the outermost).
+    # Tool inputs/outputs the answer was built from (nested duplicate spans
+    # collapsed to the outermost).
     # None = not recorded (files written before this field existed), which is
     # different from [] = the run made no evidence-bearing tool calls.
     evidence: list[ToolEvidence] | None = None

@@ -16,7 +16,6 @@ from evals.benchmark.metrics import (
     EVIDENCE_INPUT_CAP,
     EVIDENCE_OUTPUT_CAP,
     EVIDENCE_TOTAL_CAP,
-    INTERNAL_TOOLS,
     SPAN_ATTRIBUTE_CAP,
     tool_output_text,
 )
@@ -29,12 +28,6 @@ from tests.benchmark.helpers import FakeAgent, ToolAgent, write_run
 pytestmark = pytest.mark.eval_unit
 
 SECRET = "sk-test-secret-value-1234567890"
-
-
-@tool
-async def load_skill(skill_name: str) -> str:
-    """Load a skill."""
-    return f"INSTRUCTIONS for {skill_name}: always be careful"
 
 
 @tool
@@ -73,7 +66,7 @@ async def broken(topic: str) -> str:
     raise ValueError(f"upstream down for {topic}")
 
 
-ALL_TOOLS = [load_skill, get_filing, web_search, tavily_search, dump, leak, broken]
+ALL_TOOLS = [get_filing, web_search, tavily_search, dump, leak, broken]
 
 
 @pytest.fixture
@@ -122,23 +115,16 @@ class TestEvidenceRecorded:
         on_disk = json.loads((out / "questions" / "q1.json").read_text())
         assert on_disk["evidence"][0]["output"] == "fact about x"
 
-    async def test_calls_are_in_order_and_internal_tools_stay_out_of_evidence_but_in_tool_calls(
-        self, model, tmp_path
-    ):
+    async def test_calls_are_stored_in_order(self, model, tmp_path):
         _, result = await _run(
             model, tmp_path,
-            [("load_skill", {"skill_name": "filings"}), ("get_filing", {"topic": "FY24"}), ("get_filing", {"topic": "FY23"})],
+            [("get_filing", {"topic": "FY24"}), ("get_filing", {"topic": "FY23"})],
         )
-        assert [t.name for t in result.tool_calls] == ["load_skill", "get_filing", "get_filing"]
+        assert [t.name for t in result.tool_calls] == ["get_filing", "get_filing"]
         assert [(e.tool, e.output) for e in result.evidence] == [
             ("get_filing", "| Revenue | $94.9B | FY24 |"),
             ("get_filing", "| Revenue | $94.9B | FY23 |"),
         ]
-
-    def test_the_internal_tool_list_matches_the_skills_agent_constant(self):
-        from agents.graph.skills_agent import LOAD_SKILL_TOOL
-
-        assert LOAD_SKILL_TOOL in INTERNAL_TOOLS
 
     async def test_nested_tool_spans_keep_only_the_outermost_output(self, model, tmp_path):
         _, result = await _run(model, tmp_path, [("web_search", {"query": "apple news"})])

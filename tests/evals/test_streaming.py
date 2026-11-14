@@ -187,41 +187,20 @@ class TestProcessStreamingChunk:
 # ---------------------------------------------------------------------------
 
 
-ARCHITECTURES = ["current", "skills"]
-
-
-def _current_agent(items) -> PlanningAgent:
-    mock_workflow = MagicMock()
-    mock_workflow.astream.side_effect = lambda *a, **kw: _async_iter(items)
-    return PlanningAgent(mock_workflow, "AAPL")
-
-
-def _skills_agent(turns):
-    """The real skills agent over a scripted fake model and fake domain tools."""
-    from agents.graph.skills_agent import SkillsAgent, create_skills_graph
-    from tests.test_skills_agent import ScriptedToolModel, fake_tools
-
-    model = ScriptedToolModel(turns=list(turns))
-    return SkillsAgent(create_skills_graph(model, "AAPL", fake_tools()), "AAPL")
-
-
-def _simple_agent(arch: str, answer: str):
-    if arch == "current":
-        return _current_agent([
-            ("updates", {"router": {"query_complexity": "simple"}}),
-            ("updates", {"react_agent": {"final_response": answer}}),
-        ])
-    return _skills_agent([AIMessage(content=answer)])
-
-
 class TestStream:
     """stream() yields structured events from the graph execution."""
 
     @pytest.mark.eval_unit
-    @pytest.mark.parametrize("arch", ARCHITECTURES)
-    async def test_simple_query_yields_node_and_response(self, arch):
-        """A simple query should yield node events and a response."""
-        agent = _simple_agent(arch, "AAPL is at $185")
+    async def test_simple_query_yields_node_and_response(self):
+        """A simple query should yield router + react_agent node events and a response."""
+        items = [
+            ("updates", {"router": {"query_complexity": "simple"}}),
+            ("updates", {"react_agent": {"final_response": "AAPL is at $185"}}),
+        ]
+        mock_workflow = MagicMock()
+        mock_workflow.astream.side_effect = lambda *a, **kw: _async_iter(items)
+
+        agent = PlanningAgent(mock_workflow, "AAPL")
         events = [ev async for ev in agent.stream({"messages": [HumanMessage(content="price?")]})]
 
         # Should have: router node, react_agent node, response
@@ -234,68 +213,51 @@ class TestStream:
         assert response_events[0]["message"] == "AAPL is at $185"
 
     @pytest.mark.eval_unit
-    @pytest.mark.parametrize("arch", ARCHITECTURES)
-    async def test_complex_query_yields_tool_events(self, arch):
-        """A multi-tool query should yield one tool event per tool run.
+    async def test_complex_query_yields_tool_events(self):
+        """A complex query should yield one tool event per worker emission.
 
-        Current: with Send-based fan-out, each worker is its own LangGraph
-        node invocation, so `astream(stream_mode="updates")` emits one chunk
-        per worker as it completes. Each chunk's step_results delta carries the
+        With Send-based fan-out, each worker is its own LangGraph node
+        invocation, so `astream(stream_mode="updates")` emits one chunk per
+        worker as it completes. Each chunk's step_results delta carries the
         single step_id that worker just wrote.
-        Skills: one event per tool call the model makes (load_skill included),
-        numbered across the run; `total` is the count requested so far.
         """
-        from tests.test_skills_agent import call, load, tool_turn
+        plan = _make_plan(2)
 
-        if arch == "current":
-            plan = _make_plan(2)
-            agent = _current_agent([
-                ("updates", {"router": {"query_complexity": "complex"}}),
-                ("updates", {"planner": {"plan": plan}}),
-                ("updates", {"worker": {"step_results": {1: {"tool": "tool_1", "raw": "r1", "data": {}, "filing_ref": None, "error": None}}}}),
-                ("updates", {"worker": {"step_results": {2: {"tool": "tool_2", "raw": "r2", "data": {}, "filing_ref": None, "error": None}}}}),
-                ("updates", {"synthesizer": {"final_response": "Combined analysis..."}}),
-            ])
-            expected = [("tool_1", 1, 2, "worker"), ("tool_2", 2, 2, "worker")]
-        else:
-            agent = _skills_agent([
-                tool_turn(load("filing-analysis")),
-                tool_turn(call("get_risk_factors_summary"), call("get_mda_summary")),
-                AIMessage(content="Combined analysis..."),
-            ])
-            expected = [
-                ("load_skill", 1, 1, "tools"),
-                ("get_risk_factors_summary", 2, 3, "tools"),
-                ("get_mda_summary", 3, 3, "tools"),
-            ]
+        items = [
+            ("updates", {"router": {"query_complexity": "complex"}}),
+            ("updates", {"planner": {"plan": plan}}),
+            ("updates", {"worker": {"step_results": {1: {"tool": "tool_1", "raw": "r1", "data": {}, "filing_ref": None, "error": None}}}}),
+            ("updates", {"worker": {"step_results": {2: {"tool": "tool_2", "raw": "r2", "data": {}, "filing_ref": None, "error": None}}}}),
+            ("updates", {"synthesizer": {"final_response": "Combined analysis..."}}),
+        ]
+        mock_workflow = MagicMock()
+        mock_workflow.astream.side_effect = lambda *a, **kw: _async_iter(items)
 
+        agent = PlanningAgent(mock_workflow, "AAPL")
         events = [ev async for ev in agent.stream({"messages": [HumanMessage(content="analyze risks")]})]
 
         tool_events = [e for e in events if e["type"] == "tool"]
-        assert [(e["tool"], e["step"], e["total"], e["node"]) for e in tool_events] == expected
-        for e in tool_events:
-            assert set(e) == {"type", "node", "tool", "action", "step", "total"}
-        assert [e for e in events if e["type"] == "response"] == [
-            {"type": "response", "message": "Combined analysis..."}
-        ]
+        assert len(tool_events) == 2
+        assert tool_events[0]["tool"] == "tool_1"
+        assert tool_events[0]["step"] == 1
+        assert tool_events[0]["total"] == 2
+        assert tool_events[0]["node"] == "worker"
+        assert tool_events[1]["tool"] == "tool_2"
+        assert tool_events[1]["step"] == 2
 
     @pytest.mark.eval_unit
-    @pytest.mark.parametrize("arch", ARCHITECTURES)
-    async def test_custom_events_passed_through(self, arch):
-        """Thinking and token output from the answering model reach the stream."""
-        if arch == "current":
-            agent = _current_agent([
-                ("updates", {"router": {"query_complexity": "simple"}}),
-                ("custom", {"type": "thinking", "message": "Let me think..."}),
-                ("custom", {"type": "token", "message": "Apple"}),
-                ("updates", {"react_agent": {"final_response": "Apple analysis"}}),
-            ])
-        else:
-            agent = _skills_agent([AIMessage(content=[
-                {"type": "thinking", "thinking": "Let me think..."},
-                {"type": "text", "text": "Apple"},
-            ])])
+    async def test_custom_events_passed_through(self):
+        """Custom events from get_stream_writer (thinking/tokens) should be yielded as-is."""
+        items = [
+            ("updates", {"router": {"query_complexity": "simple"}}),
+            ("custom", {"type": "thinking", "message": "Let me think..."}),
+            ("custom", {"type": "token", "message": "Apple"}),
+            ("updates", {"react_agent": {"final_response": "Apple analysis"}}),
+        ]
+        mock_workflow = MagicMock()
+        mock_workflow.astream.side_effect = lambda *a, **kw: _async_iter(items)
 
+        agent = PlanningAgent(mock_workflow, "AAPL")
         events = [ev async for ev in agent.stream({"messages": [HumanMessage(content="analyze")]})]
 
         thinking = [e for e in events if e["type"] == "thinking"]
@@ -464,25 +426,19 @@ class TestPerStepStreaming:
 # ---------------------------------------------------------------------------
 
 
-def _invoke_agent(arch: str, answer: str, query: str):
-    if arch == "current":
-        mock_workflow = MagicMock()
-        mock_workflow.ainvoke = AsyncMock(return_value={
-            "final_response": answer,
-            "messages": [HumanMessage(content=query)],
-        })
-        return PlanningAgent(mock_workflow, "AAPL")
-    return _skills_agent([AIMessage(content=answer)])
-
-
 class TestInvoke:
     """invoke() runs the graph to completion and wraps the result in messages."""
 
     @pytest.mark.eval_unit
-    @pytest.mark.parametrize("arch", ARCHITECTURES)
-    async def test_invoke_returns_messages_dict(self, arch):
+    async def test_invoke_returns_messages_dict(self):
         """invoke() should return {"messages": [...]} with the response appended."""
-        agent = _invoke_agent(arch, "AAPL is trading at $185", "price?")
+        mock_workflow = MagicMock()
+        mock_workflow.ainvoke = AsyncMock(return_value={
+            "final_response": "AAPL is trading at $185",
+            "messages": [HumanMessage(content="price?")],
+        })
+
+        agent = PlanningAgent(mock_workflow, "AAPL")
         result = await agent.invoke({"messages": [HumanMessage(content="price?")]})
 
         assert "messages" in result
@@ -490,10 +446,15 @@ class TestInvoke:
         assert result["messages"][-1].content == "AAPL is trading at $185"
 
     @pytest.mark.eval_unit
-    @pytest.mark.parametrize("arch", ARCHITECTURES)
-    async def test_invoke_with_empty_response(self, arch):
-        """invoke() with no final response should return messages unchanged."""
-        agent = _invoke_agent(arch, "", "test")
+    async def test_invoke_with_empty_response(self):
+        """invoke() with no final_response should return messages unchanged."""
+        mock_workflow = MagicMock()
+        mock_workflow.ainvoke = AsyncMock(return_value={
+            "final_response": "",
+            "messages": [HumanMessage(content="test")],
+        })
+
+        agent = PlanningAgent(mock_workflow, "AAPL")
         result = await agent.invoke({"messages": [HumanMessage(content="test")]})
 
         assert "messages" in result

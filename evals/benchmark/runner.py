@@ -39,7 +39,7 @@ _RUN_NOTES = [
     "Token counts come from LLM spans; calls whose span has no usage are counted in "
     "llm_calls_without_usage and make that question's cost unknown.",
     "Each question records its tool calls' inputs and outputs as judge evidence (outermost tool "
-    "spans only, internal tools such as load_skill excluded), bounded per output and per question; "
+    "spans only), bounded per output and per question; "
     "evidence_truncated marks questions where anything was cut.",
 ]
 
