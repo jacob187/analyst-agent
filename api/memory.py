@@ -5,11 +5,9 @@ is always preserved in the database — these functions only control what the
 LLM sees during a session.
 """
 
-import asyncio
-
 from langchain_core.messages import HumanMessage, AIMessage
 
-from api.db import update_session_summary
+from api.db import spawn_write, update_session_summary
 from agents.prompts import CONVERSATION_COMPRESSION_PROMPT
 
 # How many tokens (rough estimate) before we compress.
@@ -93,7 +91,10 @@ async def compress_history(
     summary_text = str(response.content)
 
     if session_id:
-        asyncio.create_task(update_session_summary(session_id, summary_text))
+        spawn_write(
+            update_session_summary(session_id, summary_text),
+            op="update_session_summary", session_id=session_id,
+        )
 
     summary_message = HumanMessage(content=f"[CONVERSATION SUMMARY]\n{summary_text}")
     return [summary_message] + recent

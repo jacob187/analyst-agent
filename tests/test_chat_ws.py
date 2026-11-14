@@ -284,12 +284,55 @@ class TestTokenDerivedIdentity:
             ws.send_text(json.dumps({"type": "query", "message": "hi"}))
             _drain_until(ws, "response")
 
-        sessions, messages = self._persisted(temp_db, expected_messages=2)
+            # Polled before leaving the block: TestClient stops the server
+            # loop on exit, and the assistant row is written after the
+            # response frame is sent.
+            sessions, messages = self._persisted(temp_db, expected_messages=2)
+
         assert sessions == [(ok["session_id"], TEST_SUB)]
         assert [(m[0], m[1]) for m in messages] == [
             (ok["session_id"], "user"),
             (ok["session_id"], "assistant"),
         ]
+
+    def test_failed_message_write_is_logged_not_dropped(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch, caplog
+    ):
+        _patch_agent(monkeypatch)
+        priv, _ = rsa_keypair
+        auth = {**_BYOK_AUTH, "clerk_session_token": _make_token(priv)}
+        caplog.set_level(logging.ERROR)
+
+        def write_errors():
+            return [
+                r for r in caplog.records
+                if r.name == "api.db" and r.levelno == logging.ERROR
+            ]
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            ok = _drain_until(ws, "auth_success")
+            conn = sqlite3.connect(temp_db)
+            conn.execute("DROP TABLE messages")
+            conn.commit()
+            conn.close()
+
+            ws.send_text(json.dumps({"type": "query", "message": "private question"}))
+            assert _drain_until(ws, "response")["message"] == "Analysis complete."
+
+            deadline = time.monotonic() + 3
+            while len(write_errors()) < 2 and time.monotonic() < deadline:
+                time.sleep(0.05)
+
+        messages = sorted(r.getMessage() for r in write_errors())
+        assert len(messages) == 2
+        assert "save_message:assistant" in messages[0]
+        assert "save_message:user" in messages[1]
+        for m in messages:
+            assert ok["session_id"] in m
+            assert "private question" not in m
+            assert "Analysis complete." not in m
+        assert not any("never retrieved" in r.getMessage() for r in caplog.records)
 
     def test_user_id_disagreeing_with_token_is_rejected(
         self, client, temp_db, clerk_env, rsa_keypair
@@ -1017,7 +1060,8 @@ class TestPerCallBudget:
             ws.send_text(json.dumps({"type": "query", "message": "what is 2 + 3?"}))
             assert _drain_until(ws, "response")["message"] == "The total is 5."
 
-        assert _wait_for_usage(_SIGNED_IN, 2) == 2
+            # Inside the block: TestClient stops the server loop on exit.
+            assert _wait_for_usage(_SIGNED_IN, 2) == 2
 
     def test_history_compression_call_is_charged(self, client, temp_db, monkeypatch):
         _wire_real_graph(monkeypatch)
@@ -1030,8 +1074,10 @@ class TestPerCallBudget:
             ws.send_text(json.dumps({"type": "query", "message": "what is 2 + 3?"}))
             _drain_until(ws, "response")
 
-        # 2 calls answering + 1 summarising the history.
-        assert _wait_for_usage(_SIGNED_IN, 3) == 3
+            # 2 calls answering + 1 summarising the history. Checked before
+            # leaving the block: TestClient cancels the handler on exit, and
+            # the summary call is charged after the response frame is sent.
+            assert _wait_for_usage(_SIGNED_IN, 3) == 3
 
     def test_query_refused_when_budget_already_spent(self, client, temp_db, monkeypatch):
         import api.db as db_module
@@ -1068,7 +1114,8 @@ class TestPerCallBudget:
             ws.send_text(json.dumps({"type": "query", "message": "what is 2 + 3?"}))
             _drain_until(ws, "response")
 
-        assert _wait_for_usage(_SIGNED_IN, 4) == 4
+            # Inside the block: TestClient stops the server loop on exit.
+            assert _wait_for_usage(_SIGNED_IN, 4) == 4
 
     def test_byok_query_charges_nothing(self, client, temp_db, monkeypatch):
         _wire_real_graph(monkeypatch)

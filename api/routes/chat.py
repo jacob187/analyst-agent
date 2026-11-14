@@ -14,6 +14,7 @@ from api.db import (
     get_or_create_session, get_session,
     save_message, get_session_messages,
     get_llm_usage, increment_llm_usage,
+    spawn_write,
 )
 from api.memory import (
     estimate_tokens_incremental, compress_history, build_context_from_session,
@@ -422,7 +423,10 @@ async def chat(websocket: WebSocket, ticker: str):
                         run_callbacks.append(charger)
                     try:
                         if session_id:
-                            asyncio.create_task(save_message(session_id, "user", user_query))
+                            spawn_write(
+                                save_message(session_id, "user", user_query),
+                                op="save_message:user", session_id=session_id,
+                            )
                         conversation_history.append(HumanMessage(content=user_query))
 
                         full_response = ""
@@ -485,8 +489,9 @@ async def chat(websocket: WebSocket, ticker: str):
                         if full_response:
                             conversation_history.append(AIMessage(content=full_response))
                             if session_id:
-                                asyncio.create_task(
-                                    save_message(session_id, "assistant", full_response)
+                                spawn_write(
+                                    save_message(session_id, "assistant", full_response),
+                                    op="save_message:assistant", session_id=session_id,
                                 )
 
                             tokens_so_far, chars_so_far, messages_counted = (
