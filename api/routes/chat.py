@@ -14,7 +14,7 @@ from api.db import (
     get_or_create_session, get_session,
     save_message, get_session_messages,
     get_llm_usage, increment_llm_usage,
-    spawn_write,
+    spawn_write, update_session_model,
 )
 from api.memory import (
     estimate_tokens_incremental, compress_history, build_context_from_session,
@@ -276,6 +276,10 @@ async def chat(websocket: WebSocket, ticker: str):
                 await websocket.send_json({"type": "error", "message": "Invalid session."})
                 await websocket.close()
                 return
+
+            # History lists the session's model: record the one answering now.
+            if session.get("model") != model_id:
+                await update_session_model(session_id, user_id, model_id)
 
             all_messages = await get_session_messages(session_id)
             conversation_history = build_context_from_session(session, all_messages)

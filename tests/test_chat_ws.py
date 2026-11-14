@@ -334,6 +334,69 @@ class TestTokenDerivedIdentity:
             assert "Analysis complete." not in m
         assert not any("never retrieved" in r.getMessage() for r in caplog.records)
 
+    def _stored_model(self, db_path, session_id):
+        conn = sqlite3.connect(db_path)
+        try:
+            return conn.execute(
+                "SELECT model FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    def _connect(self, client, auth):
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            return _drain_until(ws, "auth_success")
+
+    def test_resume_by_ticker_records_the_new_model(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+    ):
+        _patch_agent(monkeypatch)
+        priv, _ = rsa_keypair
+        auth = {**_BYOK_AUTH, "clerk_session_token": _make_token(priv)}
+
+        first = self._connect(client, {**auth, "model_id": "gemini-3.6-flash"})
+        second = self._connect(client, {**auth, "model_id": "claude-haiku-5-5"})
+
+        assert first["session_id"] == second["session_id"]
+        assert self._stored_model(temp_db, second["session_id"]) == "claude-haiku-5-5"
+
+    def test_resume_by_session_id_records_the_new_model(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+    ):
+        _patch_agent(monkeypatch)
+        priv, _ = rsa_keypair
+        auth = {**_BYOK_AUTH, "clerk_session_token": _make_token(priv)}
+
+        first = self._connect(client, {**auth, "model_id": "gemini-3.6-flash"})
+        second = self._connect(client, {
+            **auth, "model_id": "claude-haiku-5-5", "session_id": first["session_id"],
+        })
+
+        assert second["session_id"] == first["session_id"]
+        assert self._stored_model(temp_db, first["session_id"]) == "claude-haiku-5-5"
+
+    def test_foreign_session_id_does_not_change_its_model(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+    ):
+        import api.db as db_module
+
+        _patch_agent(monkeypatch)
+        priv, _ = rsa_keypair
+        foreign = asyncio.run(
+            db_module.create_session("AAPL", "user_someoneElse", model="gemini-3.6-flash")
+        )
+        auth = {
+            **_BYOK_AUTH, "clerk_session_token": _make_token(priv),
+            "model_id": "claude-haiku-5-5", "session_id": foreign,
+        }
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            assert ws.receive_json() == {"type": "error", "message": "Invalid session."}
+
+        assert self._stored_model(temp_db, foreign) == "gemini-3.6-flash"
+
     def test_user_id_disagreeing_with_token_is_rejected(
         self, client, temp_db, clerk_env, rsa_keypair
     ):

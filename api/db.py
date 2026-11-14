@@ -468,17 +468,24 @@ async def get_or_create_session(ticker: str, user_id: str, model: str | None = N
     Entering AAPL always resumes that user's AAPL conversation — delete
     the session from History to start fresh. If several exist (legacy data),
     the most recently created one wins; rowid breaks created_at's 1-second ties.
+    A resumed session records `model` (when given) as the one now answering.
     """
     async with _conn() as db:
         ticker = ticker.upper()
         async with db.execute(
-            "SELECT id FROM sessions WHERE ticker = ? AND user_id = ? "
+            "SELECT id, model FROM sessions WHERE ticker = ? AND user_id = ? "
             "ORDER BY created_at DESC, rowid DESC LIMIT 1",
             (ticker, user_id),
         ) as cursor:
             row = await cursor.fetchone()
-            if row:
-                return row["id"]
+        if row:
+            if model is not None and row["model"] != model:
+                await db.execute(
+                    "UPDATE sessions SET model = ? WHERE id = ? AND user_id = ?",
+                    (model, row["id"], user_id),
+                )
+                await db.commit()
+            return row["id"]
         # No existing session — create one (and ensure company exists)
         session_id = str(uuid.uuid4())
         await db.execute("INSERT OR IGNORE INTO companies (ticker) VALUES (?)", (ticker,))
@@ -509,6 +516,19 @@ async def get_session_by_ticker(ticker: str, user_id: str) -> dict | None:
             if row:
                 return {"id": row["id"], "ticker": row["ticker"], "user_id": row["user_id"], "model": row["model"], "created_at": row["created_at"]}
             return None
+
+async def update_session_model(session_id: str, user_id: str, model: str) -> bool:
+    """Record the model now answering in a session the user owns.
+
+    Returns False (and changes nothing) if the session isn't theirs.
+    """
+    async with _conn() as db:
+        cursor = await db.execute(
+            "UPDATE sessions SET model = ? WHERE id = ? AND user_id = ?",
+            (model, session_id, user_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
 async def update_session_summary(session_id: str, summary: str) -> None:
     """Store a rolling summary of the conversation for context compression."""
