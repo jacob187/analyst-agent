@@ -64,6 +64,7 @@ def write_run(
     answers: dict[str, str | None] | None = None,
     question_set_hash: str = QUESTION_SET_HASH,
     tavily_enabled: bool = True,
+    date: str = "2026-02-01T10:00:00+00:00",
     **result_overrides,
 ) -> Path:
     """Write a run directory with the real schema; returns its path."""
@@ -75,7 +76,7 @@ def write_run(
         model_id=model_id,
         git_sha="abc1234",
         git_dirty=False,
-        date="2026-02-01T10:00:00+00:00",
+        date=date,
         question_set_hash=question_set_hash,
         question_ids=ids,
         tavily_enabled=tavily_enabled,
@@ -130,6 +131,32 @@ class FakeAgent:
         yield {"type": "node", "node": "react_agent", "message": "thinking"}
         result = await self._agent.ainvoke(inputs)
         yield {"type": "response", "message": result["messages"][-1].content}
+
+
+class ToolAgent:
+    """A real ReAct agent that makes the given tool calls one after another, then answers.
+
+    ``calls`` is ``[(tool_name, args), ...]``; each call is its own model turn so
+    the tool spans are ordered. Spans are genuine OpenInference spans.
+    """
+
+    def __init__(self, tools, calls, answer: str = "Done."):
+        responses = [
+            AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": f"call_{i}"}])
+            for i, (name, args) in enumerate(calls)
+        ]
+        responses.append(AIMessage(content=answer))
+        self._agent = create_react_agent(_ScriptedChatModel(responses=responses), tools)
+
+    async def stream(self, inputs):
+        result = await self._agent.ainvoke(inputs)
+        yield {"type": "response", "message": result["messages"][-1].content}
+
+
+def evidence_block(prompt: str, name: str) -> str:
+    match = re.search(rf"===== {name}'S EVIDENCE =====\n(.*?)\n===== END {name}'S EVIDENCE =====", prompt, re.S)
+    assert match, prompt
+    return match.group(1)
 
 
 def pdf_text_blob(pdf: bytes) -> str:

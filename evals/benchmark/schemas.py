@@ -13,6 +13,22 @@ class ToolCall(BaseModel):
     error: bool = False
 
 
+class ToolEvidence(BaseModel):
+    """One tool call's input and output, as the judge's evidence.
+
+    ``output`` is the tool's text, unwrapped from the span's serialized message
+    and bounded (see ``metrics`` for the caps); ``truncated`` is true when it
+    (or the input) was cut, or dropped entirely because the question's total
+    evidence budget was already spent.
+    """
+
+    tool: str
+    input: str = ""
+    output: str = ""
+    error: bool = False
+    truncated: bool = False
+
+
 class Pricing(BaseModel):
     """Per-million-token prices snapshotted from the model registry at run time."""
 
@@ -64,6 +80,13 @@ class QuestionResult(BaseModel):
     llm_time_s: float = 0.0
     tool_calls: list[ToolCall] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+    # Tool inputs/outputs the answer was built from (internal tools such as
+    # ``load_skill`` excluded; nested duplicate spans collapsed to the outermost).
+    # None = not recorded (files written before this field existed), which is
+    # different from [] = the run made no evidence-bearing tool calls.
+    evidence: list[ToolEvidence] | None = None
+    # True when any evidence item was cut or dropped by the storage caps.
+    evidence_truncated: bool = False
 
 
 class JudgedQuestion(BaseModel):
@@ -80,6 +103,15 @@ class JudgedQuestion(BaseModel):
     a_unique_factual_error: bool | None = None
     b_unique_factual_error: bool | None = None
     rationale: str | None = None
+    # The judge's note on claims that contradict or lack support in the evidence.
+    evidence_issues: str | None = None
+    # How many evidence items each run contributed (None = evidence not recorded
+    # for that run) and whether the judge's per-side budget cut it. None on
+    # judgements written before evidence was shown to the judge.
+    a_evidence_calls: int | None = None
+    b_evidence_calls: int | None = None
+    a_evidence_trimmed: bool | None = None
+    b_evidence_trimmed: bool | None = None
     # The verdict exactly as the judge returned it, in first/second terms.
     raw_verdict: dict | None = None
 
@@ -101,3 +133,7 @@ class Judgement(BaseModel):
     a: RunRef
     b: RunRef
     questions: list[JudgedQuestion]
+    # The date the judge was told is "today" (the later run's date) and the
+    # per-side evidence character budget it was held to. None on older files.
+    as_of_date: str | None = None
+    evidence_budget_chars: int | None = None

@@ -55,16 +55,17 @@ REPORT_FILE = "report.pdf"
 # a multi-step question makes several tool-calling LLM rounds over SEC filing text.
 ASSUMED_INPUT_TOKENS_PER_QUESTION = 60_000
 ASSUMED_OUTPUT_TOKENS_PER_QUESTION = 4_000
-# One judge call: the question, two answers and the instructions.
-ASSUMED_JUDGE_INPUT_TOKENS_PER_PAIR = 6_000
+# One judge call: the question, two answers, the instructions and up to
+# 2 x EVIDENCE_BUDGET_CHARS (40k chars, ~10k tokens) of tool-output evidence.
+ASSUMED_JUDGE_INPUT_TOKENS_PER_PAIR = 20_000
 ASSUMED_JUDGE_OUTPUT_TOKENS_PER_PAIR = 300
 
 
 def make_judge_llm(model: ModelDef) -> Any:
-    """The judge chat model (the single place the compare command builds a real LLM)."""
-    from agents.llm_factory import create_llm
+    """The judge chat model (the compare command's seam for tests; see ``judge.build_judge_llm``)."""
+    from evals.benchmark.judge import build_judge_llm
 
-    return create_llm(model.id, provider_api_key(model))
+    return build_judge_llm(model)
 
 
 def judgement_dirname(model_id: str, reference_id: str) -> str:

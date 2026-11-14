@@ -22,7 +22,7 @@ from evals.benchmark.common import (
     scrub_secrets,
 )
 from evals.benchmark.isolation import DB_ISOLATED, isolated_db
-from evals.benchmark.metrics import ROOT_SPAN_NAME, SpanMetrics, extract_metrics
+from evals.benchmark.metrics import ROOT_SPAN_NAME, SPAN_ATTRIBUTE_CAP, SpanMetrics, extract_metrics
 from evals.benchmark.pricing import pricing_from_model
 from evals.benchmark.questions import Question, question_set_hash
 from evals.benchmark.runs import QUESTIONS_DIR, RUN_FILE, write_model
@@ -38,6 +38,9 @@ _RUN_NOTES = [
     "on the same filing can be cheaper than the first, but nothing carries over between runs.",
     "Token counts come from LLM spans; calls whose span has no usage are counted in "
     "llm_calls_without_usage and make that question's cost unknown.",
+    "Each question records its tool calls' inputs and outputs as judge evidence (outermost tool "
+    "spans only, internal tools such as load_skill excluded), bounded per output and per question; "
+    "evidence_truncated marks questions where anything was cut.",
 ]
 
 
@@ -95,7 +98,9 @@ async def run_question(builder: Builder, question: Question, model_id: str, time
     failure: str | None = None
     metrics = SpanMetrics()
 
-    with capture_spans() as captured:
+    # A larger attribute cap than the app's 8192 so tool outputs kept as judge
+    # evidence are not cut mid-table; this provider is the benchmark's own.
+    with capture_spans(max_attribute_length=SPAN_ATTRIBUTE_CAP) as captured:
         try:
             agent = await builder(question.ticker, model_id)
             with get_tracer().start_as_current_span(
@@ -129,6 +134,11 @@ async def run_question(builder: Builder, question: Question, model_id: str, time
         llm_time_s=round(metrics.llm_time_s, 3),
         tool_calls=metrics.tool_calls,
         errors=errors,
+        evidence=[
+            e.model_copy(update={"input": scrub_secrets(e.input), "output": scrub_secrets(e.output)})
+            for e in metrics.evidence
+        ],
+        evidence_truncated=metrics.evidence_truncated,
     )
 
 

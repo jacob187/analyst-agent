@@ -84,6 +84,17 @@ def _judgement_block(judgement: Judgement) -> dict[str, Any]:
         "a_counts": judgement_counts(judgement, "a"),
         "b_counts": judgement_counts(judgement, "b"),
         "by_category": dict(by_category),
+        # Evidence the judge saw: None date/budget on judgements made before it saw any.
+        "as_of_date": judgement.as_of_date,
+        "evidence_budget_chars": judgement.evidence_budget_chars,
+        "evidence_trimmed_questions": sum(
+            bool(q.a_evidence_trimmed or q.b_evidence_trimmed) for q in judgement.questions if q.status == "judged"
+        ),
+        "evidence_issues": [
+            {"id": q.id, "note": q.evidence_issues}
+            for q in judgement.questions
+            if q.status == "judged" and q.evidence_issues
+        ],
     }
 
 
