@@ -102,17 +102,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_judge(args: argparse.Namespace) -> int:
-    from agents.llm_factory import create_llm
-    from evals.benchmark.judge import check_comparable, judge_runs
+    from evals.benchmark.judge import build_judge_llm, check_comparable, judge_runs
     from evals.benchmark.runs import JUDGEMENT_FILE, load_run, write_model
 
     prepare_environment()
     model = resolve_model(args.model)
-    api_key = provider_api_key(model)
+    provider_api_key(model)  # fail on a missing key before reading the runs
     run_a, run_b = load_run(args.a), load_run(args.b)
     check_comparable(run_a, run_b)
     seed = args.seed if args.seed is not None else secrets.randbits(32)
-    judgement = asyncio.run(judge_runs(run_a, run_b, create_llm(model.id, api_key), model.id, seed))
+    judgement = asyncio.run(judge_runs(run_a, run_b, build_judge_llm(model), model.id, seed))
     write_model(args.out / JUDGEMENT_FILE, judgement)
     judged = [q for q in judgement.questions if q.status == "judged"]
     print(

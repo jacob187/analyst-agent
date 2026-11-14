@@ -52,16 +52,21 @@ def _env_flag(name: str) -> bool:
     return (os.getenv(name) or "").strip().lower() == "true"
 
 
-def _build_provider(sampler: Sampler | None = None) -> TracerProvider:
+def _build_provider(
+    sampler: Sampler | None = None, max_attribute_length: int | None = None
+) -> TracerProvider:
     """Build a TracerProvider with the app's resource and attribute-size cap.
 
     ``sampler=None`` lets the SDK resolve ``OTEL_TRACES_SAMPLER``/``_ARG``.
-    An explicit ``OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT`` is honoured by the SDK;
-    otherwise the default cap is passed via ``SpanLimits`` rather than written
+    An explicit ``max_attribute_length`` wins over everything else. Otherwise an
+    explicit ``OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT`` is honoured by the SDK, and
+    failing that the default cap is passed via ``SpanLimits`` rather than written
     into ``os.environ``, so it doesn't leak to other providers or child processes.
     """
     span_limits = None
-    if not (os.getenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT") or "").strip():
+    if max_attribute_length is not None:
+        span_limits = SpanLimits(max_attribute_length=max_attribute_length)
+    elif not (os.getenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT") or "").strip():
         span_limits = SpanLimits(max_attribute_length=DEFAULT_ATTRIBUTE_VALUE_LENGTH_LIMIT)
     service_name = (os.getenv("OTEL_SERVICE_NAME") or "").strip() or DEFAULT_SERVICE_NAME
     return TracerProvider(
@@ -148,7 +153,7 @@ class CapturedSpans:
 
 
 @contextmanager
-def capture_spans() -> Iterator[CapturedSpans]:
+def capture_spans(max_attribute_length: int | None = None) -> Iterator[CapturedSpans]:
     """Record every span from app code and LangChain/LangGraph in memory.
 
     For tests and the benchmark (LLM-call counts, token usage and latency come
@@ -158,10 +163,14 @@ def capture_spans() -> Iterator[CapturedSpans]:
     ``get_tracer()`` and the LangChain instrumentation at it, and yields a
     ``CapturedSpans``. On exit the previous instrumentation (e.g. the
     ``setup_tracing`` provider) is restored; the yielded object stays readable.
+
+    ``max_attribute_length`` raises (or lowers) the string-attribute cap for this
+    capture provider only; the default is the app's cap. The benchmark uses it
+    so tool outputs kept as judge evidence aren't cut at 8192 characters.
     """
     global _capture_provider
     exporter = InMemorySpanExporter()
-    provider = _build_provider(sampler=ALWAYS_ON)
+    provider = _build_provider(sampler=ALWAYS_ON, max_attribute_length=max_attribute_length)
     provider.add_span_processor(SimpleSpanProcessor(exporter))
 
     instrumentor = LangChainInstrumentor()

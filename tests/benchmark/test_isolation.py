@@ -19,6 +19,7 @@ from evals.benchmark.architectures import ARCHITECTURES
 from evals.benchmark.cli import main
 from evals.benchmark.common import provider_env_var, resolve_model
 from evals.benchmark.isolation import isolated_db
+from evals.benchmark.metrics import SPAN_ATTRIBUTE_CAP
 from evals.benchmark.questions import Question
 from evals.benchmark.runner import run_benchmark
 from evals.benchmark.runs import load_run
@@ -55,7 +56,9 @@ async def _build(ticker: str, model_id: str):
 
 class _OversizedAttributeAgent(FakeAgent):
     async def stream(self, inputs):
-        with get_tracer().start_as_current_span("filing.text", attributes={"text": "x" * 20_000}):
+        with get_tracer().start_as_current_span(
+            "filing.text", attributes={"text": "x" * (SPAN_ATTRIBUTE_CAP + 1_000)}
+        ):
             pass
         async for event in super().stream(inputs):
             yield event

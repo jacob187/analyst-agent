@@ -48,8 +48,8 @@ async def isolated_db() -> AsyncIterator[Path]:
 def quiet_attribute_truncation() -> Iterator[None]:
     """Silence the OTel "attribute exceeds max length, truncating" warnings.
 
-    The 8192-character attribute cap is intentional (``api/tracing.py``) and
-    filing text in tool outputs trips it constantly. Errors still get through.
+    The attribute cap is intentional (8192 in the app, ``metrics.SPAN_ATTRIBUTE_CAP``
+    in benchmark runs) and filing text in tool outputs can trip it. Errors still get through.
     """
     otel_logger = logging.getLogger(_OTEL_ATTRIBUTES_LOGGER)
     previous = otel_logger.level
