@@ -100,6 +100,27 @@ def _reset_rate_limit_state():
     clear_rate_limits()
 
 
+@pytest.fixture(autouse=True)
+def _reset_sec_analysis_caches():
+    """Clear the process-wide SEC retriever / latest-filing caches and the
+    per-key asyncio locks between tests: a retriever (or patched fake) cached
+    by one test must not serve the next, and a lock used on one test's event
+    loop must not be reused on another's."""
+    from agents.sec_workflow import analysis_cache
+
+    caches = (
+        analysis_cache._shared_retrievers,
+        analysis_cache._latest_filings,
+        analysis_cache._latest_locks,
+        analysis_cache._analysis_locks,
+    )
+    for cache in caches:
+        cache.clear()
+    yield
+    for cache in caches:
+        cache.clear()
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -216,12 +237,16 @@ def tools(llm):
 def tools_dict(tools):
     """Dict mapping tool name → callable for AAPL.
 
-    Maps to ``tool.invoke`` (a bound method) rather than ``tool.func`` so the
-    test path matches the graph runtime — both go through LangChain's Tool
-    wrapper. Existing tests that call ``tools_dict[name]("")`` keep working
-    because the invoke method has the same call signature.
+    Each callable drives ``tool.ainvoke`` — the path the graph runtime uses,
+    and the only one async-only tools (LLM analyses, DB lookups) support — so
+    sync tests and fixtures can keep calling ``tools_dict[name]("")``.
     """
-    return {tool.name: tool.invoke for tool in tools}
+    import asyncio
+
+    def sync_call(tool):
+        return lambda tool_input="": asyncio.run(tool.ainvoke(tool_input))
+
+    return {tool.name: sync_call(tool) for tool in tools}
 
 
 # ---------------------------------------------------------------------------

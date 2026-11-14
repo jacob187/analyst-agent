@@ -1,7 +1,9 @@
 """Tests for the /api/company/{ticker}/filings endpoint.
 
 Mocks SEC data retrieval, LLM analysis, and DB layer so tests run
-without network access, API keys, or LLM calls.
+without network access, API keys, or LLM calls. The endpoint's sharing of
+the analysis cache and freshness check with chat is covered against a real
+temp DB in tests/test_analysis_cache.py.
 """
 
 import json
@@ -110,6 +112,18 @@ _MOCK_EVENT_ANALYSIS = {
 
 # ── Fixture that mocks all dependencies ───────────────────────────────────
 
+_ANALYZE_METHOD = {
+    "risk_10k": "analyze_risk_factors",
+    "risk_10q": "analyze_risk_factors",
+    "mda_10k": "analyze_mda",
+    "mda_10q": "analyze_mda",
+    "earnings": "analyze_earnings",
+    "event": "analyze_material_event",
+    "business": "analyze_business_overview",
+    "legal": "analyze_legal_proceedings",
+    "income_stmt": "analyze_income_statement",
+}
+
 @pytest.fixture
 def mock_filings_deps():
     """Patch SEC retrieval, LLM analysis, DB, and model registry."""
@@ -201,6 +215,19 @@ def mock_filings_deps():
         processor_instance.analyze_material_event.return_value = MagicMock(
             model_dump=lambda: _MOCK_EVENT_ANALYSIS
         )
+
+        # The endpoint generates through the async entry point
+        # `aanalyze(analysis_type, ...)`; route it to the per-type mocks above
+        # so assertions on `analyze_*` keep meaning "this analysis ran".
+        async def aanalyze(analysis_type, ticker, raw):
+            if analysis_type == "balance":
+                return processor_instance.analyze_balance_sheet(
+                    ticker, raw.get("tenk", {}), raw.get("tenq", {})
+                )
+            method = _ANALYZE_METHOD.get(analysis_type, f"analyze_{analysis_type}")
+            return getattr(processor_instance, method)(ticker, raw)
+
+        processor_instance.aanalyze = aanalyze
         MockProcessor.return_value = processor_instance
 
         # DB cache — default to cache miss (None)
@@ -253,6 +280,21 @@ class TestFilingsEndpointSuccess:
         assert eightk["kind"] == "earnings"
         assert "analysis" in eightk
         assert eightk["analysis"]["summary"] == "Revenue beat estimates by 3%."
+
+    def test_each_analysis_cites_its_filing(self, client, mock_filings_deps):
+        data = client.get(
+            "/api/company/AAPL/filings",
+            headers={"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"},
+        ).json()
+        for section, key, meta in [
+            ("tenk", "risk_10k", _MOCK_TENK_METADATA),
+            ("tenq", "mda_10q", _MOCK_TENQ_METADATA),
+        ]:
+            ref = data[section][key]["filing_reference"]
+            assert ref["accession"] == meta["accession"]
+            assert ref["filing_date"] == meta["filing_date"]
+            assert ref["analyzed_at"]
+        assert data["eightk"]["analysis"]["filing_reference"]["accession"] == _MOCK_8K_METADATA["accession"]
 
     def test_edgar_url_construction(self, client, mock_filings_deps):
         data = client.get(
@@ -559,12 +601,10 @@ class TestFilingsConcurrencyCap:
         in-flight LLM dispatches process-wide.
 
         Drives the app via httpx.AsyncClient (TestClient is sync) so we can
-        actually fire requests in parallel. Patches `_run_llm_analysis` with
+        actually fire requests in parallel. Patches `run_analysis` with
         a sleep stub that tracks max in-flight.
         """
         import asyncio as _asyncio
-        import threading
-        import time as _time
 
         import httpx
         from api import llm_concurrency
@@ -575,19 +615,16 @@ class TestFilingsConcurrencyCap:
 
         in_flight = 0
         peak = 0
-        lock = threading.Lock()
 
-        def slow_analysis(ticker, analysis_type, raw_data, model_id, api_key):
+        async def slow_analysis(llm, ticker, analysis_type, raw_data):
             nonlocal in_flight, peak
-            with lock:
-                in_flight += 1
-                peak = max(peak, in_flight)
-            _time.sleep(0.05)
-            with lock:
-                in_flight -= 1
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await _asyncio.sleep(0.05)
+            in_flight -= 1
             return {"summary": "stub", "filing_metadata": {"accession": "x"}}
 
-        monkeypatch.setattr(company_route, "_run_llm_analysis", slow_analysis)
+        monkeypatch.setattr(company_route, "run_analysis", slow_analysis)
 
         headers = {"X-Google-Api-Key": "test-key", "X-User-Id": "user_conccap"}
 
@@ -665,6 +702,8 @@ class TestFilingsStream:
         assert {"risk_10k", "mda_10k", "balance"} <= section_keys
         statuses = {e["status"] for e in events if e.get("type") == "progress"}
         assert "done" in statuses
+        risk = next(e for e in events if e.get("type") == "section" and e["key"] == "risk_10k")
+        assert risk["data"]["filing_reference"]["accession"] == _MOCK_TENK_METADATA["accession"]
 
     def test_stream_serves_cached_without_llm(self, client, mock_filings_deps):
         _core_only(mock_filings_deps)

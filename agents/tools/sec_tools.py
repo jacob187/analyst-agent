@@ -1,12 +1,18 @@
+import asyncio
 import json
-from concurrent.futures import ThreadPoolExecutor
-from cachetools import LRUCache, TTLCache
 from langchain_core.tools import Tool
 from langchain_core.language_models.chat_models import BaseChatModel
-from typing import Dict, Any, Optional
+from typing import Callable, Dict, Any
 
+from agents.sec_workflow.analysis_cache import (
+    FilingRef,
+    eightk_input,
+    get_or_analyze,
+    get_retriever,
+    latest_filing,
+    run_analysis,
+)
 from agents.sec_workflow.get_SEC_data import SECDataRetrieval
-from agents.sec_workflow.sec_llm_models import SECDocumentProcessor
 
 
 def _dump_analysis_json(result: Any) -> str:
@@ -27,30 +33,6 @@ def _dump_analysis_json(result: Any) -> str:
     return json.dumps({"value": str(result)}, indent=2)
 
 
-# Bounded caches: LRU for retriever/processor objects (size-bound only),
-# TTL on analysis results so stale LLM output ages out within an hour.
-# _processed_cache stays nested (ticker -> {analysis_key -> dump}); writes
-# must use setdefault since TTL can evict the outer key between read & write.
-_shared_retrievers: LRUCache = LRUCache(maxsize=128)
-_shared_processors: LRUCache = LRUCache(maxsize=128)
-_processed_cache: TTLCache = TTLCache(maxsize=512, ttl=3600)
-
-
-def _get_shared_retriever(ticker: str) -> SECDataRetrieval:
-    """Get or create a shared SEC data retriever for the ticker.
-
-    The retriever is created once per ticker and cached for the process
-    lifetime.  Filing availability is NOT checked here -- tools that need
-    a 10-K should call ``_require_10k()`` before accessing 10-K data.
-    """
-    if ticker not in _shared_retrievers:
-        print(f"Making single SEC API call for {ticker}...")
-        retriever = SECDataRetrieval(ticker)
-        _shared_retrievers[ticker] = retriever
-        _processed_cache[ticker] = {}
-    return _shared_retrievers[ticker]
-
-
 def _require_10k(retriever: SECDataRetrieval) -> None:
     """Raise ValueError if the company has no 10-K filing.
 
@@ -66,19 +48,6 @@ def _require_10k(retriever: SECDataRetrieval) -> None:
         )
 
 
-def _get_shared_processor(ticker: str, llm: BaseChatModel) -> SECDocumentProcessor:
-    """Get or create a shared SEC document processor for the ticker."""
-    processor_key = f"{ticker}_{id(llm)}"
-    if processor_key not in _shared_processors:
-        _shared_processors[processor_key] = SECDocumentProcessor(llm)
-    return _shared_processors[processor_key]
-
-
-def _get_cache_key(ticker: str, analysis_type: str) -> str:
-    """Generate cache key for processed analysis."""
-    return f"{ticker}_{analysis_type}"
-
-
 def _is_substantive(text: str) -> bool:
     """Return True if text has real content rather than 10-Q boilerplate."""
     boilerplate_phrases = [
@@ -92,18 +61,80 @@ def _is_substantive(text: str) -> bool:
     return bool(lower) and (len(lower) >= 500 or not any(phrase in lower for phrase in boilerplate_phrases))
 
 
+def _best_form(fetch_fn, try_10q: bool = True) -> tuple[str, Dict[str, Any]]:
+    """``(form, section)``: the 10-Q section when substantive, else the 10-K's."""
+    if try_10q:
+        result = fetch_fn("10-Q")
+        if result.get("found") and _is_substantive(result.get("text", "")):
+            return "10-Q", result
+    return "10-K", fetch_fn("10-K")
+
+
 def _fetch_best_section(fetch_fn) -> Dict[str, Any]:
     """Try 10-Q first; fall back to 10-K when 10-Q is boilerplate or unavailable."""
-    result = fetch_fn("10-Q")
-    if result.get("found") and _is_substantive(result.get("text", "")):
-        return result
-    return fetch_fn("10-K")
+    return _best_form(fetch_fn)[1]
+
+
+class _SectionUnavailable(Exception):
+    """The filing section's input could not be extracted, so there is
+    nothing to analyse (a cached analysis is still served)."""
+
+
+async def _latest_10k(ticker: str) -> FilingRef:
+    """The latest 10-K ref, or ValueError for companies that file none
+    (SPACs, investment trusts, foreign filers)."""
+    tenk = await latest_filing(ticker, "10-K")
+    if tenk is None:
+        raise ValueError(
+            f"No 10-K filing found for {ticker}. "
+            f"This company may file different forms (e.g., N-CSR for investment trusts)."
+        )
+    return tenk
+
+
+async def _serve_analysis(
+    ticker: str,
+    llm: BaseChatModel,
+    filing: FilingRef,
+    analysis_type: str,
+    load_input: Callable[[], Dict[str, Any]],
+) -> str:
+    """The analysis of ``filing`` as JSON with its ``filing_reference`` — from
+    ``filing_analyses`` (the company page's cache) when present, else
+    generated from ``load_input()`` (blocking edgartools, run in a thread)
+    and saved there. The LLM runs via ``ainvoke`` in this task's context, so
+    the chat run's callbacks (tracing, LLMCallCharger) see the call."""
+
+    async def generate() -> Dict[str, Any]:
+        raw = await asyncio.to_thread(load_input)
+        return await run_analysis(llm, ticker, analysis_type, raw)
+
+    result = await get_or_analyze(ticker, filing, analysis_type, generate)
+    return _dump_analysis_json(result.served())
+
+
+async def _best_section_summary(
+    ticker: str, llm: BaseChatModel, getter: str, stem: str,
+) -> str | None:
+    """Analysis of the 10-Q section when substantive, else the 10-K's — keyed
+    like the company page (``{stem}_10q`` / ``{stem}_10k``). None when the
+    section is missing from both."""
+    tenk, tenq = await asyncio.gather(_latest_10k(ticker), latest_filing(ticker, "10-Q"))
+    retriever = await asyncio.to_thread(get_retriever, ticker)
+    form, section = await asyncio.to_thread(
+        _best_form, getattr(retriever, getter), tenq is not None,
+    )
+    if not section.get("found"):
+        return None
+    if form == "10-Q":
+        return await _serve_analysis(ticker, llm, tenq, f"{stem}_10q", lambda: section)
+    return await _serve_analysis(ticker, llm, tenk, f"{stem}_10k", lambda: section)
 
 
 def _tool_raw_risk_factors(ticker: str, llm: BaseChatModel) -> str:
     """Return raw Risk Factors text, preferring 10-Q (most recent) with 10-K fallback."""
     try:
-        retriever = _get_shared_retriever(ticker)
+        retriever = get_retriever(ticker)
         _require_10k(retriever)
         result = _fetch_best_section(retriever.get_risk_factors_raw)
         if not result.get("found"):
@@ -113,28 +144,19 @@ def _tool_raw_risk_factors(ticker: str, llm: BaseChatModel) -> str:
         return f"Failed to retrieve risk factors for {ticker}: {e}"
 
 
-def _tool_risk_factors_summary(ticker: str, llm: BaseChatModel) -> str:
+async def _tool_risk_factors_summary(ticker: str, llm: BaseChatModel) -> str:
     """Return summarized Risk Factors, preferring 10-Q with 10-K fallback (cached)."""
-    cache_key = _get_cache_key(ticker, "risk_summary")
-    if cache_key not in _processed_cache.get(ticker, {}):
-        try:
-            retriever = _get_shared_retriever(ticker)
-            _require_10k(retriever)
-            processor = _get_shared_processor(ticker, llm)
-            risk_data = _fetch_best_section(retriever.get_risk_factors_raw)
-            if not risk_data.get("found", False):
-                return f"Risk Factors section not found for {ticker}."
-            analysis = processor.analyze_risk_factors(ticker, risk_data)
-            _processed_cache.setdefault(ticker, {})[cache_key] = analysis.model_dump()
-        except Exception as e:
-            return f"Failed to analyze risk factors for {ticker}: {e}"
-    return _dump_analysis_json(_processed_cache[ticker][cache_key])
+    try:
+        summary = await _best_section_summary(ticker, llm, "get_risk_factors_raw", "risk")
+    except Exception as e:
+        return f"Failed to analyze risk factors for {ticker}: {e}"
+    return summary or f"Risk Factors section not found for {ticker}."
 
 
 def _tool_raw_mda(ticker: str, llm: BaseChatModel) -> str:
     """Return raw MD&A text, preferring 10-Q (most recent) with 10-K fallback."""
     try:
-        retriever = _get_shared_retriever(ticker)
+        retriever = get_retriever(ticker)
         _require_10k(retriever)
         result = _fetch_best_section(retriever.get_mda_raw)
         if not result.get("found"):
@@ -144,28 +166,19 @@ def _tool_raw_mda(ticker: str, llm: BaseChatModel) -> str:
         return f"Failed to retrieve MD&A for {ticker}: {e}"
 
 
-def _tool_mda_summary(ticker: str, llm: BaseChatModel) -> str:
+async def _tool_mda_summary(ticker: str, llm: BaseChatModel) -> str:
     """Return summarized MD&A, preferring 10-Q with 10-K fallback (cached)."""
-    cache_key = _get_cache_key(ticker, "mda_summary")
-    if cache_key not in _processed_cache.get(ticker, {}):
-        try:
-            retriever = _get_shared_retriever(ticker)
-            _require_10k(retriever)
-            processor = _get_shared_processor(ticker, llm)
-            mda_data = _fetch_best_section(retriever.get_mda_raw)
-            if not mda_data.get("found", False):
-                return f"Management Discussion section not found for {ticker}."
-            analysis = processor.analyze_mda(ticker, mda_data)
-            _processed_cache.setdefault(ticker, {})[cache_key] = analysis.model_dump()
-        except Exception as e:
-            return f"Failed to analyze MD&A for {ticker}: {e}"
-    return _dump_analysis_json(_processed_cache[ticker][cache_key])
+    try:
+        summary = await _best_section_summary(ticker, llm, "get_mda_raw", "mda")
+    except Exception as e:
+        return f"Failed to analyze MD&A for {ticker}: {e}"
+    return summary or f"Management Discussion section not found for {ticker}."
 
 
 def _tool_raw_balance_sheets(ticker: str, llm: BaseChatModel) -> str:
     """Return availability list of balance sheet JSON sections for the given ticker."""
     try:
-        retriever = _get_shared_retriever(ticker)
+        retriever = get_retriever(ticker)
         _require_10k(retriever)
         result = retriever.extract_balance_sheet_as_json()
         if isinstance(result, dict) and "error" not in result:
@@ -175,30 +188,25 @@ def _tool_raw_balance_sheets(ticker: str, llm: BaseChatModel) -> str:
         return f"Failed to retrieve balance sheets for {ticker}: {e}"
 
 
-def _tool_balance_sheet_summary(ticker: str, llm: BaseChatModel) -> str:
+async def _tool_balance_sheet_summary(ticker: str, llm: BaseChatModel) -> str:
     """Return summarized balance sheet analysis for the given ticker (cached)."""
-    cache_key = _get_cache_key(ticker, "balance_summary")
-    if cache_key not in _processed_cache.get(ticker, {}):
-        try:
-            retriever = _get_shared_retriever(ticker)
-            _require_10k(retriever)
-            processor = _get_shared_processor(ticker, llm)
-            balance_data = retriever.extract_balance_sheet_as_json()
-            analysis = processor.analyze_balance_sheet(
-                ticker,
-                balance_data.get("tenk", {}),
-                balance_data.get("tenq", {}),
-            )
-            _processed_cache.setdefault(ticker, {})[cache_key] = analysis.model_dump()
-        except Exception as e:
-            return f"Failed to analyze balance sheet for {ticker}: {e}"
-    return _dump_analysis_json(_processed_cache[ticker][cache_key])
+
+    def load_input() -> Dict[str, Any]:
+        # The company page's "balance" input: the latest 10-K's balance sheet,
+        # keyed by that 10-K's accession.
+        return {"tenk": get_retriever(ticker).extract_balance_sheet_as_str("tenk")}
+
+    try:
+        tenk = await _latest_10k(ticker)
+        return await _serve_analysis(ticker, llm, tenk, "balance", load_input)
+    except Exception as e:
+        return f"Failed to analyze balance sheet for {ticker}: {e}"
 
 
 def _tool_business_overview(ticker: str) -> str:
     """Return raw Business Overview text (10-K Item 1)."""
     try:
-        retriever = _get_shared_retriever(ticker)
+        retriever = get_retriever(ticker)
         _require_10k(retriever)
         result = retriever.get_business_raw()
         if not result.get("found"):
@@ -211,7 +219,7 @@ def _tool_business_overview(ticker: str) -> str:
 def _tool_cybersecurity_disclosure(ticker: str) -> str:
     """Return Cybersecurity risk management disclosure (10-K Item 1C)."""
     try:
-        retriever = _get_shared_retriever(ticker)
+        retriever = get_retriever(ticker)
         _require_10k(retriever)
         result = retriever.get_cybersecurity_raw()
         if not result.get("found"):
@@ -224,7 +232,7 @@ def _tool_cybersecurity_disclosure(ticker: str) -> str:
 def _tool_legal_proceedings(ticker: str) -> str:
     """Return Legal Proceedings text (10-K Item 3)."""
     try:
-        retriever = _get_shared_retriever(ticker)
+        retriever = get_retriever(ticker)
         _require_10k(retriever)
         result = retriever.get_legal_proceedings_raw()
         if not result.get("found"):
@@ -237,7 +245,7 @@ def _tool_legal_proceedings(ticker: str) -> str:
 def _tool_complete_10k_text(ticker: str, llm: BaseChatModel) -> str:
     """Return list of available major 10-K sections for the given ticker."""
     try:
-        retriever = _get_shared_retriever(ticker)
+        retriever = get_retriever(ticker)
         _require_10k(retriever)
         mda_data = retriever.get_mda_raw("10-K")
         risk_data = retriever.get_risk_factors_raw("10-K")
@@ -256,21 +264,19 @@ def _tool_complete_10k_text(ticker: str, llm: BaseChatModel) -> str:
         return f"Failed to retrieve complete 10-K for {ticker}: {e}"
 
 
-def _tool_all_summaries(ticker: str, llm: BaseChatModel) -> str:
+async def _tool_all_summaries(ticker: str, llm: BaseChatModel) -> str:
     """Return a comprehensive overview across risks, MD&A, and financials.
 
     The three analyses are independent (different filing sections, separate LLM calls),
     so we run them concurrently. This cuts wall-clock time from ~12s (3 sequential
-    LLM calls) to ~5s (limited by the slowest single call).
+    LLM calls) to ~5s (limited by the slowest single call). ``asyncio.gather``
+    keeps the run's callbacks on each call, so all three are charged and traced.
     """
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        risk_future = pool.submit(_tool_risk_factors_summary, ticker, llm)
-        mda_future = pool.submit(_tool_mda_summary, ticker, llm)
-        balance_future = pool.submit(_tool_balance_sheet_summary, ticker, llm)
-
-        risk_summary = risk_future.result()
-        mda_summary = mda_future.result()
-        balance_summary = balance_future.result()
+    risk_summary, mda_summary, balance_summary = await asyncio.gather(
+        _tool_risk_factors_summary(ticker, llm),
+        _tool_mda_summary(ticker, llm),
+        _tool_balance_sheet_summary(ticker, llm),
+    )
 
     summary = f"Comprehensive Analysis for {ticker}:\n\n"
     summary += f"=== RISK ANALYSIS ===\n{risk_summary}\n\n"
@@ -285,7 +291,7 @@ def _tool_all_summaries(ticker: str, llm: BaseChatModel) -> str:
 def _tool_8k_overview(ticker: str) -> str:
     """Return overview of the latest 8-K filing: items, event type, dates."""
     try:
-        retriever = _get_shared_retriever(ticker)
+        retriever = get_retriever(ticker)
         result = retriever.get_8k_overview()
         if not result.get("found"):
             return f"No 8-K filing found for {ticker}."
@@ -305,7 +311,7 @@ def _tool_8k_overview(ticker: str) -> str:
 def _tool_8k_item(ticker: str, item: str) -> str:
     """Return raw text of a specific 8-K item (e.g. '2.02', '1.01')."""
     try:
-        retriever = _get_shared_retriever(ticker)
+        retriever = get_retriever(ticker)
         result = retriever.get_8k_item(item)
         if not result.get("found"):
             return f"8-K Item {item} not found for {ticker}."
@@ -314,68 +320,7 @@ def _tool_8k_item(ticker: str, item: str) -> str:
         return f"Failed to retrieve 8-K item {item} for {ticker}: {e}"
 
 
-def _tool_earnings_summary(ticker: str, llm: BaseChatModel) -> str:
-    """Return structured earnings analysis from 8-K Item 2.02 (cached)."""
-    cache_key = _get_cache_key(ticker, "earnings_summary")
-    if cache_key not in _processed_cache.get(ticker, {}):
-        try:
-            retriever = _get_shared_retriever(ticker)
-            processor = _get_shared_processor(ticker, llm)
-            earnings_data = retriever.get_earnings_data()
-            if not earnings_data.get("has_earnings"):
-                return (
-                    f"No earnings data in latest 8-K for {ticker}. "
-                    f"Reason: {earnings_data.get('reason', 'Unknown')}"
-                )
-            analysis = processor.analyze_earnings(ticker, earnings_data)
-            _processed_cache.setdefault(ticker, {})[cache_key] = analysis.model_dump()
-        except Exception as e:
-            return f"Failed to analyze earnings for {ticker}: {e}"
-    return _dump_analysis_json(_processed_cache[ticker][cache_key])
-
-
-def _tool_material_event_summary(
-    ticker: str,
-    llm: BaseChatModel,
-    overview: Optional[Dict[str, Any]] = None,
-) -> str:
-    """Return structured analysis of non-earnings 8-K material event (cached).
-
-    If ``overview`` is provided (the dispatcher does this), reuse it instead
-    of re-fetching from the retriever — saves one round-trip + dict construction
-    per material-event 8-K query.
-    """
-    cache_key = _get_cache_key(ticker, "material_event_summary")
-    if cache_key not in _processed_cache.get(ticker, {}):
-        try:
-            retriever = _get_shared_retriever(ticker)
-            processor = _get_shared_processor(ticker, llm)
-            if overview is None:
-                overview = retriever.get_8k_overview()
-            if not overview.get("found"):
-                return f"No 8-K filing found for {ticker}."
-            # Get the text of the primary (first) item for analysis
-            items = overview.get("items", [])
-            primary_item = items[0] if items else None
-            item_text = ""
-            if primary_item:
-                item_result = retriever.get_8k_item(primary_item)
-                item_text = item_result.get("text", "") if item_result.get("found") else ""
-            event_data = {
-                "content_type": overview.get("content_type", "other"),
-                "items": items,
-                "context": overview.get("context", ""),
-                "text": item_text,
-                "metadata": overview.get("metadata", {}),
-            }
-            analysis = processor.analyze_material_event(ticker, event_data)
-            _processed_cache.setdefault(ticker, {})[cache_key] = analysis.model_dump()
-        except Exception as e:
-            return f"Failed to analyze material event for {ticker}: {e}"
-    return _dump_analysis_json(_processed_cache[ticker][cache_key])
-
-
-def _tool_analyze_latest_8k(ticker: str, llm: BaseChatModel) -> str:
+async def _tool_analyze_latest_8k(ticker: str, llm: BaseChatModel) -> str:
     """Analyze the latest 8-K, dispatching to the right analyzer by item code.
 
     Earnings releases (Item 2.02 with a parseable EX-99.1 press release) go to
@@ -384,10 +329,16 @@ def _tool_analyze_latest_8k(ticker: str, llm: BaseChatModel) -> str:
     analyzer. Picking exactly one of the two analyzers prevents the planner
     from double-fetching overlapping tools and emitting contradictory event
     classifications for the same filing.
+
+    Shares the company page's cache (analysis types ``earnings`` / ``event``)
+    and its rule that an 8-K whose input failed to extract is never analysed.
     """
     try:
-        retriever = _get_shared_retriever(ticker)
-        overview = retriever.get_8k_overview()
+        filing = await latest_filing(ticker, "8-K")
+        overview: Dict[str, Any] = {"found": False}
+        if filing is not None:
+            retriever = await asyncio.to_thread(get_retriever, ticker)
+            overview = await asyncio.to_thread(retriever.get_8k_overview)
         if not overview.get("found"):
             return json.dumps(
                 {"found": False, "reason": f"No 8-K filing found for {ticker}"},
@@ -399,18 +350,38 @@ def _tool_analyze_latest_8k(ticker: str, llm: BaseChatModel) -> str:
             indent=2,
         )
 
-    if overview.get("has_earnings"):
-        # The earnings analyzer fetches its data via ``get_earnings_data()``,
-        # not from the overview, so there's nothing to forward here.
-        return _tool_earnings_summary(ticker, llm)
-    # Forward the overview so the material-event analyzer doesn't re-fetch it.
-    return _tool_material_event_summary(ticker, llm, overview=overview)
+    kind = "earnings" if overview.get("has_earnings") else "event"
+
+    def load_input() -> Dict[str, Any]:
+        _kind, raw = eightk_input(retriever, overview, overview.get("metadata", {}))
+        if kind == "earnings" and raw.get("has_earnings") is False:
+            raise _SectionUnavailable(
+                f"No earnings data in latest 8-K for {ticker}. "
+                f"Reason: {raw.get('reason', 'Unknown')}"
+            )
+        if kind == "event" and not raw.get("text"):
+            raise _SectionUnavailable(
+                f"The latest 8-K's item text for {ticker} could not be extracted."
+            )
+        return raw
+
+    try:
+        return await _serve_analysis(ticker, llm, filing, kind, load_input)
+    except _SectionUnavailable as e:
+        return json.dumps({"found": False, "reason": str(e)}, indent=2)
+    except Exception as e:
+        return json.dumps(
+            {"error": str(e), "tool": "analyze_latest_8k", "ticker": ticker},
+            indent=2,
+        )
 
 
 def create_sec_tools(ticker: str, llm: BaseChatModel) -> tuple[list, str]:
     """Return the list of SEC tools bound to a specific ticker and LLM.
 
     Each tool is a plain function (no bound instance methods) wrapped as a Tool.
+    Tools that run an LLM analysis (or touch the DB) are async-only
+    (``coroutine=``) — invoke them with ``ainvoke``; raw-text tools are sync.
 
     Args:
         ticker: Company ticker symbol
@@ -427,7 +398,8 @@ def create_sec_tools(ticker: str, llm: BaseChatModel) -> tuple[list, str]:
         Tool.from_function(
             name="get_risk_factors_summary",
             description="Get structured analysis of Risk Factors with sentiment and key risks.",
-            func=lambda query="": _tool_risk_factors_summary(ticker, llm),
+            func=None,
+            coroutine=lambda query="": _tool_risk_factors_summary(ticker, llm),
         ),
         Tool.from_function(
             name="get_raw_management_discussion",
@@ -437,7 +409,8 @@ def create_sec_tools(ticker: str, llm: BaseChatModel) -> tuple[list, str]:
         Tool.from_function(
             name="get_mda_summary",
             description="Get structured MD&A summary with sentiment, outlook, and key points.",
-            func=lambda query="": _tool_mda_summary(ticker, llm),
+            func=None,
+            coroutine=lambda query="": _tool_mda_summary(ticker, llm),
         ),
         Tool.from_function(
             name="get_raw_balance_sheets",
@@ -447,7 +420,8 @@ def create_sec_tools(ticker: str, llm: BaseChatModel) -> tuple[list, str]:
         Tool.from_function(
             name="get_balance_sheet_summary",
             description="Get balance sheet summary with key metrics and red flags.",
-            func=lambda query="": _tool_balance_sheet_summary(ticker, llm),
+            func=None,
+            coroutine=lambda query="": _tool_balance_sheet_summary(ticker, llm),
         ),
         Tool.from_function(
             name="get_complete_10k_text",
@@ -472,7 +446,8 @@ def create_sec_tools(ticker: str, llm: BaseChatModel) -> tuple[list, str]:
         Tool.from_function(
             name="get_all_summaries",
             description="Get a comprehensive overview across risks, MD&A, and financials.",
-            func=lambda query="": _tool_all_summaries(ticker, llm),
+            func=None,
+            coroutine=lambda query="": _tool_all_summaries(ticker, llm),
         ),
         # ── 8-K tools ────────────────────────────────────────────────────
         # Dispatcher pattern: a single planner-visible tool routes internally
@@ -490,7 +465,8 @@ def create_sec_tools(ticker: str, llm: BaseChatModel) -> tuple[list, str]:
                 "Returns sentiment, key points, impact assessment, and filing "
                 "metadata as JSON."
             ),
-            func=lambda query="": _tool_analyze_latest_8k(ticker, llm),
+            func=None,
+            coroutine=lambda query="": _tool_analyze_latest_8k(ticker, llm),
         ),
         Tool.from_function(
             name="get_8k_item",

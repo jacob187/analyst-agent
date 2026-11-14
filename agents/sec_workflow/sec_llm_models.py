@@ -613,6 +613,60 @@ class SECDocumentProcessor:
                 filing_metadata=data.get("metadata", {}),
             )
 
+    # ── Async entry point (shared filing-analysis cache) ──────────────────────
+
+    def _prompt_and_parser(
+        self, analysis_type: str, ticker: str, raw_data: Dict[str, Any]
+    ) -> tuple[ChatPromptTemplate, PydanticOutputParser]:
+        """Prompt + parser for an ``analysis_type`` cache key (see ``aanalyze``)."""
+        if analysis_type in ("risk_10k", "risk_10q"):
+            return self.generate_risk_factors_prompt(ticker, raw_data), self.risk_parser
+        if analysis_type in ("mda_10k", "mda_10q"):
+            return self.generate_mda_prompt(ticker, raw_data), self.mda_parser
+        if analysis_type == "balance":
+            prompt = self.generate_balance_sheet_prompt(
+                ticker, raw_data.get("tenk", {}), raw_data.get("tenq", {})
+            )
+            return prompt, self.balance_sheet_parser
+        if analysis_type == "earnings":
+            return self.generate_earnings_prompt(ticker, raw_data), self.earnings_parser
+        if analysis_type == "event":
+            return self.generate_material_event_prompt(ticker, raw_data), self.material_event_parser
+        text_sections = {
+            "business": (BUSINESS_OVERVIEW_SYSTEM_PROMPT, BUSINESS_OVERVIEW_USER_TEMPLATE, self.business_overview_parser),
+            "cybersecurity": (CYBERSECURITY_SYSTEM_PROMPT, CYBERSECURITY_USER_TEMPLATE, self.cybersecurity_parser),
+            "legal": (LEGAL_PROCEEDINGS_SYSTEM_PROMPT, LEGAL_PROCEEDINGS_USER_TEMPLATE, self.legal_proceedings_parser),
+            "market_risk": (MARKET_RISK_SYSTEM_PROMPT, MARKET_RISK_USER_TEMPLATE, self.market_risk_parser),
+        }
+        if analysis_type in text_sections:
+            system, user, parser = text_sections[analysis_type]
+            return self._text_section_prompt(system, user, parser, ticker, raw_data), parser
+        statements = {
+            "income_stmt": (INCOME_STATEMENT_SYSTEM_PROMPT, INCOME_STATEMENT_USER_TEMPLATE, self.income_statement_parser),
+            "cashflow": (CASH_FLOW_SYSTEM_PROMPT, CASH_FLOW_USER_TEMPLATE, self.cash_flow_parser),
+        }
+        if analysis_type in statements:
+            system, user, parser = statements[analysis_type]
+            return self._financial_statement_prompt(system, user, parser, ticker, raw_data), parser
+        raise ValueError(f"Unknown analysis type: {analysis_type}")
+
+    async def aanalyze(
+        self, analysis_type: str, ticker: str, raw_data: Dict[str, Any]
+    ) -> BaseModel:
+        """Run one analysis by its ``filing_analyses`` type via ``ainvoke``.
+
+        ``analysis_type`` is one of 'risk_10k', 'risk_10q', 'mda_10k',
+        'mda_10q', 'balance' (raw_data ``{"tenk", "tenq"}``), 'earnings',
+        'event', 'business', 'cybersecurity', 'legal', 'market_risk',
+        'income_stmt', 'cashflow'.
+
+        Unlike the sync ``analyze_*`` methods, a failed LLM call or parse
+        raises instead of returning an "Error analyzing…" model, so a
+        transient failure is never persisted as the filing's analysis.
+        """
+        prompt, parser = self._prompt_and_parser(analysis_type, ticker, raw_data)
+        return await (prompt | self.llm | parser).ainvoke({})
+
     def _financial_statement_prompt(
         self,
         system_prompt: str,
