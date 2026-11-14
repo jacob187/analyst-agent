@@ -11,7 +11,9 @@ index lookups (each one an EDGAR submissions request in production).
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -62,14 +64,68 @@ class _Financials:
 
 
 class FakeReport:
-    """TenK / TenQ: ``report["Item 1A"]`` → section text (None if absent)."""
+    """TenK / TenQ: ``report["Item 1A"]`` → section text (None if absent).
+
+    Like edgartools, ``sections`` parses the document on first access and
+    caches it with an unlocked check-then-set, and ``__getitem__`` reads
+    through ``sections``. Instrumentation for concurrency tests:
+
+    - ``parses``: how many times the document was parsed.
+    - ``reads[key]``: section extractions attempted per key.
+    - ``parse_delay`` / ``read_delay``: seconds a parse / extraction blocks,
+      so concurrent callers overlap.
+    - ``gates[key]``: extraction of ``key`` sets ``entered[key]`` then waits
+      for the gate.
+    - ``failures[key]``: extraction of ``key`` raises this many times first
+      (a transient EDGAR / parse error).
+    - ``blanks[key]``: extraction of ``key`` returns None this many times
+      first (edgartools finds no sections when the filing HTML didn't load).
+    """
 
     def __init__(self, sections: dict[str, str], balance_sheet: pd.DataFrame | None):
         self._sections = sections
         self.financials = _Financials(balance_sheet)
+        self._parsed: dict[str, str] | None = None
+        self._count_lock = threading.Lock()
+        self.parses = 0
+        self.reads: Counter[str] = Counter()
+        self.parse_delay = 0.0
+        self.read_delay = 0.0
+        self.gates: dict[str, threading.Event] = {}
+        self.entered: dict[str, threading.Event] = {}
+        self.failures: dict[str, int] = {}
+        self.blanks: dict[str, int] = {}
+
+    @property
+    def sections(self) -> dict[str, str]:
+        if self._parsed is None:
+            with self._count_lock:
+                self.parses += 1
+            if self.parse_delay:
+                time.sleep(self.parse_delay)
+            self._parsed = dict(self._sections)
+        return self._parsed
 
     def __getitem__(self, key: str) -> str | None:
-        return self._sections.get(key)
+        sections = self.sections
+        with self._count_lock:
+            self.reads[key] += 1
+            fail = self.failures.get(key, 0) > 0
+            if fail:
+                self.failures[key] -= 1
+            blank = self.blanks.get(key, 0) > 0
+            if blank:
+                self.blanks[key] -= 1
+        if key in self.gates:
+            self.entered.setdefault(key, threading.Event()).set()
+            self.gates[key].wait()
+        if self.read_delay:
+            time.sleep(self.read_delay)
+        if fail:
+            raise RuntimeError(f"transient failure extracting {key}")
+        if blank:
+            return None
+        return sections.get(key)
 
 
 class _Earnings:
@@ -97,11 +153,18 @@ class FakeEightK:
         self.is_amendment = False
         self.date_of_report = filed
         self.earnings = _Earnings(f"Earnings release filed {filed}") if has_earnings else None
+        self._count_lock = threading.Lock()
+        self.reads: Counter[str] = Counter()
+        self.read_delay = 0.0
 
     def to_context(self, detail: str = "standard") -> str:
         return f"8K: {COMPANY_NAME} Current Report\nItems: {', '.join(self.items)}"
 
     def __getitem__(self, item: str) -> str | None:
+        with self._count_lock:
+            self.reads[item] += 1
+        if self.read_delay:
+            time.sleep(self.read_delay)
         return self._items.get(item)
 
 
@@ -116,8 +179,13 @@ class FakeFiling:
     period_of_report: str = "2026-09-30"
     cik: int = CIK
     company: str = COMPANY_NAME
+    obj_calls: int = 0  # each one builds a fresh TenK/TenQ in edgartools
+    obj_delay: float = 0.0  # seconds obj() blocks, so racing callers overlap
 
     def obj(self):
+        self.obj_calls += 1
+        if self.obj_delay:
+            time.sleep(self.obj_delay)
         return self.report
 
 
