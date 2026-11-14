@@ -4,10 +4,14 @@ The tools are async (``coroutine=``) and await the aiosqlite DB helpers on
 the running event loop — the loop that owns the process-wide connection.
 """
 
-from langchain_core.tools import Tool
+from langchain_core.tools import StructuredTool
+
+from agents.tools.tool_args import DEFAULT_BRIEFING_DAYS, DaysArgs, NoArgs
 
 
-async def _tool_briefing_history(ticker: str, user_id: str | None = None, days: str = "7") -> str:
+async def _tool_briefing_history(
+    ticker: str, user_id: str | None = None, days: int | str = DEFAULT_BRIEFING_DAYS
+) -> str:
     """Get recent daily briefing analyses for a ticker.
 
     Returns a formatted summary of recent outlooks, signals, and alerts.
@@ -19,8 +23,8 @@ async def _tool_briefing_history(ticker: str, user_id: str | None = None, days: 
 
     try:
         days_int = int(days)
-    except ValueError:
-        days_int = 7
+    except (TypeError, ValueError):
+        days_int = DEFAULT_BRIEFING_DAYS
 
     history = await get_briefing_history(ticker.upper(), user_id, days=days_int)
 
@@ -46,7 +50,7 @@ async def _tool_briefing_history(ticker: str, user_id: str | None = None, days: 
     return "\n".join(lines)
 
 
-async def _tool_latest_briefing(user_id: str | None = None, _input: str = "") -> str:
+async def _tool_latest_briefing(user_id: str | None = None) -> str:
     """Get the most recent full morning briefing summary."""
     from api.db import get_recent_briefings
 
@@ -87,7 +91,7 @@ async def _tool_latest_briefing(user_id: str | None = None, _input: str = "") ->
     return "\n".join(lines)
 
 
-def create_briefing_tools(ticker: str, user_id: str | None = None) -> list[Tool]:
+def create_briefing_tools(ticker: str, user_id: str | None = None) -> list[StructuredTool]:
     """Create briefing history tools bound to a specific ticker and user.
 
     Args:
@@ -95,10 +99,10 @@ def create_briefing_tools(ticker: str, user_id: str | None = None) -> list[Tool]
         user_id: Anonymous user ID for scoping briefing queries
 
     Returns:
-        List of LangChain Tool objects for briefing history
+        List of LangChain StructuredTool objects for briefing history
     """
     return [
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_briefing_history",
             description=(
                 "Get recent daily briefing analyses for the company. "
@@ -106,15 +110,19 @@ def create_briefing_tools(ticker: str, user_id: str | None = None) -> list[Tool]
                 "from past morning briefings. Input: number of days to look back (default 7)."
             ),
             func=None,
-            coroutine=lambda days="7": _tool_briefing_history(ticker, user_id, days),
+            coroutine=lambda days=DEFAULT_BRIEFING_DAYS: _tool_briefing_history(
+                ticker, user_id, days
+            ),
+            args_schema=DaysArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_latest_briefing",
             description=(
                 "Get the most recent full morning briefing summary. "
                 "Returns market regime, positioning, all ticker analyses, and alerts."
             ),
             func=None,
-            coroutine=lambda _input="": _tool_latest_briefing(user_id, _input),
+            coroutine=lambda: _tool_latest_briefing(user_id),
+            args_schema=NoArgs,
         ),
     ]

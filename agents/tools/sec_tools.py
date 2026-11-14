@@ -1,6 +1,6 @@
 import asyncio
 import json
-from langchain_core.tools import Tool
+from langchain_core.tools import StructuredTool
 from langchain_core.language_models.chat_models import BaseChatModel
 from typing import Callable, Dict, Any
 
@@ -13,6 +13,7 @@ from agents.sec_workflow.analysis_cache import (
     run_analysis,
 )
 from agents.sec_workflow.get_SEC_data import SECDataRetrieval
+from agents.tools.tool_args import DEFAULT_8K_ITEM, EightKItemArgs, NoArgs
 
 
 def _dump_analysis_json(result: Any) -> str:
@@ -379,7 +380,7 @@ async def _tool_analyze_latest_8k(ticker: str, llm: BaseChatModel) -> str:
 def create_sec_tools(ticker: str, llm: BaseChatModel) -> tuple[list, str]:
     """Return the list of SEC tools bound to a specific ticker and LLM.
 
-    Each tool is a plain function (no bound instance methods) wrapped as a Tool.
+    Each tool is a plain function (no bound instance methods) wrapped as a StructuredTool.
     Tools that run an LLM analysis (or touch the DB) are async-only
     (``coroutine=``) — invoke them with ``ainvoke``; raw-text tools are sync.
 
@@ -389,65 +390,76 @@ def create_sec_tools(ticker: str, llm: BaseChatModel) -> tuple[list, str]:
     """
     llm_id = f"{ticker}_{id(llm)}"
 
-    tools: list[Tool] = [
-        Tool.from_function(
+    tools: list[StructuredTool] = [
+        StructuredTool.from_function(
             name="get_raw_risk_factors",
             description="Get the complete raw text of Risk Factors section from 10-K filing.",
-            func=lambda query="": _tool_raw_risk_factors(ticker, llm),
+            func=lambda: _tool_raw_risk_factors(ticker, llm),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_risk_factors_summary",
             description="Get structured analysis of Risk Factors with sentiment and key risks.",
             func=None,
-            coroutine=lambda query="": _tool_risk_factors_summary(ticker, llm),
+            coroutine=lambda: _tool_risk_factors_summary(ticker, llm),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_raw_management_discussion",
             description="Get raw text of Management Discussion & Analysis (MD&A).",
-            func=lambda query="": _tool_raw_mda(ticker, llm),
+            func=lambda: _tool_raw_mda(ticker, llm),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_mda_summary",
             description="Get structured MD&A summary with sentiment, outlook, and key points.",
             func=None,
-            coroutine=lambda query="": _tool_mda_summary(ticker, llm),
+            coroutine=lambda: _tool_mda_summary(ticker, llm),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_raw_balance_sheets",
             description="Get availability of raw balance sheet JSON data (10-K and 10-Q).",
-            func=lambda query="": _tool_raw_balance_sheets(ticker, llm),
+            func=lambda: _tool_raw_balance_sheets(ticker, llm),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_balance_sheet_summary",
             description="Get balance sheet summary with key metrics and red flags.",
             func=None,
-            coroutine=lambda query="": _tool_balance_sheet_summary(ticker, llm),
+            coroutine=lambda: _tool_balance_sheet_summary(ticker, llm),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_complete_10k_text",
             description="Get list of available 10-K sections retrieved as raw text.",
-            func=lambda query="": _tool_complete_10k_text(ticker, llm),
+            func=lambda: _tool_complete_10k_text(ticker, llm),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_business_overview",
             description="Get the Company Business section (10-K Item 1): products, services, segments, and market overview.",
-            func=lambda query="": _tool_business_overview(ticker),
+            func=lambda: _tool_business_overview(ticker),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_cybersecurity_disclosure",
             description="Get the Cybersecurity risk management and governance disclosure (10-K Item 1C, SEC-mandated since 2023).",
-            func=lambda query="": _tool_cybersecurity_disclosure(ticker),
+            func=lambda: _tool_cybersecurity_disclosure(ticker),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_legal_proceedings",
             description="Get Legal Proceedings section (10-K Item 3): significant pending litigation, regulatory actions, and legal risks.",
-            func=lambda query="": _tool_legal_proceedings(ticker),
+            func=lambda: _tool_legal_proceedings(ticker),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_all_summaries",
             description="Get a comprehensive overview across risks, MD&A, and financials.",
             func=None,
-            coroutine=lambda query="": _tool_all_summaries(ticker, llm),
+            coroutine=lambda: _tool_all_summaries(ticker, llm),
+            args_schema=NoArgs,
         ),
         # ── 8-K tools ────────────────────────────────────────────────────
         # Dispatcher pattern: a single planner-visible tool routes internally
@@ -455,7 +467,7 @@ def create_sec_tools(ticker: str, llm: BaseChatModel) -> tuple[list, str]:
         # Replaces the older overview / earnings_summary / material_event_summary
         # trio, which let the planner pick overlapping tools that classified
         # the same filing differently.
-        Tool.from_function(
+        StructuredTool.from_function(
             name="analyze_latest_8k",
             description=(
                 "Get structured analysis of the latest 8-K filing. Automatically "
@@ -466,16 +478,18 @@ def create_sec_tools(ticker: str, llm: BaseChatModel) -> tuple[list, str]:
                 "metadata as JSON."
             ),
             func=None,
-            coroutine=lambda query="": _tool_analyze_latest_8k(ticker, llm),
+            coroutine=lambda: _tool_analyze_latest_8k(ticker, llm),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_8k_item",
             description=(
                 "Get raw text of a specific 8-K item by number (e.g. '2.02' for earnings, "
                 "'1.01' for material agreements, '5.02' for leadership changes). "
                 "Pass the item number as the query."
             ),
-            func=lambda item="2.02": _tool_8k_item(ticker, item),
+            func=lambda item=DEFAULT_8K_ITEM: _tool_8k_item(ticker, item),
+            args_schema=EightKItemArgs,
         ),
     ]
 

@@ -5,9 +5,11 @@ import hashlib
 from typing import Any, Awaitable, Callable, Optional
 
 from cachetools import TTLCache
-from langchain_core.tools import Tool, ToolException
+from langchain_core.tools import StructuredTool, ToolException
 from langchain_tavily import TavilySearch
 from tavily import TavilyClient
+
+from agents.tools.tool_args import NoArgs, QueryArgs
 
 # Bounded research cache: 15-min TTL matches briefing-cache convention.
 _research_cache: TTLCache = TTLCache(maxsize=256, ttl=900)
@@ -395,7 +397,7 @@ def create_research_tools(
     ticker: str,
     tavily_api_key: str,
     search_budget: ChargeFn | None = None,
-) -> list[Tool]:
+) -> list[StructuredTool]:
     """
     Create Tavily research tools bound to a specific ticker.
 
@@ -412,7 +414,7 @@ def create_research_tools(
             name, so plans that reference it still resolve.
 
     Returns:
-        List of LangChain Tool objects for research
+        List of LangChain StructuredTool objects for research
     """
     depth = "basic" if search_budget else "advanced"
     # Each entry: (query, charge_retry) -> formatted result. charge_retry is the
@@ -465,13 +467,15 @@ def create_research_tools(
     # rewording of the same request miss the cache and be charged again.
     query_tools = {"web_search", "deep_research"}
 
+    # Query tools take a free-text ``query``; the rest take nothing, and any
+    # named argument a model supplies (ticker, days, max_results) is ignored.
     if search_budget:
         return [
-            Tool.from_function(
-                name=name,
-                description=descriptions[name],
-                func=None,
-                coroutine=lambda query="", name=name, func=func: _metered_search(
+            _research_tool(
+                name,
+                descriptions[name],
+                query_tool=name in query_tools,
+                run=lambda query, name=name, func=func: _metered_search(
                     ticker, name, query if name in query_tools else "", func, search_budget
                 ),
             )
@@ -479,18 +483,38 @@ def create_research_tools(
         ]
 
     return [
-        Tool.from_function(
-            name=name,
-            description=descriptions[name],
-            func=None,
-            coroutine=(
-                (lambda topic, func=func: func(topic, None))
-                if name in query_tools
-                else (lambda query="", func=func: func(query, None))
-            ),
+        _research_tool(
+            name,
+            descriptions[name],
+            query_tool=name in query_tools,
+            run=lambda query, func=func: func(query, None),
         )
         for name, func in searches.items()
     ]
+
+
+def _research_tool(
+    name: str,
+    description: str,
+    query_tool: bool,
+    run: Callable[[str], Awaitable[str]],
+) -> StructuredTool:
+    """Wrap an async search as a coroutine-only StructuredTool."""
+    if query_tool:
+        return StructuredTool.from_function(
+            name=name,
+            description=description,
+            func=None,
+            coroutine=lambda query="": run(query),
+            args_schema=QueryArgs,
+        )
+    return StructuredTool.from_function(
+        name=name,
+        description=description,
+        func=None,
+        coroutine=lambda: run(""),
+        args_schema=NoArgs,
+    )
 
 
 def clear_research_cache() -> None:

@@ -5,12 +5,13 @@ technical indicators (RSI, MACD, Bollinger Bands, pattern recognition, etc.).
 They are ticker-bound but do not require an LLM or SEC header.
 """
 
-from langchain_core.tools import Tool
+from langchain_core.tools import StructuredTool
 
 from agents.technical_workflow.indicator_window import (
     fetch_indicator_window,
     get_retriever as _get_shared_stock_retriever,
 )
+from agents.tools.tool_args import NoArgs
 
 
 def _tool_stock_price_history(ticker: str, period: str = "1mo") -> str:
@@ -387,42 +388,49 @@ def _tool_multi_timeframe_analysis(ticker: str) -> str:
         return f"Failed to perform multi-timeframe analysis for {ticker}: {e}"
 
 
-def create_stock_tools(ticker: str) -> list[Tool]:
+def create_stock_tools(ticker: str) -> list[StructuredTool]:
     """Return stock/technical analysis tools bound to a specific ticker."""
     return [
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_stock_price_history",
             description="Get recent stock price history (last 10 trading days with open, close, high, low prices).",
-            func=lambda query="": _tool_stock_price_history(ticker),
+            func=lambda: _tool_stock_price_history(ticker),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_technical_analysis",
             description="Get technical indicators including RSI, MACD, Bollinger Bands, moving averages (5/10/20/50/200-day), volatility, and trend signals.",
-            func=lambda query="": _tool_technical_analysis(ticker),
+            func=lambda: _tool_technical_analysis(ticker),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_stock_info",
             description="Get current stock info including current price, trailing P/E ratio, forward P/E ratio, price-to-book ratio, market cap, 52-week high/low, volume, average volume, dividend yield, and beta.",
-            func=lambda query="": _tool_stock_info(ticker),
+            func=lambda: _tool_stock_info(ticker),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_financial_metrics",
             description="Get fundamental financial metrics including year-over-year revenue growth, net income growth, and debt-to-assets ratio from income statement and balance sheet.",
-            func=lambda query="": _tool_financial_metrics(ticker),
+            func=lambda: _tool_financial_metrics(ticker),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_advanced_technical_analysis",
             description="Get advanced technical indicators: ADX (trend strength), ATR (volatility/position sizing), Stochastic (momentum), Volume Profile (institutional levels), and Fibonacci retracement levels.",
-            func=lambda query="": _tool_advanced_technical_analysis(ticker),
+            func=lambda: _tool_advanced_technical_analysis(ticker),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_pattern_detection",
             description="Detect chart patterns: Head & Shoulders, Double Top/Bottom, Golden/Death Cross, RSI divergences. Returns pattern type, confidence, direction, and price targets.",
-            func=lambda query="": _tool_detect_patterns(ticker),
+            func=lambda: _tool_detect_patterns(ticker),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_multi_timeframe_analysis",
             description="Analyze stock across daily, weekly, and hourly timeframes. Detects conflicts between timeframes and provides weighted trading recommendation.",
-            func=lambda query="": _tool_multi_timeframe_analysis(ticker),
+            func=lambda: _tool_multi_timeframe_analysis(ticker),
+            args_schema=NoArgs,
         ),
     ]

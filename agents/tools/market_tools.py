@@ -5,9 +5,10 @@ not bound to any specific ticker. They help the agent contextualize a
 company's performance within the broader market environment.
 """
 
-from langchain_core.tools import Tool
+from langchain_core.tools import StructuredTool
 
 from agents.technical_workflow.get_stock_data import YahooFinanceDataRetrieval
+from agents.tools.tool_args import NoArgs
 
 
 def _tool_market_overview() -> str:
@@ -81,17 +82,19 @@ def _tool_macro_indicators() -> str:
     return "\n".join(lines)
 
 
-def create_market_tools() -> list[Tool]:
+def create_market_tools() -> list[StructuredTool]:
     """Return market-wide context tools (not ticker-bound)."""
     return [
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_market_overview",
             description="Get current levels and daily change for S&P 500, Nasdaq, Dow Jones, and VIX. Use for broad market context, benchmark comparison, or answering macro market questions.",
-            func=lambda query="": _tool_market_overview(),
+            func=lambda: _tool_market_overview(),
+            args_schema=NoArgs,
         ),
-        Tool.from_function(
+        StructuredTool.from_function(
             name="get_macro_indicators",
             description="Get macro economic indicators: 10-Year and 5-Year Treasury yields, VIX volatility index, and US Dollar Index with 1-month changes. Use for interest rate context and macro environment analysis.",
-            func=lambda query="": _tool_macro_indicators(),
+            func=lambda: _tool_macro_indicators(),
+            args_schema=NoArgs,
         ),
     ]
