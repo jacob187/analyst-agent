@@ -189,10 +189,12 @@ class TestOperatorLendable:
 
 
 class TestPriceFields:
-    def test_prices_exposed_and_null_for_now(self):
+    def test_prices_are_all_set_or_all_null_per_model(self):
+        # A model either has a complete price (input, output, as-of date) or
+        # none at all — a half-filled price would yield a wrong cost estimate.
         for model in get_all_models():
-            for key in _PRICE_KEYS:
-                assert getattr(model, key) is None, f"{model.id}.{key}"
+            values = [getattr(model, key) for key in _PRICE_KEYS]
+            assert all(v is None for v in values) or all(v is not None for v in values), model.id
 
     def test_valid_prices_load(self):
         models, _, _ = _build_registry([_entry(
