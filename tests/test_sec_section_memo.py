@@ -154,6 +154,8 @@ def test_refresh_to_new_accession_reextracts_from_new_filing(edgar, retriever):
 
     edgar.publish(tenq(Q2, "2026-05-01", Q2_RISK))
     meta = retriever.refresh_latest_filing("10-Q")
+    memo_keys = list(retriever.__dict__["_memo_state"].flights)
+    assert not [k for k in memo_keys if k[1] == Q1], "old filing's extractions kept after refresh"
     result = retriever.get_risk_factors_raw("10-Q")
 
     new = _latest(edgar, "10-Q")
