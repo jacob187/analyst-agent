@@ -38,7 +38,9 @@ from typing import Any
 
 from fastapi import Header, HTTPException
 
-from agents.model_registry import ModelDef, get_free_tier_model
+from agents.model_registry import (
+    ModelDef, get_all_models, get_default_model, get_free_tier_model, get_model,
+)
 from api.db import get_llm_usage
 from api.clerk_auth import is_auth_disabled, is_clerk_enabled, verify_clerk_token
 from api.validators import USER_ID_RE
@@ -296,6 +298,44 @@ class ApiKeys:
         operator isn't paying so the budget doesn't apply.
         """
         return self.key_sources.get(provider) == "env"
+
+
+def resolve_model(keys: ApiKeys, requested_model_id: object) -> tuple[ModelDef, str | None]:
+    """Pick the model a request runs on and the key that may run it.
+
+    Shared by chat and the filings endpoints so a caller is never bounced
+    for lacking a key for the registry default when they hold one for another
+    model. Returns `(model, api_key_or_None)`; a None key means nothing usable
+    resolved and the caller applies its own policy (chat's anonymous free
+    trial, the filings endpoints' `needs_key`). This never lends the free-trial
+    key itself.
+
+    `requested_model_id` is the caller's *explicit* choice (WS auth frame or
+    `X-Model-Id` header), not `keys.model_id`, which is env-defaulted by
+    DEFAULT_MODEL_ID. Anything not a registered id (stale id saved before a
+    model rename, non-string) is no choice. Order:
+      1. an explicit, registered request wins, key or not;
+      2. the default model, if a key may run it;
+      3. the first registry model a key may run (BYOK, or an operator key for
+         a model it may lend);
+      4. the free-trial (else default) model with no key.
+    """
+    if not isinstance(requested_model_id, str) or not get_model(requested_model_id):
+        requested_model_id = None
+
+    default_model = get_model(keys.model_id or "") or get_default_model()
+
+    if requested_model_id:
+        model = get_model(requested_model_id)
+    elif keys.key_for_model(default_model):
+        model = default_model
+    else:
+        model = next((m for m in get_all_models() if keys.key_for_model(m)), None)
+        if model is None:
+            trial_id = free_trial_model_id()
+            model = (trial_id and get_model(trial_id)) or default_model
+
+    return model, keys.key_for_model(model)
 
 
 def _resolve_key(

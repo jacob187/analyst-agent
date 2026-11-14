@@ -18,7 +18,7 @@ import time
 from typing import Any
 
 from cachetools import TTLCache
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from agents.sec_workflow.analysis_cache import (
@@ -29,7 +29,7 @@ from agents.sec_workflow.analysis_cache import (
     latest_filing,
     run_analysis,
 )
-from api.dependencies import ApiKeys, get_api_keys
+from api.dependencies import ApiKeys, get_api_keys, resolve_model
 from api.llm_concurrency import (
     LLMBudgetExceeded,
     charge_llm_call,
@@ -616,6 +616,7 @@ async def get_company_filings(
     ticker: str,
     request: Request,
     keys: ApiKeys = Depends(get_api_keys),
+    x_model_id: str | None = Header(None),
 ):
     """Return LLM-analyzed SEC filing summaries for the Filings tab.
 
@@ -644,17 +645,14 @@ async def get_company_filings(
     ticker = ticker.upper()
 
     # Resolve model + API key
-    from agents.model_registry import get_model, get_default_model
-
-    model_id = keys.model_id or get_default_model().id
-    model = get_model(model_id) or get_default_model()
     # Key is optional: cached analyses are served to anyone. A key is only
     # needed to generate a fresh analysis on cache miss (BYOK, or the operator
     # env key for signed-in users on a model it may lend — otherwise the
     # caller is keyless here and misses report needs_key). Keyless callers
     # skip the expensive raw section extraction — only metadata (the cache
-    # key) is fetched.
-    api_key = keys.key_for_model(model)
+    # key) is fetched. Absent an explicit X-Model-Id, the model is one the
+    # caller has a usable key for, not necessarily the registry default.
+    model, api_key = resolve_model(keys, x_model_id)
 
     # Step 1: Fetch filing data from EDGAR (no LLM, ~1-3s). Raw section text is
     # extracted only when there's a key to generate with.
@@ -719,6 +717,7 @@ async def stream_company_filings(
     ticker: str,
     request: Request,
     keys: ApiKeys = Depends(get_api_keys),
+    x_model_id: str | None = Header(None),
 ):
     """Stream SEC filing analysis as Server-Sent Events.
 
@@ -744,15 +743,11 @@ async def stream_company_filings(
 
     ticker = ticker.upper()
 
-    from agents.model_registry import get_model, get_default_model
-
-    model_id = keys.model_id or get_default_model().id
-    model = get_model(model_id) or get_default_model()
     # Key is optional: cached sections stream to anyone; a key is only needed
     # to generate fresh sections on cache miss (BYOK, or operator key signed-in,
     # for models it may lend). Keyless callers skip raw section extraction
     # (only metadata is fetched).
-    api_key = keys.key_for_model(model)
+    model, api_key = resolve_model(keys, x_model_id)
     charge_user_id = _budget_user(keys, api_key, model.provider)
 
     # Per-IP concurrency guard — prevents a single client from opening

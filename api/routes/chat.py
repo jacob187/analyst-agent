@@ -28,6 +28,7 @@ from api.dependencies import (
     free_trial_key,
     free_trial_model_id,
     free_trial_open,
+    resolve_model,
     resolve_ws_identity,
     resolve_ws_keys,
 )
@@ -41,9 +42,7 @@ from api.rate_limit import check_rate_limit, client_ip
 from api.tracing import get_tracer
 from api.validators import TICKER_RE
 from agents.graph.analyst_graph import LLMTimeoutError
-from agents.model_registry import (
-    get_all_models, get_model, get_default_model, get_token_threshold,
-)
+from agents.model_registry import get_token_threshold
 from agents.llm_factory import create_llm_pair
 
 logger = logging.getLogger(__name__)
@@ -165,48 +164,13 @@ async def chat(websocket: WebSocket, ticker: str):
         user_id = keys.user_id
         ip = client_ip(websocket)
 
-        # Resolve the model for this session. An explicit choice wins; failing
-        # that we pick a model whose provider the caller actually has a key
-        # for, so someone who brought only an OpenAI/Anthropic key isn't
-        # steered onto the (Google) default and bounced with "key required".
-        # With no usable key at all, fall through to the free-trial model.
-        # "Usable" is per model: the operator's env key only counts for
-        # models it may lend (ApiKeys.key_for_model).
-        #
-        # `keys.model_id` is env-defaulted (DEFAULT_MODEL_ID), so it can't
-        # answer "did this caller pick a model?" — read the auth frame for that
-        # or setting DEFAULT_MODEL_ID would make the trial unreachable. An id no
-        # longer in the registry (saved before a model rename) is no choice.
-        requested_model_id = auth_message.get("model_id")
-        if not isinstance(requested_model_id, str) or not get_model(requested_model_id):
-            requested_model_id = None
-
-        fallback_model = get_model(keys.model_id or "") or get_default_model()
+        # Resolve the model for this session (see `resolve_model`). The
+        # explicit choice comes from the auth frame, not `keys.model_id`, which
+        # is env-defaulted (DEFAULT_MODEL_ID) — otherwise setting it would make
+        # the trial unreachable.
+        model, api_key = resolve_model(keys, auth_message.get("model_id"))
+        model_id = model.id
         trial_model_id = free_trial_model_id()
-
-        if requested_model_id:
-            model_id = requested_model_id
-        elif keys.key_for_model(fallback_model):
-            model_id = fallback_model.id
-        else:
-            byok_model = next(
-                (m for m in get_all_models() if keys.key_for_model(m)),
-                None,
-            )
-            if byok_model:
-                model_id = byok_model.id
-            else:
-                model_id = trial_model_id or fallback_model.id
-
-        model = get_model(model_id)
-        if model is None:
-            default = get_default_model()
-            model = default
-            model_id = default.id
-
-        # Resolve the API key for the selected model: BYOK, or the operator's
-        # env key if it may lend this model.
-        api_key = keys.key_for_model(model)
 
         # Anonymous free trial: no BYOK key, but the requested model is the
         # one designated light model the operator lends to anon visitors,
