@@ -42,6 +42,27 @@ def _bootstrap_sec_identity() -> None:
 _bootstrap_sec_identity()
 
 
+LIVE_LLM_MARKERS = ("eval_fast", "eval_tools", "eval_quality", "eval_e2e")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Live-LLM evals run only when `-m` names their marker (e.g. `-m eval_fast`).
+
+    The default addopts only exclude `network`, so with a provider key in `.env`
+    a plain `pytest` would otherwise call the real LLM from every eval test (and
+    a stalled call hangs the run). Without a key they skip; this makes them
+    opt-in either way.
+    """
+    markexpr = config.getoption("markexpr") or ""
+    kept, dropped = [], []
+    for item in items:
+        live = [m for m in LIVE_LLM_MARKERS if item.get_closest_marker(m)]
+        (dropped if live and not any(m in markexpr for m in live) else kept).append(item)
+    if dropped:
+        config.hook.pytest_deselected(items=dropped)
+        items[:] = kept
+
+
 @pytest.fixture(autouse=True)
 def _scrub_clerk_env(monkeypatch):
     """Ensure Clerk stays disabled per-test even if api.main re-loads .env.
@@ -216,6 +237,10 @@ def llm():
         model="gemini-3.1-flash-lite-preview",
         google_api_key=api_key,
         temperature=0,
+        # The client defaults to no timeout and 6 retries, so one stalled
+        # connection would hang an eval run indefinitely.
+        timeout=60,
+        max_retries=1,
     )
 
 
