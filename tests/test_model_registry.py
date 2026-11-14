@@ -52,7 +52,7 @@ class TestModelsJsonLoading:
 class TestGetFreeTierModel:
     def test_returns_the_flagged_model(self):
         model = get_free_tier_model()
-        assert model.id == "gemini-3.1-flash-lite"
+        assert model.id == "claude-haiku-5-5"
         assert model.free_tier is True
 
     def test_env_override(self, monkeypatch):
@@ -61,7 +61,7 @@ class TestGetFreeTierModel:
 
     def test_invalid_env_override_falls_back(self, monkeypatch):
         monkeypatch.setenv("ANON_FREE_MODEL_ID", "nonexistent-model-xyz")
-        assert get_free_tier_model().id == "gemini-3.1-flash-lite"
+        assert get_free_tier_model().id == "claude-haiku-5-5"
 
     def test_returns_none_when_no_model_flagged(self, monkeypatch):
         # Fails closed: unflagging the free-tier model disables the trial rather
@@ -93,9 +93,9 @@ class TestGetDefaultModel:
         assert isinstance(default, ModelDef)
         assert default.default is True
 
-    def test_default_is_gemini_flash(self):
+    def test_default_is_claude_haiku(self):
         """Current default — update this test if the default changes."""
-        assert get_default_model().id == "gemini-3.6-flash"
+        assert get_default_model().id == "claude-haiku-5-5"
 
 
 class TestGetModelsByProvider:
@@ -164,9 +164,9 @@ class TestOperatorLendable:
             for key in ("operator_lendable", *_PRICE_KEYS):
                 assert key in entry, f"{entry['id']} is missing {key}"
 
-    def test_only_default_and_free_tier_are_lendable(self):
+    def test_lendable_models_are_the_default_free_tier_and_google_fallbacks(self):
         lendable = {m.id for m in get_all_models() if m.operator_lendable}
-        assert lendable == {"gemini-3.6-flash", "gemini-3.1-flash-lite"}
+        assert lendable == {"claude-haiku-5-5", "gemini-3.6-flash", "gemini-3.1-flash-lite"}
 
     def test_lendable_defaults_to_false(self):
         models, _, _ = _build_registry([_entry()])
