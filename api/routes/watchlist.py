@@ -6,13 +6,13 @@ import logging
 import os
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from api.db import (
     get_watchlist, get_watchlist_enriched, add_to_watchlist, remove_from_watchlist,
     save_briefing, get_recent_briefings, get_briefing_history,
 )
-from api.dependencies import ApiKeys, get_api_keys
+from api.dependencies import ApiKeys, get_api_keys, resolve_model
 from api.llm_concurrency import (
     LLMBudgetExceeded,
     LLMCallCharger,
@@ -77,7 +77,10 @@ async def remove_ticker(ticker: str, keys: ApiKeys = Depends(get_api_keys)):
 
 
 @router.get("/briefing")
-async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
+async def get_briefing(
+    keys: ApiKeys = Depends(get_api_keys),
+    x_model_id: str | None = Header(None),
+):
     """Generate AI briefing for the user's watchlist tickers."""
     user_id = keys.require_user_id()
     if not check_rest_rate_limit(
@@ -94,14 +97,12 @@ async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
 
     from agents.briefing.briefing_service import BriefingService
     from agents.llm_factory import ThinkingConfig, create_llm
-    from agents.model_registry import get_default_model, get_model
 
-    model_id = keys.model_id or get_default_model().id
-    model = get_model(model_id) or get_default_model()
-
-    # BYOK works for any model; the operator's env key only for models it may
-    # lend (ApiKeys.key_for_model).
-    api_key = keys.key_for_model(model)
+    # Same resolution as chat and filings: an explicit X-Model-Id wins; otherwise
+    # the default if the caller can run it, else a model they have a key for.
+    # BYOK works for any model; the operator's env key only for lendable ones.
+    model, api_key = resolve_model(keys, x_model_id)
+    model_id = model.id
     if not api_key:
         provider_display = model.provider.replace("_", " ").title()
         if keys.get_provider_key(model.provider):
