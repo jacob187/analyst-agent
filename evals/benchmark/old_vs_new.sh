@@ -2,9 +2,10 @@
 # Benchmark the current graph against the skills agent on the same questions
 # and model, judge them blind, and write the summary JSON + owner PDF.
 #
-# Usage: evals/benchmark/old_vs_new.sh [label] [judge-model]
+# Usage: evals/benchmark/old_vs_new.sh [label] [judge-model] [old-run-dir]
 #   label        suffix for output dirs (default: timestamp)
 #   judge-model  registry model id for the judge (default: the CLI's default)
+#   old-run-dir  reuse an existing current-graph run instead of running it again
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -12,7 +13,7 @@ cd "$(dirname "$0")/../.."
 label="${1:-$(date +%Y%m%d-%H%M)}"
 judge_model="${2:-}"
 out="benchmark_reports"
-old="$out/runs/current-$label"
+old="${3:-$out/runs/current-$label}"
 new="$out/runs/skills-$label"
 judgement="$out/judgements/old-vs-new-$label"
 
