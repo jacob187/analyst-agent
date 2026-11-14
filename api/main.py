@@ -21,6 +21,9 @@ logging.basicConfig(
     format="%(asctime)s  %(name)s  %(message)s",
     datefmt="%H:%M:%S",
 )
+# edgartools logs every section-detection step at INFO, which buries the app's
+# own logs. Keep its warnings and errors; override with EDGAR_LOG_LEVEL.
+logging.getLogger("edgar").setLevel(os.getenv("EDGAR_LOG_LEVEL", "WARNING").upper())
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
