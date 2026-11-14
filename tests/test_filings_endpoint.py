@@ -949,25 +949,37 @@ class TestBudgetChargedPerSection:
 # ── Operator key only pays for operator_lendable models ─────────────────────
 
 
+def _google_model(*, lendable: bool):
+    from agents.model_registry import get_all_models
+    return next(
+        m for m in get_all_models()
+        if m.provider == "google_genai" and m.operator_lendable is lendable
+    )
+
+
 class TestFilingsOperatorKeyAllowlist:
     """With Clerk enabled, a signed-in user without their own key gets the
-    operator's key only for operator_lendable models; otherwise cache misses
-    are `needs_key`, exactly like a keyless caller."""
+    operator's key only for operator_lendable models; an explicitly requested
+    model the operator won't lend is `needs_key`, exactly like a keyless caller.
+    (Without an explicit request the endpoint falls back to a lendable model
+    instead — see tests/test_filings_model_fallback.py.)"""
 
     @pytest.fixture
     def signed_in(self, clerk_env, rsa_keypair, monkeypatch):
+        for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEFAULT_MODEL_ID"):
+            monkeypatch.delenv(var, raising=False)
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
         priv, _ = rsa_keypair
         return {"X-Clerk-Session-Token": _make_token(priv)}
 
     def test_non_lendable_model_needs_own_key(self, client, mock_filings_deps, budget_db, signed_in):
         _core_only(mock_filings_deps)
-        mock_filings_deps["model"].operator_lendable = False
+        headers = {**signed_in, "X-Model-Id": _google_model(lendable=False).id}
 
-        resp = client.get("/api/company/AAPL/filings", headers=signed_in)
+        resp = client.get("/api/company/AAPL/filings", headers=headers)
         assert resp.status_code == 200
         assert set(resp.json()["tenk"]) == {"metadata"}  # no analyses generated
-        events = _stream_events(client, "/api/company/AAPL/filings/stream", signed_in)
+        events = _stream_events(client, "/api/company/AAPL/filings/stream", headers)
         statuses = {e["status"] for e in events if e.get("type") == "progress" and e["step"] != "edgar_fetch"}
         assert statuses == {"needs_key"}
 
@@ -978,21 +990,18 @@ class TestFilingsOperatorKeyAllowlist:
 
     def test_lendable_model_runs_on_operator_key(self, client, mock_filings_deps, budget_db, signed_in):
         _core_only(mock_filings_deps)
-        mock_filings_deps["model"].operator_lendable = True
+        headers = {**signed_in, "X-Model-Id": _google_model(lendable=True).id}
 
-        events = _stream_events(client, "/api/company/AAPL/filings/stream", signed_in)
+        events = _stream_events(client, "/api/company/AAPL/filings/stream", headers)
         assert len(_generated(events)) == 6
         assert _usage(TEST_SUB) == 6
 
     def test_own_key_runs_non_lendable_model(self, client, mock_filings_deps, budget_db, signed_in):
         _core_only(mock_filings_deps)
-        mock_filings_deps["model"].operator_lendable = False
 
         events = _stream_events(
             client, "/api/company/AAPL/filings/stream",
-            {**signed_in, "X-Google-Api-Key": "their-key"},
+            {**signed_in, "X-Model-Id": _google_model(lendable=False).id, "X-Google-Api-Key": "their-key"},
         )
         assert len(_generated(events)) == 6
         assert _usage(TEST_SUB) == 0  # BYOK: operator not charged
-
-
