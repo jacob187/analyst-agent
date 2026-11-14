@@ -278,9 +278,10 @@ def test_trial_tools_reject_sync_invoke(recording_search):
         _trial_tools(_Budget(10))["web_search"].invoke("q")
 
 
-def test_non_trial_tools_keep_advanced_depth(recording_search):
+@pytest.mark.asyncio
+async def test_non_trial_tools_keep_advanced_depth(recording_search):
     tools = {t.name: t for t in research_tools.create_research_tools("AAPL", "fake-key")}
-    tools["web_search"].invoke("q")
+    await tools["web_search"].ainvoke("q")
     assert recording_search.instances[0]["search_depth"] == "advanced"
 
 
@@ -356,8 +357,9 @@ def _quiet_day(monkeypatch):
     _QuietDayTavilySearch.calls = []
 
 
-def test_company_news_falls_back_to_week_on_a_quiet_day(_quiet_day):
-    out = research_tools._tool_company_news("AAPL", "k", "basic")
+@pytest.mark.asyncio
+async def test_company_news_falls_back_to_week_on_a_quiet_day(_quiet_day):
+    out = await research_tools._tool_company_news("AAPL", "k", "basic")
     assert "Weekly story" in out
     assert _QuietDayTavilySearch.calls == ["day", "week"]
 
@@ -412,3 +414,282 @@ async def test_trial_rewording_a_query_ignoring_tool_hits_the_cache(monkeypatch)
     await news.ainvoke("recent developments")
 
     assert len(charged) == 1
+
+
+# ── Async dispatch + output format (no cross-loop bridges) ───────────────────
+
+_LONG_CONTENT = "c" * 250
+
+# Shaped like a real Tavily /search response (extra keys included on purpose).
+_SEARCH_RESPONSE = {
+    "query": "AAPL company q",
+    "answer": "Apple is a consumer hardware company.",
+    "images": [],
+    "follow_up_questions": None,
+    "results": [
+        {
+            "url": "https://example.com/a",
+            "title": "Alpha",
+            "content": _LONG_CONTENT,
+            "score": 0.91,
+            "raw_content": None,
+        },
+        {
+            "url": "https://example.com/b",
+            "title": "Beta",
+            "content": "short body",
+            "score": 0.55,
+            "raw_content": None,
+        },
+    ],
+    "response_time": 1.42,
+}
+
+_NEWS_RESPONSE = {
+    "query": "AAPL stock latest news developments",
+    "answer": "Apple launched a product.",
+    "images": [],
+    "follow_up_questions": None,
+    "results": [
+        {
+            "url": "https://news.example.com/1",
+            "title": "Launch day",
+            "content": "body",
+            "score": 0.8,
+            "published_date": "Mon, 10 Nov 2026 14:00:00 GMT",
+            "raw_content": None,
+        },
+        {
+            "url": "https://news.example.com/2",
+            "title": "Analyst note",
+            "content": "body",
+            "score": 0.7,
+            "raw_content": None,
+        },
+    ],
+    "response_time": 0.9,
+}
+
+
+class _FixtureTavilySearch:
+    """TavilySearch stand-in at the client boundary: records kwargs/queries and
+    returns the fixture matching the search topic."""
+
+    constructed: list[dict] = []
+    queries: list[str] = []
+
+    def __init__(self, **kwargs):
+        type(self).constructed.append(kwargs)
+        self._news = kwargs.get("topic") == "news"
+
+    def invoke(self, payload):
+        type(self).queries.append(payload["query"])
+        return _NEWS_RESPONSE if self._news else _SEARCH_RESPONSE
+
+
+@pytest.fixture
+def fixture_search(monkeypatch):
+    _FixtureTavilySearch.constructed = []
+    _FixtureTavilySearch.queries = []
+    monkeypatch.setattr(research_tools, "TavilySearch", _FixtureTavilySearch)
+    return _FixtureTavilySearch
+
+
+_TRUNC = "c" * 200 + "..."
+
+_EXPECTED_WEB_SEARCH = "\n".join([
+    "Summary: Apple is a consumer hardware company.\n",
+    "Sources:",
+    "\n1. Alpha",
+    "   URL: https://example.com/a",
+    f"   {_TRUNC}",
+    "\n2. Beta",
+    "   URL: https://example.com/b",
+    "   short body...",
+])
+
+_EXPECTED_NEWS = "\n".join([
+    "Recent News for AAPL:",
+    "=" * 50,
+    "",
+    "Summary: Apple launched a product.\n",
+    "1. Launch day",
+    "   Date: Mon, 10 Nov 2026 14:00:00 GMT",
+    "   URL: https://news.example.com/1",
+    "",
+    "2. Analyst note",
+    "   URL: https://news.example.com/2",
+    "",
+])
+
+_EXPECTED_COMPETITORS = "\n".join([
+    "Competitor Analysis for AAPL:",
+    "=" * 50,
+    "",
+    "Market Position Summary:",
+    "-" * 30,
+    "Apple is a consumer hardware company.",
+    "",
+    "Research Sources:",
+    "-" * 30,
+    "\n1. Alpha",
+    f"   {_TRUNC}",
+    "\n2. Beta",
+    "   short body...",
+])
+
+_EXPECTED_TRENDS = "\n".join([
+    "Industry Trends & Outlook for AAPL:",
+    "=" * 50,
+    "",
+    "Industry Overview:",
+    "-" * 30,
+    "Apple is a consumer hardware company.",
+    "",
+    "Key Sources:",
+    "-" * 30,
+    "\n1. Alpha",
+    f"   {_TRUNC}",
+    "\n2. Beta",
+    "   short body...",
+])
+
+_EXPECTED_BY_TOOL = {
+    "web_search": _EXPECTED_WEB_SEARCH,
+    "get_company_news": _EXPECTED_NEWS,
+    "analyze_competitors": _EXPECTED_COMPETITORS,
+    "get_industry_trends": _EXPECTED_TRENDS,
+}
+
+
+def test_research_tools_module_has_no_cross_loop_bridges():
+    import inspect
+
+    source = inspect.getsource(research_tools)
+    assert "asyncio.run(" not in source
+    assert "run_coroutine_threadsafe" not in source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", list(_EXPECTED_BY_TOOL))
+async def test_search_tools_ainvoke_returns_expected_format(fixture_search, name):
+    tools = {t.name: t for t in research_tools.create_research_tools("AAPL", "k")}
+    out = await tools[name].ainvoke("q")
+    assert out == _EXPECTED_BY_TOOL[name]
+
+
+@pytest.mark.asyncio
+async def test_web_search_prefixes_ticker_and_uses_advanced_depth(fixture_search):
+    tools = {t.name: t for t in research_tools.create_research_tools("AAPL", "k")}
+    await tools["web_search"].ainvoke("margins")
+    assert fixture_search.queries == ["AAPL company margins"]
+    assert fixture_search.constructed[0]["search_depth"] == "advanced"
+
+
+@pytest.mark.asyncio
+async def test_non_trial_news_falls_back_to_week_without_a_budget(monkeypatch):
+    monkeypatch.setattr(research_tools, "TavilySearch", _QuietDayTavilySearch)
+    _QuietDayTavilySearch.calls = []
+    tools = {t.name: t for t in research_tools.create_research_tools("AAPL", "k")}
+    out = await tools["get_company_news"].ainvoke("")
+    assert "Weekly story" in out
+    assert _QuietDayTavilySearch.calls == ["day", "week"]
+
+
+@pytest.mark.asyncio
+async def test_deep_research_ainvoke_output_format(monkeypatch, _fast_polling):
+    monkeypatch.setattr(research_tools, "TavilyClient", _FakeTavilyClient)
+    tools = {t.name: t for t in research_tools.create_research_tools("AAPL", "k")}
+    out = await tools["deep_research"].ainvoke("supply chain")
+    assert out == "\n".join([
+        "Deep Research Report: AAPL - supply chain",
+        "=" * 60,
+        "",
+        "Synthesized research body.",
+        "",
+        "Sources:",
+        "-" * 40,
+        "1. S1",
+        "   https://example.com/1",
+    ])
+
+
+@pytest.mark.asyncio
+async def test_non_trial_tools_ainvoke_does_not_block_the_loop(monkeypatch):
+    """A slow Tavily call must not stall the event loop."""
+    import time
+
+    class _Slow:
+        def __init__(self, **kwargs):
+            pass
+
+        def invoke(self, payload):
+            time.sleep(0.2)
+            return _SEARCH_RESPONSE
+
+    monkeypatch.setattr(research_tools, "TavilySearch", _Slow)
+    tools = {t.name: t for t in research_tools.create_research_tools("AAPL", "k")}
+
+    ticks = 0
+
+    async def tick():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    task = asyncio.create_task(tick())
+    try:
+        await tools["web_search"].ainvoke("q")
+    finally:
+        task.cancel()
+    assert ticks >= 5
+
+
+@pytest.mark.asyncio
+async def test_news_timeout_returns_soft_failure(monkeypatch):
+    import threading
+
+    release = threading.Event()
+
+    class _Hung:
+        def __init__(self, **kwargs):
+            pass
+
+        def invoke(self, payload):
+            release.wait(5)
+            return _NEWS_RESPONSE
+
+    monkeypatch.setattr(research_tools, "TavilySearch", _Hung)
+    monkeypatch.setattr(research_tools, "_TAVILY_PER_CALL_TIMEOUT_SECONDS", 0.05)
+    try:
+        out = await research_tools._tool_company_news("AAPL", "k", "basic")
+    finally:
+        release.set()
+    assert out == "News retrieval timed out for AAPL."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", list(_EXPECTED_BY_TOOL))
+async def test_trial_each_tool_charges_once_per_tavily_call(fixture_search, name):
+    budget = _Budget(10)
+    tools = _trial_tools(budget)
+    out = await tools[name].ainvoke("q")
+    assert out == _EXPECTED_BY_TOOL[name]
+    assert budget.calls == len(fixture_search.queries) == 1
+
+
+@pytest.mark.parametrize("trial", [False, True])
+def test_every_research_tool_is_async_only(recording_search, trial):
+    tools = research_tools.create_research_tools(
+        "AAPL", "k", _Budget(10) if trial else None
+    )
+    assert {t.name for t in tools} == {
+        "web_search", "deep_research", "get_company_news",
+        "analyze_competitors", "get_industry_trends",
+    }
+    for tool in tools:
+        assert tool.func is None
+        assert tool.coroutine is not None
+        with pytest.raises(NotImplementedError):
+            tool.invoke("q")

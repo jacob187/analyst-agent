@@ -2,9 +2,6 @@
 
 import asyncio
 import hashlib
-from concurrent.futures import (
-    ThreadPoolExecutor, TimeoutError as FuturesTimeout,
-)
 from typing import Any, Awaitable, Callable, Optional
 
 from cachetools import TTLCache
@@ -19,29 +16,30 @@ _research_cache: TTLCache = TTLCache(maxsize=256, ttl=900)
 _RESEARCH_POLL_INTERVAL_SECONDS = 2.0
 _RESEARCH_MAX_POLLS = 30
 
-# Per-call wall-clock cap on TavilySearch.invoke(). langchain-tavily's
-# underlying requests.post() has no timeout argument, so we enforce one
-# externally via a Future. A hung Tavily request returns None to the
-# caller (treated as a soft failure) instead of blocking the tool for the
-# full ~75s OS-level socket timeout.
+# Per-call wall-clock cap on a Tavily search. langchain-tavily's underlying
+# requests.post() has no timeout argument, so we enforce one externally with
+# asyncio.wait_for. A hung Tavily request returns None to the caller (treated
+# as a soft failure) instead of blocking the tool for the full ~75s OS-level
+# socket timeout.
 _TAVILY_PER_CALL_TIMEOUT_SECONDS = 10
 
+# Awaited before each billed search after the first (free-trial meter).
+ChargeFn = Callable[[], Awaitable[bool]]
 
-def _invoke_with_timeout(search: Any, query: str, timeout_s: float) -> Optional[Any]:
-    """Run search.invoke({"query": query}) with an external wall-clock cap.
 
-    Returns the result, or None on timeout. The hung thread is detached
+async def _search_with_timeout(search: Any, query: str, timeout_s: float) -> Optional[Any]:
+    """Run the blocking search.invoke({"query": query}) off the event loop with
+    a wall-clock cap.
+
+    Returns the result, or None on timeout. The hung worker thread is detached
     (not killed) so the agent step can finish on schedule.
     """
-    pool = ThreadPoolExecutor(max_workers=1)
     try:
-        future = pool.submit(search.invoke, {"query": query})
-        try:
-            return future.result(timeout=timeout_s)
-        except FuturesTimeout:
-            return None
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+        return await asyncio.wait_for(
+            asyncio.to_thread(search.invoke, {"query": query}), timeout_s,
+        )
+    except asyncio.TimeoutError:
+        return None
 
 
 def _get_cache_key(ticker: str, query: str) -> str:
@@ -55,7 +53,7 @@ def _get_cache_key(ticker: str, query: str) -> str:
     return f"{ticker}_{digest}"
 
 
-def _tool_tavily_search(
+async def _tool_tavily_search(
     ticker: str, query: str, tavily_api_key: str, search_depth: str = "advanced"
 ) -> str:
     """
@@ -77,7 +75,7 @@ def _tool_tavily_search(
 
         # Enhance query with company context
         enhanced_query = f"{ticker} company {query}"
-        result = search.invoke({"query": enhanced_query})
+        result = await asyncio.to_thread(search.invoke, {"query": enhanced_query})
 
         if isinstance(result, str):
             return result
@@ -128,13 +126,12 @@ async def _tool_tavily_research_async(
     topic: str,
     tavily_api_key: str,
 ) -> str:
-    """Async variant of `_tool_tavily_research`.
+    """Deep research via the Tavily research endpoint.
 
-    The Tavily research endpoint returns a request_id immediately and then
-    requires the caller to poll until status=="completed" (or "failed"). The
-    sync version slept the worker thread for up to 60s; this version releases
-    the thread between polls so the asyncio thread pool stays free for other
-    tools (charts, briefing, SEC analysis).
+    The endpoint returns a request_id immediately and then requires the
+    caller to poll until status=="completed" (or "failed"). The loop awaits
+    between polls so neither the event loop nor the thread pool is pinned for
+    other tools (charts, briefing, SEC analysis).
 
     HTTP calls themselves stay sync via `asyncio.to_thread` since the Tavily
     SDK does not expose async methods.
@@ -176,21 +173,11 @@ async def _tool_tavily_research_async(
         return f"Failed to perform deep research: {e}"
 
 
-def _tool_tavily_research(
-    ticker: str,
-    topic: str,
-    tavily_api_key: str,
-) -> str:
-    """Sync fallback for legacy callers (`Tool.invoke`). Inside the LangGraph
-    worker the async coroutine is always preferred via `Tool.ainvoke`."""
-    return asyncio.run(_tool_tavily_research_async(ticker, topic, tavily_api_key))
-
-
-def _tool_company_news(
+async def _tool_company_news(
     ticker: str,
     tavily_api_key: str,
     search_depth: str = "advanced",
-    allow_retry: Callable[[], bool] | None = None,
+    allow_retry: ChargeFn | None = None,
 ) -> str:
     """
     Get recent news and developments for a company.
@@ -207,11 +194,11 @@ def _tool_company_news(
         # Freshness: day-first, fall back to week so quiet days still return
         # something. Without time_range Tavily ranks purely by relevance and
         # cheerfully returns week-old "top" articles.
-        # Each call is wrapped in _invoke_with_timeout so a hung Tavily
+        # Each call goes through _search_with_timeout so a hung Tavily
         # endpoint can't pin the agent step.
         result: dict | str | None = None
         for time_range in ("day", "week"):
-            if time_range == "week" and allow_retry and not allow_retry():
+            if time_range == "week" and allow_retry and not await allow_retry():
                 return TRIAL_SEARCH_EXHAUSTED
             search = TavilySearch(
                 tavily_api_key=tavily_api_key,
@@ -222,7 +209,7 @@ def _tool_company_news(
                 time_range=time_range,
             )
             try:
-                result = _invoke_with_timeout(
+                result = await _search_with_timeout(
                     search, query, _TAVILY_PER_CALL_TIMEOUT_SECONDS,
                 )
             except ToolException:
@@ -266,7 +253,7 @@ def _tool_company_news(
         return f"Failed to retrieve news: {e}"
 
 
-def _tool_competitor_analysis(ticker: str, tavily_api_key: str, search_depth: str = "advanced") -> str:
+async def _tool_competitor_analysis(ticker: str, tavily_api_key: str, search_depth: str = "advanced") -> str:
     """
     Research competitors and market positioning for a company.
 
@@ -283,7 +270,7 @@ def _tool_competitor_analysis(ticker: str, tavily_api_key: str, search_depth: st
         )
 
         query = f"{ticker} competitors market share industry analysis comparison"
-        result = search.invoke({"query": query})
+        result = await asyncio.to_thread(search.invoke, {"query": query})
 
         if isinstance(result, str):
             return result
@@ -321,7 +308,7 @@ def _tool_competitor_analysis(ticker: str, tavily_api_key: str, search_depth: st
         return f"Failed to analyze competitors: {e}"
 
 
-def _tool_industry_trends(ticker: str, tavily_api_key: str, search_depth: str = "advanced") -> str:
+async def _tool_industry_trends(ticker: str, tavily_api_key: str, search_depth: str = "advanced") -> str:
     """
     Research industry trends and outlook relevant to the company.
 
@@ -338,7 +325,7 @@ def _tool_industry_trends(ticker: str, tavily_api_key: str, search_depth: str = 
         )
 
         query = f"{ticker} industry trends outlook forecast market analysis 2025"
-        result = search.invoke({"query": query})
+        result = await asyncio.to_thread(search.invoke, {"query": query})
 
         if isinstance(result, str):
             return result
@@ -386,8 +373,8 @@ async def _metered_search(
     ticker: str,
     name: str,
     query: str,
-    func: Callable[[str, Callable[[], bool]], str],
-    search_budget: Callable[[], Awaitable[bool]],
+    func: Callable[[str, ChargeFn | None], Awaitable[str]],
+    search_budget: ChargeFn,
 ) -> str:
     # Cache before charging so repeat demo questions (same ticker + tool +
     # query) cost neither a Tavily credit nor a unit of the trial allowance.
@@ -396,12 +383,8 @@ async def _metered_search(
         return _research_cache[cache_key]
     if not await search_budget():
         return TRIAL_SEARCH_EXHAUSTED
-    loop = asyncio.get_running_loop()
 
-    def charge_retry() -> bool:
-        return asyncio.run_coroutine_threadsafe(search_budget(), loop).result()
-
-    result = await asyncio.to_thread(func, query, charge_retry)
+    result = await func(query, search_budget)
     # Error strings aren't cached — that would pin a transient failure for the TTL.
     if not result.startswith(("Failed", "News retrieval timed out", TRIAL_SEARCH_EXHAUSTED)):
         _research_cache[cache_key] = result
@@ -411,10 +394,13 @@ async def _metered_search(
 def create_research_tools(
     ticker: str,
     tavily_api_key: str,
-    search_budget: Callable[[], Awaitable[bool]] | None = None,
+    search_budget: ChargeFn | None = None,
 ) -> list[Tool]:
     """
     Create Tavily research tools bound to a specific ticker.
+
+    Every tool is async-only (``coroutine=``): invoke with ``ainvoke``. Blocking
+    Tavily calls run via ``asyncio.to_thread``.
 
     Args:
         ticker: Company ticker symbol
@@ -423,23 +409,32 @@ def create_research_tools(
             False means today's allowance is spent. Every search drops to
             "basic" depth (1 credit instead of 2), and deep_research — 4-250
             credits per call — is served by a basic web search under the same
-            name, so plans that reference it still resolve. Tools become
-            async-only, so nothing can bypass the meter via sync invoke.
+            name, so plans that reference it still resolve.
 
     Returns:
         List of LangChain Tool objects for research
     """
     depth = "basic" if search_budget else "advanced"
-    funcs: dict[str, Callable[[str], str]] = {
-        "web_search": lambda query: _tool_tavily_search(ticker, query, tavily_api_key, depth),
-        "deep_research": (
-            (lambda topic: _tool_tavily_search(ticker, topic, tavily_api_key, depth))
-            if search_budget
-            else (lambda topic: _tool_tavily_research(ticker, topic, tavily_api_key))
+    # Each entry: (query, charge_retry) -> formatted result. charge_retry is the
+    # trial meter, awaited before a billed second search; None outside trial mode.
+    searches: dict[str, Callable[[str, ChargeFn | None], Awaitable[str]]] = {
+        "web_search": lambda query, charge: _tool_tavily_search(
+            ticker, query, tavily_api_key, depth
         ),
-        "get_company_news": lambda query="": _tool_company_news(ticker, tavily_api_key, depth),
-        "analyze_competitors": lambda query="": _tool_competitor_analysis(ticker, tavily_api_key, depth),
-        "get_industry_trends": lambda query="": _tool_industry_trends(ticker, tavily_api_key, depth),
+        "deep_research": (
+            (lambda topic, charge: _tool_tavily_search(ticker, topic, tavily_api_key, depth))
+            if search_budget
+            else (lambda topic, charge: _tool_tavily_research_async(ticker, topic, tavily_api_key))
+        ),
+        "get_company_news": lambda query, charge: _tool_company_news(
+            ticker, tavily_api_key, depth, charge
+        ),
+        "analyze_competitors": lambda query, charge: _tool_competitor_analysis(
+            ticker, tavily_api_key, depth
+        ),
+        "get_industry_trends": lambda query, charge: _tool_industry_trends(
+            ticker, tavily_api_key, depth
+        ),
     }
     descriptions = {
         "web_search": (
@@ -466,17 +461,11 @@ def create_research_tools(
         ),
     }
 
+    # Only these two read the query; keying the rest on it would let each
+    # rewording of the same request miss the cache and be charged again.
+    query_tools = {"web_search", "deep_research"}
+
     if search_budget:
-        metered: dict[str, Callable[[str, Callable[[], bool]], str]] = {
-            name: (lambda query, charge_retry, func=func: func(query))
-            for name, func in funcs.items()
-        }
-        metered["get_company_news"] = lambda query, charge_retry: _tool_company_news(
-            ticker, tavily_api_key, depth, charge_retry
-        )
-        # Only these two read the query; keying the rest on it would let each
-        # rewording of the same request miss the cache and be charged again.
-        query_tools = {"web_search", "deep_research"}
         return [
             Tool.from_function(
                 name=name,
@@ -486,21 +475,21 @@ def create_research_tools(
                     ticker, name, query if name in query_tools else "", func, search_budget
                 ),
             )
-            for name, func in metered.items()
+            for name, func in searches.items()
         ]
 
     return [
         Tool.from_function(
             name=name,
             description=descriptions[name],
-            func=func,
+            func=None,
             coroutine=(
-                (lambda topic: _tool_tavily_research_async(ticker, topic, tavily_api_key))
-                if name == "deep_research"
-                else None
+                (lambda topic, func=func: func(topic, None))
+                if name in query_tools
+                else (lambda query="", func=func: func(query, None))
             ),
         )
-        for name, func in funcs.items()
+        for name, func in searches.items()
     ]
 
 
