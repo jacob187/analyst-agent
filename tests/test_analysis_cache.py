@@ -358,11 +358,49 @@ async def test_cache_hits_charge_nothing(fresh_db, edgar, llm):
     assert await charger.settle() == 0
 
 
+async def test_graph_worker_charges_the_runs_callbacks(fresh_db, edgar, llm):
+    # The planner path: the step worker awaits `tool.ainvoke("")` with no
+    # config of its own; the run's callbacks must still reach the SEC LLM calls.
+    from langgraph.graph import END, StateGraph
+
+    from agents.graph.analyst_graph import (
+        AnalysisState, _build_tools_dict, create_worker_node, dispatch_steps,
+    )
+    from agents.planner import AnalysisStep, QueryPlan
+
+    tools, _ = create_sec_tools(TICKER, llm)
+    graph = StateGraph(AnalysisState)
+    graph.add_node("planner_stub", lambda state: state)
+    graph.add_node("worker", create_worker_node(_build_tools_dict(tools)))
+    graph.set_entry_point("planner_stub")
+    graph.add_conditional_edges("planner_stub", dispatch_steps, ["worker", END])
+    graph.add_edge("worker", END)
+    step = AnalysisStep(id=1, action="all", tool="get_all_summaries", rationale="t", depends_on=[])
+    plan = QueryPlan(query_type="complex", requires_planning=True, steps=[step], synthesis_approach="x")
+    state = {
+        "messages": [], "ticker": TICKER, "query_complexity": "complex",
+        "classification": None, "plan": plan, "step_results": {}, "final_response": "",
+    }
+
+    charger = LLMCallCharger(USER)
+    final = await graph.compile().ainvoke(state, config={"callbacks": [charger]})
+
+    result = final["step_results"][1]
+    raw = result["raw"] if isinstance(result, dict) else result.raw
+    assert "balance analysis" in raw
+    assert llm.calls == 3
+    assert await charger.settle() == 3
+
+
 async def test_llm_tools_are_async_only(llm):
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
     tools = _tools(llm)
     for name in ("get_risk_factors_summary", "get_mda_summary", "get_balance_sheet_summary",
                  "get_all_summaries", "analyze_latest_8k"):
         assert tools[name].func is None and tools[name].coroutine is not None, name
+        # Still bindable by the ReAct agent.
+        assert convert_to_openai_tool(tools[name])["function"]["name"] == name
 
 
 # ── AC3 / AC8: chat and company page share entries and the freshness check ────
