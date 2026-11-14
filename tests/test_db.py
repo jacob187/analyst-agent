@@ -131,6 +131,19 @@ class TestGetOrCreateSession:
         b = await db_module.get_or_create_session("AAPL", USER_B)
         assert a != b
 
+    async def test_reuse_records_the_current_model(self, fresh_db):
+        """History shows sessions.model, so resuming with another model must
+        record that model, not the one the session was first created with."""
+        first = await db_module.get_or_create_session("AAPL", USER_A, model="model-a")
+        second = await db_module.get_or_create_session("AAPL", USER_A, model="model-b")
+        assert first == second
+        assert (await db_module.get_session(first))["model"] == "model-b"
+
+    async def test_reuse_without_model_keeps_stored_model(self, fresh_db):
+        session_id = await db_module.get_or_create_session("AAPL", USER_A, model="model-a")
+        await db_module.get_or_create_session("AAPL", USER_A)
+        assert (await db_module.get_session(session_id))["model"] == "model-a"
+
     async def _insert_sessions(self, rows):
         db = await db_module.get_db()
         for session_id, created_at in rows:
@@ -260,6 +273,23 @@ class TestUpdateSessionSummary:
         messages = await db_module.get_session_messages(session_id)
         assert len(messages) == 1
         assert messages[0]["content"] == "hello"
+
+
+# ---------------------------------------------------------------------------
+# update_session_model
+# ---------------------------------------------------------------------------
+
+@pytest.mark.eval_unit
+class TestUpdateSessionModel:
+    async def test_stores_model_for_owner(self, fresh_db):
+        session_id = await db_module.get_or_create_session("AAPL", USER_A, model="model-a")
+        assert await db_module.update_session_model(session_id, USER_A, "model-b") is True
+        assert (await db_module.get_session(session_id))["model"] == "model-b"
+
+    async def test_other_user_cannot_change_model(self, fresh_db):
+        session_id = await db_module.get_or_create_session("AAPL", USER_A, model="model-a")
+        assert await db_module.update_session_model(session_id, USER_B, "model-b") is False
+        assert (await db_module.get_session(session_id))["model"] == "model-a"
 
 
 # ---------------------------------------------------------------------------

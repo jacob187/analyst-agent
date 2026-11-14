@@ -278,21 +278,29 @@ class TestCompressHistory:
         assert "[CONVERSATION SUMMARY]" not in prompt_text
         assert "PRIOR SUMMARY:" in prompt_text
 
-    async def test_persists_summary_to_db(self, mock_llm):
-        """update_session_summary must be scheduled (via create_task)."""
-        history = _make_history(RECENT_MESSAGES_TO_KEEP + 2)
-        with patch("api.memory.update_session_summary") as mock_save, \
-             patch("api.memory.asyncio.create_task") as mock_task:
-            await compress_history("session-42", history, mock_llm)
+    async def test_persists_summary_to_db(self, mock_llm, tmp_path, monkeypatch):
+        """The summary is written to the session row in the background."""
+        import asyncio
+        import api.db as db_module
 
-        # create_task should have been called once (with the coroutine from update_session_summary)
-        mock_task.assert_called_once()
+        monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "memory.db")
+        monkeypatch.setattr(db_module, "_db", None)
+        await db_module.init_db()
+        try:
+            session_id = await db_module.create_session("AAPL", "user_memorytest")
+            history = _make_history(RECENT_MESSAGES_TO_KEEP + 2)
+            await compress_history(session_id, history, mock_llm)
+
+            await asyncio.gather(*db_module._background_writes)
+            session = await db_module.get_session(session_id)
+            assert session["summary"] == "Summarised: user asked about AAPL financials."
+        finally:
+            await db_module.close_db()
 
     async def test_result_is_human_message_type(self, mock_llm):
         """The summary placeholder must be a HumanMessage so the LLM reads it as context."""
         history = _make_history(RECENT_MESSAGES_TO_KEEP + 2)
-        with patch("api.memory.update_session_summary"), \
-             patch("api.memory.asyncio.create_task"):
+        with patch("api.memory.update_session_summary"):
             result = await compress_history("session-1", history, mock_llm)
 
         assert isinstance(result[0], HumanMessage)

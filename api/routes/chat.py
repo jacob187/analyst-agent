@@ -14,6 +14,7 @@ from api.db import (
     get_or_create_session, get_session,
     save_message, get_session_messages,
     get_llm_usage, increment_llm_usage,
+    spawn_write, update_session_model,
 )
 from api.memory import (
     estimate_tokens_incremental, compress_history, build_context_from_session,
@@ -276,6 +277,10 @@ async def chat(websocket: WebSocket, ticker: str):
                 await websocket.close()
                 return
 
+            # History lists the session's model: record the one answering now.
+            if session.get("model") != model_id:
+                await update_session_model(session_id, user_id, model_id)
+
             all_messages = await get_session_messages(session_id)
             conversation_history = build_context_from_session(session, all_messages)
         else:
@@ -416,13 +421,23 @@ async def chat(websocket: WebSocket, ticker: str):
                             "Free trial query served: %s ticker=%s model=%s", ip_key, ticker, model_id
                         )
 
+                    logger.info(
+                        "Chat query: ticker=%s model=%s billing=%s session=%s",
+                        ticker, model_id,
+                        "free_trial" if free_trial else "operator" if operator_paid else "byok",
+                        session_id,
+                    )
+
                     run_callbacks: list = []
                     if operator_paid and user_id:
                         charger = LLMCallCharger(user_id)
                         run_callbacks.append(charger)
                     try:
                         if session_id:
-                            asyncio.create_task(save_message(session_id, "user", user_query))
+                            spawn_write(
+                                save_message(session_id, "user", user_query),
+                                op="save_message:user", session_id=session_id,
+                            )
                         conversation_history.append(HumanMessage(content=user_query))
 
                         full_response = ""
@@ -485,8 +500,9 @@ async def chat(websocket: WebSocket, ticker: str):
                         if full_response:
                             conversation_history.append(AIMessage(content=full_response))
                             if session_id:
-                                asyncio.create_task(
-                                    save_message(session_id, "assistant", full_response)
+                                spawn_write(
+                                    save_message(session_id, "assistant", full_response),
+                                    op="save_message:assistant", session_id=session_id,
                                 )
 
                             tokens_so_far, chars_so_far, messages_counted = (
