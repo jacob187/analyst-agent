@@ -2,7 +2,8 @@
 
 Key design decisions:
 - `llm` is session-scoped so we reuse one LLM instance across all tests in a run.
-  If GOOGLE_API_KEY is missing, every test that depends on `llm` auto-skips.
+  It runs on `EVAL_MODEL_ID`, else the cheapest priced registry model with a
+  provider key set; with no key, every test that depends on `llm` auto-skips.
 - `planner` binds to AAPL because it's a liquid, well-known ticker with reliable
   SEC filings and Yahoo Finance data — ideal for reproducible evals.
 - Dataset loaders are session-scoped and return plain Python dicts from JSON files.
@@ -15,7 +16,7 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 
-# Load .env from project root so GOOGLE_API_KEY is available during tests.
+# Load .env from project root so provider API keys are available during tests.
 # This runs at import time (before any fixtures) so all fixtures see the vars.
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -220,28 +221,51 @@ VALID_TOOLS = SEC_TOOL_NAMES | STOCK_TOOL_NAMES | MARKET_TOOL_NAMES | RESEARCH_T
 # ---------------------------------------------------------------------------
 
 
+def _eval_model():
+    """The registry model evals run on: `EVAL_MODEL_ID`, else the cheapest
+    priced model whose provider has an env key. Skips when there is none."""
+    from agents.model_registry import get_all_models, get_model
+    from api.dependencies import PROVIDER_ENV_VARS
+
+    model_id = os.environ.get("EVAL_MODEL_ID")
+    if model_id:
+        model = get_model(model_id)
+        if model is None:
+            pytest.skip(f"EVAL_MODEL_ID={model_id!r} is not in agents/models.json")
+        return model
+    runnable = [
+        m for m in get_all_models()
+        if m.input_price_per_mtok is not None and os.environ.get(PROVIDER_ENV_VARS[m.provider])
+    ]
+    if not runnable:
+        pytest.skip("no provider API key set for a priced registry model — skipping LLM-dependent test")
+    return min(runnable, key=lambda m: (m.input_price_per_mtok + m.output_price_per_mtok, m.id))
+
+
 @pytest.fixture(scope="session")
 def llm():
-    """Session-scoped Gemini LLM with temperature=0 for determinism.
+    """Session-scoped LLM built by `create_llm` from a cheap registry model.
 
-    Automatically skips the test if GOOGLE_API_KEY is not set. This lets
+    Automatically skips the test when no provider key is set. This lets
     contributors run the `eval_unit` marker tests without any API keys.
     """
-    api_key = os.environ.get("GOOGLE_API_KEY")
+    from functools import partial
+    from unittest.mock import patch
+
+    import langchain.chat_models
+    from agents.llm_factory import create_llm
+    from api.dependencies import PROVIDER_ENV_VARS
+
+    model = _eval_model()
+    api_key = os.environ.get(PROVIDER_ENV_VARS[model.provider])
     if not api_key:
-        pytest.skip("GOOGLE_API_KEY not set — skipping LLM-dependent test")
-
-    from langchain_google_genai import ChatGoogleGenerativeAI
-
-    return ChatGoogleGenerativeAI(
-        model="gemini-3.1-flash-lite-preview",
-        google_api_key=api_key,
-        temperature=0,
-        # The client defaults to no timeout and 6 retries, so one stalled
-        # connection would hang an eval run indefinitely.
-        timeout=60,
-        max_retries=1,
-    )
+        pytest.skip(f"{PROVIDER_ENV_VARS[model.provider]} not set for EVAL_MODEL_ID={model.id!r}")
+    # create_llm takes no client options, and provider clients default to no
+    # timeout and several retries, so one stalled connection would hang an
+    # eval run. Add the limits at the init_chat_model boundary it calls.
+    bounded_init = partial(langchain.chat_models.init_chat_model, timeout=60, max_retries=1)
+    with patch("langchain.chat_models.init_chat_model", bounded_init):
+        return create_llm(model.id, api_key)
 
 
 # ---------------------------------------------------------------------------
@@ -374,3 +398,54 @@ def non_lendable_model():
     from agents.model_registry import get_all_models
 
     return next(m for m in get_all_models() if not m.operator_lendable)
+
+
+# ---------------------------------------------------------------------------
+# Registry-derived model selectors
+#
+# Tests pick models by property, never by id, so changing the default or
+# free-tier model, or adding/removing one in agents/models.json, doesn't break
+# the suite. `model_where` / `other_model` skip the calling test when nothing
+# matches, so call them inside tests, not at import time.
+# ---------------------------------------------------------------------------
+
+
+def models_where(**fields):
+    """Registry models whose ModelDef fields equal every given value."""
+    from agents.model_registry import get_all_models
+
+    return [m for m in get_all_models() if all(getattr(m, k) == v for k, v in fields.items())]
+
+
+def model_where(**fields):
+    """The first registry model matching `fields`; skips the test if none does."""
+    matches = models_where(**fields)
+    if not matches:
+        pytest.skip(f"no registry model with {fields}")
+    return matches[0]
+
+
+def other_model(than, **fields):
+    """A registry model matching `fields` that isn't `than` (a ModelDef or None)."""
+    matches = [m for m in models_where(**fields) if than is None or m.id != than.id]
+    if not matches:
+        pytest.skip(f"no registry model other than {than and than.id} with {fields}")
+    return matches[0]
+
+
+def one_per_provider(**fields):
+    """The first model matching `fields` for each provider that has one (for parametrize)."""
+    firsts = {}
+    for model in models_where(**fields):
+        firsts.setdefault(model.provider, model)
+    return list(firsts.values())
+
+
+def flagged_default_model():
+    """The model flagged `default` in models.json, ignoring DEFAULT_MODEL_ID."""
+    return models_where(default=True)[0]
+
+
+def flagged_free_tier_model():
+    """The model flagged `free_tier` in models.json (ignoring ANON_FREE_MODEL_ID), or None."""
+    return next(iter(models_where(free_tier=True)), None)
