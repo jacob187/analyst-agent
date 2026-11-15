@@ -238,6 +238,31 @@ def render_report(
     )
     pdf.ln(3)
 
+    deltas = summary.get("deltas")  # absent in summary dicts built before the deltas existed
+    if deltas is not None:
+        _heading(pdf, f"Change {deltas['old']} -> {deltas['new']} (means per question)", 12)
+        delta_rows = []
+        for name, field, fmt in (
+            ("LLM calls", "llm_calls", ".1f"), ("Input tokens", "input_tokens", ".0f"),
+            ("Output tokens", "output_tokens", ".0f"), ("Total tokens", "total_tokens", ".0f"),
+            ("Wall time (s)", "latency_s", ".1f"), ("Cost (USD)", "cost_usd", ".4f"),
+        ):
+            c = deltas["means"][field]
+            delta_rows.append([
+                name, _num(c["old"], fmt), _num(c["new"], fmt),
+                "unknown" if c["delta"] is None else format(c["delta"], f"+{fmt}"),
+                "-" if c["pct"] is None else f"{c['pct']:+.1f}%",
+            ])
+        _table(pdf, ["Metric", "Old", "New", "Change", "Change %"], delta_rows, [40, 30, 30, 30, 24])
+        pdf.ln(3)
+
+    _heading(pdf, "Failed questions", 12)
+    for run in summary["runs"]:
+        failed = ", ".join(run.get("failed_ids", [])) or "none"
+        errored = ", ".join(run.get("error_ids", [])) or "none"
+        _paragraph(pdf, f"{run['label']}: no answer - {failed}; error recorded - {errored}")
+    pdf.ln(3)
+
     _heading(pdf, "By category (means per question)", 12)
     cat_rows = []
     for run in summary["runs"]:

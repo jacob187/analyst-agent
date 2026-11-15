@@ -91,10 +91,17 @@ def build_parser() -> argparse.ArgumentParser:
     agreement.add_argument("--out", type=Path, help="write the full agreement report as JSON to this file")
 
     compare_report = sub.add_parser(
-        "compare-report", help="re-render report.pdf from a finished compare-models directory"
+        "compare-report",
+        help="recompute summary.json and report.pdf of a finished compare-models directory from its runs "
+        "and judgements on disk (no model is called)",
     )
     compare_report.add_argument("--dir", type=Path, required=True, help="the compare-models --out directory")
     compare_report.add_argument("--out", type=Path, help="PDF file (default: <dir>/report.pdf)")
+    compare_report.add_argument("--summary-out", type=Path, help="summary JSON file (default: <dir>/summary.json)")
+    compare_report.add_argument(
+        "--chat-cost-multiple", type=float,
+        help="override the cost multiple recorded in the directory's summary.json",
+    )
     return parser
 
 
@@ -215,11 +222,18 @@ def _cmd_compare_models(args: argparse.Namespace) -> int:
 def _cmd_compare_report(args: argparse.Namespace) -> int:
     from evals.benchmark import compare
     from evals.benchmark.compare_report import write_comparison_report
+    from evals.benchmark.runs import write_json
 
-    summary, runs, judgements = compare.load_comparison(args.dir)
+    if args.chat_cost_multiple is not None and args.chat_cost_multiple <= 0:
+        raise BenchmarkError("--chat-cost-multiple must be greater than 0.")
+    # Recomputed from the runs and judgements on disk (no model call), so the current rules apply.
+    summary, runs, judgements = compare.rebuild_comparison(args.dir, args.chat_cost_multiple)
     out = args.out or args.dir / compare.REPORT_FILE
+    summary_out = args.summary_out or args.dir / compare.SUMMARY_FILE
+    write_json(summary_out, summary)
     write_comparison_report(out, summary, runs, judgements)
-    print(f"Wrote {out}")
+    print(comparison_text(summary))
+    print(f"Wrote {summary_out} and {out}")
     return 0
 
 

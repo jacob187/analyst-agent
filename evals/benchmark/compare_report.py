@@ -116,6 +116,7 @@ def render_comparison_report(
 
     reference = summary["reference"]
     models = summary["models"]
+    runs = {m: r for m, r in runs.items() if m in models}  # excluded models have no answers worth showing
     ids = list(models)
     _heading(pdf, "Analyst Agent model comparison", 18)
     as_of = summary["prices_as_of"]
@@ -136,16 +137,29 @@ def render_comparison_report(
         _paragraph(pdf, f"WARNING: {warning}", style="B")
     pdf.ln(2)
 
+    excluded = summary.get("excluded_models", [])  # summary.json from before exclusions: absent
+    if excluded:
+        _heading(pdf, "Excluded models (no usable run)", 12)
+        for entry in excluded:
+            _paragraph(pdf, f"{entry['model_id']}: {entry['reason']}")
+        pdf.ln(2)
+
     _heading(pdf, "Per-model summary (means per question)", 12)
     rows = []
     for model_id, m in models.items():
         vs, means, q = m["vs_reference"], m["means"], m["questions"]
+        standing = m.get("reference_standing")  # absent in summary.json from before the derived standing
+        ref_errors = (
+            "-" if standing is None
+            else "unknown" if standing["unique_factual_errors"] is None
+            else f"{standing['unique_factual_errors']} (worst pairing)"
+        )
         rows.append([
             model_id + (" (ref)" if m["is_reference"] else ""),
             f"{q['answered']}/{q['selected']}",
             "-" if vs is None else f"{vs['wins']}/{vs['ties']}/{vs['losses'] + vs['unanswered_by_model']}",
             "-" if vs is None or vs["win_or_tie_rate"] is None else f"{vs['win_or_tie_rate']:.0%}",
-            "-" if vs is None else f"{vs['unique_factual_errors']} / {vs['reference_unique_factual_errors']}",
+            ref_errors if vs is None else f"{vs['unique_factual_errors']} / {vs['reference_unique_factual_errors']}",
             "-" if vs is None else str(vs["judge_errors"]),
             _num(means["llm_calls"], ".1f"), _num(means["total_tokens"], ".0f"),
             _num(means["latency_s"], ".1f"), _cost_text(means["cost_usd"]),

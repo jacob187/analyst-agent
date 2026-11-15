@@ -8,6 +8,7 @@ import json
 
 import pytest
 
+from evals.benchmark.common import BenchmarkError
 from evals.benchmark.compare_report import render_comparison_report, representative_ids
 from evals.benchmark.compare_summary import (
     MIN_WIN_TIE_RATE,
@@ -220,10 +221,15 @@ class TestRecommendations:
         summary, _, _ = await build(tmp_path, {"cheap-m": dict(pricing=CHEAP, answers=good(*IDS))}, decide=_raise)
         vs = summary["models"]["cheap-m"]["vs_reference"]
         assert vs["judge_errors"] == 5 and vs["judged"] == 0 and vs["win_score"] is None
-        for key in ("free_trial", "chat_default", "filing_analysis"):
+        # The reference stays the baseline of the two win-score rules ...
+        for key in ("chat_default", "filing_analysis"):
             rec = summary["recommendations"][key]
             assert rec["model_id"] == "ref-m"  # the only model with usable data
             assert "cheap-m (" in rec["rationale"] and "judge errors" in rec["rationale"]
+        # ... but with no clean judged pairing nothing shows it is free of unique errors.
+        rec = summary["recommendations"]["free_trial"]
+        assert rec["model_id"] is None
+        assert "cheap-m (" in rec["rationale"] and "ref-m (reference" in rec["rationale"]
 
     async def test_models_with_unknown_cost_are_excluded_and_named(self, tmp_path):
         summary, _, _ = await build(tmp_path, {"unp-m": dict(pricing=UNPRICED, answers=good(*IDS))})
@@ -251,6 +257,165 @@ class TestRecommendations:
             assert rec["model_id"] is None, key
             assert rec["rationale"].startswith("Insufficient data:"), key
         assert "none - Insufficient data" in comparison_text(summary)
+
+
+class TestReferenceStanding:
+    """The reference's own record comes from the judgements, not from a hard-coded perfect score."""
+
+    async def test_a_reference_with_unique_factual_errors_is_not_the_free_trial_even_when_cheapest(self, tmp_path):
+        summary, _, _ = await build(
+            tmp_path,
+            {"cheap-m": dict(pricing=CHEAP)},  # ties everywhere except where the reference is WRONG
+            reference={"pricing": CHEAPEST, "answers": {"q-risk": "WRONG claim", "q-news": "WRONG number"}},
+        )
+        ref, cheap = summary["models"]["ref-m"], summary["models"]["cheap-m"]
+        assert ref["means"]["cost_usd"] < cheap["means"]["cost_usd"]
+        assert ref["reference_standing"]["unique_factual_errors"] == 2
+        rec = summary["recommendations"]["free_trial"]
+        assert rec["model_id"] == "cheap-m"
+        assert "ref-m" in rec["rationale"] and "2 unique factual errors" in rec["rationale"]
+
+    async def test_a_clean_reference_can_still_be_the_free_trial_when_cheapest(self, tmp_path):
+        summary, _, _ = await build(
+            tmp_path, {"cheap-m": dict(pricing=CHEAP)}, reference={"pricing": CHEAPEST}
+        )
+        assert summary["models"]["ref-m"]["reference_standing"]["unique_factual_errors"] == 0
+        assert summary["recommendations"]["free_trial"]["model_id"] == "ref-m"
+
+    async def test_one_flawed_answer_is_not_multiplied_by_the_number_of_pairings(self, tmp_path):
+        summary, _, _ = await build(
+            tmp_path,
+            {"a-m": dict(pricing=CHEAP), "b-m": dict(pricing=CHEAP), "c-m": dict(pricing=CHEAP)},
+            reference={"answers": {"q-risk": "WRONG claim"}},
+        )
+        standing = summary["models"]["ref-m"]["reference_standing"]
+        assert standing["pairings_used"] == 3
+        assert standing["unique_factual_errors"] == 1  # the worst pairing, not 1 + 1 + 1
+        assert [p["unique_factual_errors"] for p in standing["pairings"]] == [1, 1, 1]
+
+    async def test_the_reverse_record_is_each_candidates_record_seen_from_the_reference(self, tmp_path):
+        summary, _, _ = await build(
+            tmp_path,
+            {
+                "drop-m": dict(pricing=CHEAP, answers={"q-tech": None, "q-risk": "GOOD risk"}),
+                "pricey-m": dict(pricing=PRICEY, answers=good("q-risk", "q-multi")),
+            },
+            reference={"answers": {"q-news": "GOOD news"}},
+        )
+        by_model = {p["model_id"]: p for p in summary["models"]["ref-m"]["reference_standing"]["pairings"]}
+        # drop-m: loses q-news, wins q-risk, fails q-tech (the reference answered it), ties the other two.
+        assert (by_model["drop-m"]["wins"], by_model["drop-m"]["ties"], by_model["drop-m"]["losses"]) == (2, 2, 1)
+        assert (by_model["pricey-m"]["wins"], by_model["pricey-m"]["ties"], by_model["pricey-m"]["losses"]) == (1, 2, 2)
+
+    async def test_the_reference_stays_the_baseline_for_the_win_score_rules(self, tmp_path):
+        # pricey-m beats the reference but costs far more than the cap allows; cheap-m loses a
+        # question to it. Pooling the reference's reverse record over both opponents would put it
+        # below cheap-m and hand chat_default to a model that is worse than the reference.
+        summary, _, _ = await build(
+            tmp_path,
+            {
+                "cheap-m": dict(pricing=CHEAP),
+                "pricey-m": dict(pricing=PRICEY, answers=good(*IDS)),
+            },
+            reference={"answers": good("q-risk")},
+        )
+        assert summary["models"]["cheap-m"]["vs_reference"]["win_score"] == pytest.approx(0.4)
+        assert summary["models"]["pricey-m"]["vs_reference"]["win_score"] == pytest.approx(0.9)
+        assert summary["recommendations"]["chat_default"]["model_id"] == "ref-m"
+        assert summary["recommendations"]["filing_analysis"]["model_id"] == "ref-m"
+
+    async def test_unique_errors_break_a_win_score_tie_against_the_reference(self, tmp_path):
+        summary, _, _ = await build(
+            tmp_path,
+            # Wins q-tech, loses q-risk, ties the rest: win score 0.5, the same as the reference.
+            {"cheap-m": dict(pricing=CHEAP, answers={"q-tech": "GOOD tech"})},
+            reference={"answers": {"q-risk": "GOOD risk", "q-news": "WRONG number"}},
+        )
+        assert summary["models"]["cheap-m"]["vs_reference"]["win_score"] == pytest.approx(0.5)
+        assert summary["models"]["ref-m"]["reference_standing"]["unique_factual_errors"] == 1
+        assert summary["recommendations"]["chat_default"]["model_id"] == "cheap-m"
+
+    async def test_category_scope_has_its_own_reference_standing(self, tmp_path):
+        summary, _, _ = await build(
+            tmp_path,
+            {"cheap-m": dict(pricing=CHEAP)},
+            reference={"answers": {"q-news": "WRONG number"}},
+        )
+        by_cat = summary["models"]["ref-m"]["by_category"]
+        assert by_cat["market_news"]["reference_standing"]["unique_factual_errors"] == 1
+        assert by_cat["filing_lookup"]["reference_standing"]["unique_factual_errors"] == 0
+
+    async def test_standing_is_unknown_when_no_pairing_was_judged(self, tmp_path):
+        summary, _, _ = await build(tmp_path, {"cheap-m": dict(pricing=CHEAP)}, decide=_raise)
+        standing = summary["models"]["ref-m"]["reference_standing"]
+        assert standing["pairings_used"] == 0 and standing["unique_factual_errors"] is None
+
+    async def test_the_text_digest_shows_the_reference_record(self, tmp_path):
+        summary, _, _ = await build(
+            tmp_path, {"cheap-m": dict(pricing=CHEAP)}, reference={"answers": {"q-risk": "WRONG claim"}}
+        )
+        assert "reference (unique errors 1, worst of 1 pairing)" in comparison_text(summary)
+
+
+class TestUnjudgedModel:
+    async def test_a_model_without_a_judgement_is_shown_as_not_judged_and_left_out_of_the_rules(self, tmp_path):
+        ref = load_run(write_run(tmp_path, "ref", model_id="ref-m", pricing=PRICED))
+        other = load_run(write_run(tmp_path, "other", model_id="other-m", pricing=CHEAPEST))
+        summary = build_comparison_summary(
+            ref, [other], {}, graph="arch-x", judge_model="judge-x",
+            run_dirs={"ref-m": "runs/ref-m", "other-m": "runs/other-m"},
+        )
+        text = comparison_text(summary)
+        assert "other-m: not judged" in text
+        assert "other-m (no judged questions)" in summary["recommendations"]["chat_default"]["rationale"]
+
+
+class TestExcludedModels:
+    """A model whose run failed outright is reported as excluded, never silently left out."""
+
+    async def test_a_run_where_every_question_failed_is_excluded_with_the_reason(self, tmp_path):
+        errors = ["RateLimitError: Error code: 429 - no credits remaining\nTraceback (most recent call last):"]
+        summary, _, _ = await build(tmp_path, {
+            "cheap-m": dict(pricing=CHEAP, answers=good(*IDS)),
+            "dead-m": dict(pricing=CHEAPEST, answers={qid: None for qid in IDS}, errors=errors),
+        })
+        (entry,) = summary["excluded_models"]
+        assert entry["model_id"] == "dead-m" and entry["run_dir"] == "runs/dead-m"
+        assert "all 5 questions failed" in entry["reason"] and "RateLimitError" in entry["reason"]
+        assert "Traceback" not in entry["reason"]  # first line only
+        assert "dead-m" not in summary["models"]
+        assert any("dead-m" in w and "excluded" in w for w in summary["warnings"])
+        assert "dead-m" in comparison_text(summary) and "WARNING" in comparison_text(summary)
+        assert summary["recommendations"]["free_trial"]["model_id"] == "cheap-m"
+
+    async def test_a_partly_failed_run_stays_in_and_counts_its_losses(self, tmp_path):
+        summary, _, _ = await build(tmp_path, {"drop-m": dict(pricing=CHEAP, answers={"q-tech": None})})
+        assert summary["excluded_models"] == []
+        assert "drop-m" in summary["models"]
+
+    async def test_a_run_that_could_not_be_loaded_is_excluded_with_the_given_reason(self, tmp_path):
+        ref = load_run(write_run(tmp_path, "ref", model_id="ref-m", pricing=PRICED))
+        summary = build_comparison_summary(
+            ref, [], {}, graph="arch-x", judge_model="judge-x", run_dirs={"ref-m": "runs/ref-m"},
+            excluded={"gone-m": "run directory missing or unreadable"},
+        )
+        (entry,) = summary["excluded_models"]
+        assert entry == {"model_id": "gone-m", "run_dir": None, "reason": "run directory missing or unreadable"}
+        assert any("gone-m" in w for w in summary["warnings"])
+
+    async def test_a_reference_that_answered_nothing_cannot_anchor_a_comparison(self, tmp_path):
+        ref = load_run(write_run(tmp_path, "ref", model_id="ref-m", answers={qid: None for qid in IDS}))
+        with pytest.raises(BenchmarkError, match="reference run ref-m"):
+            build_comparison_summary(
+                ref, [], {}, graph="arch-x", judge_model="judge-x", run_dirs={"ref-m": "runs/ref-m"}
+            )
+
+    async def test_the_pdf_lists_the_excluded_model_and_its_reason(self, tmp_path):
+        summary, runs, judgements = await build(tmp_path, {
+            "dead-m": dict(pricing=CHEAP, answers={qid: None for qid in IDS}, errors=["boom: out of credits"]),
+        })
+        text = pdf_text_blob(render_comparison_report(summary, runs, judgements))
+        assert "dead-m" in text and "boom: out of credits" in text
 
 
 class TestComparisonReport:
