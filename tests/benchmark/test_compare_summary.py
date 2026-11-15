@@ -357,6 +357,19 @@ class TestReferenceStanding:
         assert "reference (unique errors 1, worst of 1 pairing)" in comparison_text(summary)
 
 
+class TestUnjudgedModel:
+    async def test_a_model_without_a_judgement_is_shown_as_not_judged_and_left_out_of_the_rules(self, tmp_path):
+        ref = load_run(write_run(tmp_path, "ref", model_id="ref-m", pricing=PRICED))
+        other = load_run(write_run(tmp_path, "other", model_id="other-m", pricing=CHEAPEST))
+        summary = build_comparison_summary(
+            ref, [other], {}, graph="arch-x", judge_model="judge-x",
+            run_dirs={"ref-m": "runs/ref-m", "other-m": "runs/other-m"},
+        )
+        text = comparison_text(summary)
+        assert "other-m: not judged" in text
+        assert "other-m (no judged questions)" in summary["recommendations"]["chat_default"]["rationale"]
+
+
 class TestExcludedModels:
     """A model whose run failed outright is reported as excluded, never silently left out."""
 

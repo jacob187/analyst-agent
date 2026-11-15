@@ -421,9 +421,12 @@ def comparison_text(summary: dict[str, Any]) -> str:
     lines = [f"Reference: {summary['reference']} (judge: {summary['judge_model']})"]
     for model_id, m in summary["models"].items():
         vs = m["vs_reference"]
-        record = f"W/T/L {vs['wins']}/{vs['ties']}/{vs['losses']}, unique errors {vs['unique_factual_errors']}" if vs else (
-            _reference_record(m["reference_standing"])
-        )
+        if m["is_reference"]:
+            record = _reference_record(m["reference_standing"])
+        elif vs is None:
+            record = "not judged"
+        else:
+            record = f"W/T/L {vs['wins']}/{vs['ties']}/{vs['losses']}, unique errors {vs['unique_factual_errors']}"
         lines.append(
             f"  {model_id}: {record}; mean {m['means']['llm_calls'] or 0:.1f} LLM calls, "
             f"{m['means']['total_tokens'] or 0:.0f} tokens, {m['means']['latency_s'] or 0:.1f}s, "
