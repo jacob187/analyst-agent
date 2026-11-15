@@ -446,8 +446,8 @@ class TestCaching:
             with patch.object(service, "_get_market_regime", return_value={"error": "skip"}):
                 with patch.object(service, "_gather_news", return_value={"AAPL": []}):
                     with patch.object(service, "_synthesize", return_value=sample_result):
-                        service.generate(["AAPL"], user_id="user_a", model_id="gemini-3-pro")
-                        service.generate(["AAPL"], user_id="user_a", model_id="gpt-4.1")
+                        service.generate(["AAPL"], user_id="user_a", model_id="model-a")
+                        service.generate(["AAPL"], user_id="user_a", model_id="model-b")
                         assert service._synthesize.call_count == 2
 
 

@@ -7,7 +7,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import api.db as db_module
-from agents.model_registry import get_free_tier_model
+from agents.model_registry import get_all_models, get_free_tier_model
 from api.main import app
 from api import dependencies
 from api.routes import models as models_route
@@ -53,10 +53,9 @@ class TestListModels:
         assert len(defaults) == 1
 
     @pytest.mark.eval_unit
-    def test_known_model_present(self):
+    def test_lists_every_registry_model(self):
         models = client.get("/models").json()["models"]
-        ids = {m["id"] for m in models}
-        assert "gemini-3.6-flash" in ids
+        assert [m["id"] for m in models] == [m.id for m in get_all_models()]
 
 
 class TestEnvKeys:

@@ -171,8 +171,8 @@ class TestJudgeCli:
     def test_judge_command_prices_the_judge_with_the_registry_model_and_prints_its_cost(
         self, monkeypatch, tmp_path, capsys
     ):
-        model = get_free_tier_model()
         monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
+        model = get_free_tier_model()
         monkeypatch.setattr("evals.benchmark.cli.prepare_environment", lambda: None)
         monkeypatch.setenv(provider_env_var(model), "fake-key-value-0123")
         monkeypatch.setattr("langchain.chat_models.init_chat_model", lambda spec, **kw: FakeJudge(usage=(1000, 100)))
@@ -190,8 +190,8 @@ class TestJudgeCli:
         assert f"Judge usage: 5000 in / 500 out tokens, cost ${expected:.4f}" in capsys.readouterr().out
 
     def test_a_judge_that_reports_no_usage_prints_usage_not_recorded(self, monkeypatch, tmp_path, capsys):
-        model = get_free_tier_model()
         monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
+        model = get_free_tier_model()
         monkeypatch.setattr("evals.benchmark.cli.prepare_environment", lambda: None)
         monkeypatch.setenv(provider_env_var(model), "fake-key-value-0123")
         monkeypatch.setattr("langchain.chat_models.init_chat_model", lambda spec, **kw: FakeJudge())

@@ -25,13 +25,14 @@ from starlette.websockets import WebSocketDisconnect
 
 from agents.model_registry import get_all_models, get_default_model, get_free_tier_model, get_model
 from api import dependencies
-from api.dependencies import PROVIDER_ENV_VARS
+from api.dependencies import _PROVIDER_KEY_FIELDS, PROVIDER_ENV_VARS
 from api.main import app
 from api.routes import chat
 from tests.conftest import (
     byok_auth_field,
     clear_operator_keys,
     non_lendable_model,
+    other_model,
     set_operator_key,
 )
 from tests.test_dependencies import (  # noqa: F401  (clerk_env / rsa_keypair are fixtures)
@@ -210,9 +211,7 @@ def _row_count(db_path, table):
 # resolves; no user_id → anonymous.
 _BYOK_AUTH = {
     "type": "auth",
-    "google_api_key": "byok-key",
-    "openai_api_key": "byok-key",
-    "anthropic_api_key": "byok-key",
+    **{field: "byok-key" for field in _PROVIDER_KEY_FIELDS.values()},
 }
 
 
@@ -363,11 +362,14 @@ class TestTokenDerivedIdentity:
         priv, _ = rsa_keypair
         auth = {**_BYOK_AUTH, "clerk_session_token": _make_token(priv)}
 
-        first = self._connect(client, {**auth, "model_id": "gemini-3.6-flash"})
-        second = self._connect(client, {**auth, "model_id": "claude-haiku-5-5"})
+        old = get_default_model()
+        new = other_model(than=old)
+
+        first = self._connect(client, {**auth, "model_id": old.id})
+        second = self._connect(client, {**auth, "model_id": new.id})
 
         assert first["session_id"] == second["session_id"]
-        assert self._stored_model(temp_db, second["session_id"]) == "claude-haiku-5-5"
+        assert self._stored_model(temp_db, second["session_id"]) == new.id
 
     def test_resume_by_session_id_records_the_new_model(
         self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
@@ -376,13 +378,16 @@ class TestTokenDerivedIdentity:
         priv, _ = rsa_keypair
         auth = {**_BYOK_AUTH, "clerk_session_token": _make_token(priv)}
 
-        first = self._connect(client, {**auth, "model_id": "gemini-3.6-flash"})
+        old = get_default_model()
+        new = other_model(than=old)
+
+        first = self._connect(client, {**auth, "model_id": old.id})
         second = self._connect(client, {
-            **auth, "model_id": "claude-haiku-5-5", "session_id": first["session_id"],
+            **auth, "model_id": new.id, "session_id": first["session_id"],
         })
 
         assert second["session_id"] == first["session_id"]
-        assert self._stored_model(temp_db, first["session_id"]) == "claude-haiku-5-5"
+        assert self._stored_model(temp_db, first["session_id"]) == new.id
 
     def test_foreign_session_id_does_not_change_its_model(
         self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
@@ -391,19 +396,20 @@ class TestTokenDerivedIdentity:
 
         _patch_agent(monkeypatch)
         priv, _ = rsa_keypair
+        old = get_default_model()
         foreign = asyncio.run(
-            db_module.create_session("AAPL", "user_someoneElse", model="gemini-3.6-flash")
+            db_module.create_session("AAPL", "user_someoneElse", model=old.id)
         )
         auth = {
             **_BYOK_AUTH, "clerk_session_token": _make_token(priv),
-            "model_id": "claude-haiku-5-5", "session_id": foreign,
+            "model_id": other_model(than=old).id, "session_id": foreign,
         }
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
             ws.send_text(json.dumps(auth))
             assert ws.receive_json() == {"type": "error", "message": "Invalid session."}
 
-        assert self._stored_model(temp_db, foreign) == "gemini-3.6-flash"
+        assert self._stored_model(temp_db, foreign) == old.id
 
     def test_user_id_disagreeing_with_token_is_rejected(
         self, client, temp_db, clerk_env, rsa_keypair
@@ -1260,7 +1266,8 @@ def _query_logs(caplog):
 class TestQueryLog:
     def test_byok_query_logs_model_and_billing(self, client, temp_db, monkeypatch, caplog):
         _patch_agent(monkeypatch)
-        auth = {**_BYOK_AUTH, "model_id": "claude-haiku-5-5"}
+        asked = other_model(than=get_default_model())
+        auth = {**_BYOK_AUTH, "model_id": asked.id}
 
         with caplog.at_level(logging.INFO, logger="api.routes.chat"):
             with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -1271,7 +1278,7 @@ class TestQueryLog:
 
         [record] = _query_logs(caplog)
         message = record.getMessage()
-        assert "model=claude-haiku-5-5" in message
+        assert f"model={asked.id}" in message
         assert "ticker=AAPL" in message
         assert "billing=byok" in message
         assert "session=None" in message

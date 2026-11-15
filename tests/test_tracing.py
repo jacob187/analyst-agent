@@ -484,7 +484,7 @@ class TestNoSecretsInSpans:
 
         monkeypatch.setattr(ChatOpenAI, "_generate", _next)
         monkeypatch.setattr(ChatOpenAI, "_agenerate", _anext)
-        llm = ChatOpenAI(model="gpt-4o-mini", api_key=_KEY_SENTINEL)
+        llm = ChatOpenAI(model="fake-model", api_key=_KEY_SENTINEL)
         _wire_chat(monkeypatch, llm=llm)
         with capture_spans() as captured:
             _ask(client, auth)

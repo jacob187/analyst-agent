@@ -14,7 +14,7 @@ import sys
 import pytest
 import yaml
 
-from agents.model_registry import get_all_models, get_free_tier_model
+from agents.model_registry import get_all_models
 from api.dependencies import PROVIDER_ENV_VARS
 from evals.benchmark.architectures import ARCHITECTURES
 from evals.benchmark.cli import main
@@ -32,10 +32,12 @@ from evals.benchmark.compare import (
 from evals.benchmark.judge import judge_runs
 from evals.benchmark.runs import load_judgement, load_run, write_model
 from tests.benchmark.helpers import FakeAgent, FakeJudge, pdf_text_blob, write_run
+from tests.conftest import flagged_free_tier_model
 
 pytestmark = pytest.mark.eval_unit
 
-FREE = get_free_tier_model()
+# The `env` fixture drops ANON_FREE_MODEL_ID, so the command sees the flagged model.
+FREE = flagged_free_tier_model()
 ALL = get_all_models()
 SAME_PROVIDER = [m for m in ALL if m.provider == FREE.provider and m.id != FREE.id]
 PAID = next(m for m in SAME_PROVIDER if m.input_price_per_mtok is not None)
