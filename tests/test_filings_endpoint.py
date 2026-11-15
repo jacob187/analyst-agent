@@ -154,7 +154,7 @@ def mock_filings_deps():
     ):
         # Model registry
         model = MagicMock()
-        model.id = "gemini-2.5-flash"
+        model.id = "fake-model"
         model.provider = "google_genai"
         mock_get_model.return_value = model
         mock_default_model.return_value = model

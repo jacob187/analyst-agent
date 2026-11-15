@@ -21,7 +21,14 @@ from api.dependencies import (
     resolve_ws_identity,
     resolve_ws_keys,
 )
-from tests.conftest import clear_operator_keys, set_operator_key
+from tests.conftest import (
+    byok_auth_field,
+    clear_operator_keys,
+    model_where,
+    one_per_provider,
+    other_model,
+    set_operator_key,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -60,18 +67,19 @@ class TestGetApiKeys:
 
     @pytest.mark.eval_unit
     async def test_all_providers_resolved(self):
+        requested = other_model(than=get_default_model()).id
         result = await get_api_keys(
             x_google_api_key="g",
             x_openai_api_key="o",
             x_anthropic_api_key="a",
             x_tavily_api_key="tav",
-            x_model_id="gemini-3.6-flash",
+            x_model_id=requested,
         )
         assert result.google_api_key == "g"
         assert result.openai_api_key == "o"
         assert result.anthropic_api_key == "a"
         assert result.tavily_api_key == "tav"
-        assert result.model_id == "gemini-3.6-flash"
+        assert result.model_id == requested
 
     @pytest.mark.eval_unit
     @patch.dict("os.environ", {}, clear=True)
@@ -83,19 +91,20 @@ class TestGetApiKeys:
 class TestResolveWsKeys:
     @pytest.mark.eval_unit
     def test_resolves_from_auth_message(self):
+        requested = other_model(than=get_default_model()).id
         auth = {
             "google_api_key": "g",
             "openai_api_key": "o",
             "anthropic_api_key": "a",
             "tavily_api_key": "tav",
-            "model_id": "gpt-4.1-mini",
+            "model_id": requested,
         }
         result = resolve_ws_keys(auth)
         assert result.google_api_key == "g"
         assert result.openai_api_key == "o"
         assert result.anthropic_api_key == "a"
         assert result.tavily_api_key == "tav"
-        assert result.model_id == "gpt-4.1-mini"
+        assert result.model_id == requested
 
     @pytest.mark.eval_unit
     @patch.dict("os.environ", {"GOOGLE_API_KEY": "env-g"})
@@ -985,51 +994,60 @@ class TestClerkVerificationOffLoop:
             asyncio.run(db_module.close_db())
 
 
+_NON_LENDABLE_PER_PROVIDER = one_per_provider(operator_lendable=False)
+
+
+def _by_provider(model):
+    return model.provider
+
+
 class TestKeyForModel:
     """The operator's env key pays only for operator_lendable models (when
     Clerk is enabled); a caller's own key runs any model."""
 
-    @staticmethod
-    def _models():
-        from agents.model_registry import get_model
-        return get_model("gemini-3.6-flash"), get_model("gemini-3.1-pro-preview")
-
     @pytest.mark.eval_unit
-    def test_env_key_withheld_for_non_lendable_model(self, clerk_env, rsa_keypair, monkeypatch):
-        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+    @pytest.mark.parametrize("non_lendable", _NON_LENDABLE_PER_PROVIDER, ids=_by_provider)
+    def test_env_key_withheld_for_non_lendable_model(
+        self, clerk_env, rsa_keypair, monkeypatch, non_lendable
+    ):
+        lendable = model_where(operator_lendable=True)
+        set_operator_key(monkeypatch, lendable, "env-key")
+        set_operator_key(monkeypatch, non_lendable, "env-key")
         priv, _ = rsa_keypair
         keys = resolve_ws_keys({"clerk_session_token": _make_token(priv)})
-        lendable, non_lendable = self._models()
         assert keys.user_id == TEST_SUB
         assert keys.key_for_model(lendable) == "env-key"
         assert keys.key_for_model(non_lendable) is None
 
     @pytest.mark.eval_unit
-    def test_own_key_runs_non_lendable_model(self, clerk_env, rsa_keypair, monkeypatch):
-        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+    @pytest.mark.parametrize("non_lendable", _NON_LENDABLE_PER_PROVIDER, ids=_by_provider)
+    def test_own_key_runs_non_lendable_model(
+        self, clerk_env, rsa_keypair, monkeypatch, non_lendable
+    ):
+        set_operator_key(monkeypatch, non_lendable, "env-key")
         priv, _ = rsa_keypair
-        keys = resolve_ws_keys(
-            {"clerk_session_token": _make_token(priv), "google_api_key": "user-key"}
-        )
-        _, non_lendable = self._models()
+        keys = resolve_ws_keys({
+            "clerk_session_token": _make_token(priv),
+            **byok_auth_field(non_lendable.provider, "user-key"),
+        })
         assert keys.key_for_model(non_lendable) == "user-key"
 
     @pytest.mark.eval_unit
-    def test_self_host_env_key_runs_any_model(self, monkeypatch):
+    @pytest.mark.parametrize("non_lendable", _NON_LENDABLE_PER_PROVIDER, ids=_by_provider)
+    def test_self_host_env_key_runs_any_model(self, monkeypatch, non_lendable):
         # Clerk unconfigured (conftest default): the env keys are the
         # operator's own, so the allowlist doesn't apply.
-        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        set_operator_key(monkeypatch, non_lendable, "env-key")
         keys = resolve_ws_keys({})
-        _, non_lendable = self._models()
         assert keys.key_for_model(non_lendable) == "env-key"
 
     @pytest.mark.eval_unit
-    def test_auth_disabled_env_key_runs_any_model(self, monkeypatch):
+    @pytest.mark.parametrize("non_lendable", _NON_LENDABLE_PER_PROVIDER, ids=_by_provider)
+    def test_auth_disabled_env_key_runs_any_model(self, monkeypatch, non_lendable):
         monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
         monkeypatch.setenv("DISABLE_AUTH", "true")
-        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        set_operator_key(monkeypatch, non_lendable, "env-key")
         keys = resolve_ws_keys({})
-        _, non_lendable = self._models()
         assert keys.key_for_model(non_lendable) == "env-key"
 
 
@@ -1046,8 +1064,9 @@ class TestFreeTrial:
 
     @pytest.mark.eval_unit
     def test_respects_env_override(self, monkeypatch):
-        monkeypatch.setenv("ANON_FREE_MODEL_ID", "claude-sonnet-5")
-        assert free_trial_model_id() == "claude-sonnet-5"
+        override = other_model(than=get_free_tier_model())
+        monkeypatch.setenv("ANON_FREE_MODEL_ID", override.id)
+        assert free_trial_model_id() == override.id
 
     @pytest.mark.eval_unit
     def test_trial_disabled_when_no_model_flagged(self, monkeypatch):

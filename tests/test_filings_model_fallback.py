@@ -1,8 +1,8 @@
 """Filings endpoints pick a model the caller can actually run.
 
-A hosted deploy whose operator holds only a Google key must still generate
-analyses for signed-in users on a lendable Google model, even though the
-registry default is Anthropic. Real temp SQLite, the real SECDataRetrieval over
+A hosted deploy whose operator holds a key only for a provider other than the
+registry default's must still generate analyses for signed-in users on a
+lendable model of that provider. The providers are picked from the registry. Real temp SQLite, the real SECDataRetrieval over
 an in-memory EDGAR (tests/sec_fakes.py) and a fake chat model at the
 `create_llm` boundary that records which model id each analysis ran on.
 """
@@ -14,9 +14,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 import api.db as db_module
-from agents.model_registry import get_all_models, get_default_model, get_model
+from agents.model_registry import get_all_models, get_model
 from agents.sec_workflow import analysis_cache
+from api.dependencies import PROVIDER_ENV_VARS
 from api.main import app
+from tests.conftest import byok_header, clear_operator_keys, flagged_default_model, models_where
 from tests.sec_fakes import CountingChatModel, FakeEdgar, eightk, tenk, tenq
 from tests.test_dependencies import (  # noqa: F401  (clerk_env / rsa_keypair are fixtures)
     _make_token,
@@ -32,12 +34,31 @@ TENK_RISK = "TENK-RISK: supply chain concentration and antitrust exposure."
 TENQ_RISK = "There have been no material changes to the risk factors previously disclosed."
 
 
+def _operator_provider():
+    """A non-default provider with both lendable and non-lendable models."""
+    default_provider = flagged_default_model().provider
+    for provider in sorted({m.provider for m in get_all_models()} - {default_provider}):
+        lendable = {m.operator_lendable for m in models_where(provider=provider)}
+        if lendable == {True, False}:
+            return provider
+    pytest.skip(
+        "no provider besides the default's has both lendable and non-lendable models",
+        allow_module_level=True,
+    )
+
+
+# The only provider the operator holds a key for, and another one a caller brings.
+OPERATOR_PROVIDER = _operator_provider()
+OPERATOR_ENV = PROVIDER_ENV_VARS[OPERATOR_PROVIDER]
+BYOK_PROVIDER = next(p for p in PROVIDER_ENV_VARS if p != OPERATOR_PROVIDER)
+
+
 @pytest.fixture
 def filings_env(tmp_path, monkeypatch):
     """Temp DB + fake EDGAR + a recording fake LLM. Yields the list of
     `(model_id, api_key)` pairs `create_llm` was called with."""
-    for var in ("GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEFAULT_MODEL_ID"):
-        monkeypatch.delenv(var, raising=False)
+    clear_operator_keys(monkeypatch)
+    monkeypatch.delenv("DEFAULT_MODEL_ID", raising=False)
     monkeypatch.delenv("FILING_FRESHNESS_TTL_SECONDS", raising=False)
 
     monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "filings.db")
@@ -101,26 +122,17 @@ def _section_statuses(events) -> set[str]:
     }
 
 
-def _google_model(*, lendable: bool):
-    return next(
-        m for m in get_all_models()
-        if m.provider == "google_genai" and m.operator_lendable is lendable
-    )
-
-
-def test_registry_default_is_not_runnable_on_a_google_only_operator():
-    # The premise of the fallback: the default's provider isn't the one the
-    # operator has a key for.
-    assert get_default_model().provider != "google_genai"
+def _operator_model(*, lendable: bool):
+    return models_where(provider=OPERATOR_PROVIDER, operator_lendable=lendable)[0]
 
 
 # ── AC1: no explicit model → a lendable model the operator key can run ───────
 
 
-def test_signed_in_gets_a_lendable_google_model_when_only_google_is_configured(
+def test_signed_in_gets_a_lendable_model_of_the_only_configured_provider(
     client, filings_env, signed_in, monkeypatch,
 ):
-    monkeypatch.setenv("GOOGLE_API_KEY", "env-google")
+    monkeypatch.setenv(OPERATOR_ENV, "env-key")
 
     resp = client.get(PATH, headers=signed_in)
 
@@ -130,17 +142,17 @@ def test_signed_in_gets_a_lendable_google_model_when_only_google_is_configured(
     assert filings_env, "no analysis ran"
     for model_id, api_key in filings_env:
         model = get_model(model_id)
-        assert model.provider == "google_genai"
+        assert model.provider == OPERATOR_PROVIDER
         assert model.operator_lendable is True
-        assert api_key == "env-google"
+        assert api_key == "env-key"
     # The operator paid: one budget unit per generated section.
     assert _usage(USER) == len(filings_env)
 
 
-def test_stream_gets_a_lendable_google_model_when_only_google_is_configured(
+def test_stream_gets_a_lendable_model_of_the_only_configured_provider(
     client, filings_env, signed_in, monkeypatch,
 ):
-    monkeypatch.setenv("GOOGLE_API_KEY", "env-google")
+    monkeypatch.setenv(OPERATOR_ENV, "env-key")
 
     events = _stream(client, signed_in)
 
@@ -148,7 +160,7 @@ def test_stream_gets_a_lendable_google_model_when_only_google_is_configured(
     assert "done" in statuses
     assert "needs_key" not in statuses
     assert filings_env
-    assert {get_model(m).provider for m, _ in filings_env} == {"google_genai"}
+    assert {get_model(m).provider for m, _ in filings_env} == {OPERATOR_PROVIDER}
     assert all(get_model(m).operator_lendable for m, _ in filings_env)
     assert _usage(USER) == len(filings_env)
 
@@ -158,23 +170,23 @@ def test_env_default_model_id_does_not_count_as_an_explicit_request(
 ):
     # DEFAULT_MODEL_ID names a model the operator has no key for; with no
     # X-Model-Id the caller still lands on a model they can run.
-    monkeypatch.setenv("GOOGLE_API_KEY", "env-google")
-    monkeypatch.setenv("DEFAULT_MODEL_ID", get_default_model().id)
+    monkeypatch.setenv(OPERATOR_ENV, "env-key")
+    monkeypatch.setenv("DEFAULT_MODEL_ID", flagged_default_model().id)
 
     assert client.get(PATH, headers=signed_in).status_code == 200
     assert filings_env
-    assert {get_model(m).provider for m, _ in filings_env} == {"google_genai"}
+    assert {get_model(m).provider for m, _ in filings_env} == {OPERATOR_PROVIDER}
 
 
 def test_byok_for_another_provider_is_used_without_an_explicit_model(
     client, filings_env, signed_in,
 ):
-    resp = client.get(PATH, headers={**signed_in, "X-Openai-Api-Key": "their-openai"})
+    resp = client.get(PATH, headers={**signed_in, **byok_header(BYOK_PROVIDER, "their-key")})
 
     assert resp.status_code == 200
     assert filings_env
-    assert {get_model(m).provider for m, _ in filings_env} == {"openai"}
-    assert {k for _, k in filings_env} == {"their-openai"}
+    assert {get_model(m).provider for m, _ in filings_env} == {BYOK_PROVIDER}
+    assert {k for _, k in filings_env} == {"their-key"}
     assert _usage(USER) == 0  # BYOK: the operator doesn't pay
 
 
@@ -184,8 +196,8 @@ def test_byok_for_another_provider_is_used_without_an_explicit_model(
 def test_explicit_non_lendable_model_without_byok_needs_key(
     client, filings_env, signed_in, monkeypatch,
 ):
-    monkeypatch.setenv("GOOGLE_API_KEY", "env-google")
-    headers = {**signed_in, "X-Model-Id": _google_model(lendable=False).id}
+    monkeypatch.setenv(OPERATOR_ENV, "env-key")
+    headers = {**signed_in, "X-Model-Id": _operator_model(lendable=False).id}
 
     resp = client.get(PATH, headers=headers)
     assert resp.status_code == 200
@@ -197,9 +209,9 @@ def test_explicit_non_lendable_model_without_byok_needs_key(
 
 
 def test_explicit_lendable_model_is_honoured(client, filings_env, signed_in, monkeypatch):
-    monkeypatch.setenv("GOOGLE_API_KEY", "env-google")
+    monkeypatch.setenv(OPERATOR_ENV, "env-key")
     # Not the first lendable one, so the explicit choice is what's observed.
-    asked = [m for m in get_all_models() if m.provider == "google_genai" and m.operator_lendable][-1]
+    asked = models_where(provider=OPERATOR_PROVIDER, operator_lendable=True)[-1]
 
     assert client.get(PATH, headers={**signed_in, "X-Model-Id": asked.id}).status_code == 200
     assert {m for m, _ in filings_env} == {asked.id}
@@ -209,7 +221,7 @@ def test_explicit_lendable_model_is_honoured(client, filings_env, signed_in, mon
 
 
 def test_anonymous_never_generates_on_the_operator_key(client, filings_env, clerk_env, monkeypatch):
-    monkeypatch.setenv("GOOGLE_API_KEY", "env-google")
+    monkeypatch.setenv(OPERATOR_ENV, "env-key")
 
     resp = client.get(PATH)
     assert resp.status_code == 200
@@ -225,10 +237,10 @@ def test_anonymous_with_no_keys_anywhere_needs_key(client, filings_env, clerk_en
 
 
 def test_anonymous_byok_generates_on_their_own_key_only(client, filings_env, clerk_env, monkeypatch):
-    monkeypatch.setenv("GOOGLE_API_KEY", "env-google")
+    monkeypatch.setenv(OPERATOR_ENV, "env-key")
 
-    resp = client.get(PATH, headers={"X-Openai-Api-Key": "their-openai"})
+    resp = client.get(PATH, headers=byok_header(BYOK_PROVIDER, "their-key"))
 
     assert resp.status_code == 200
     assert filings_env
-    assert {k for _, k in filings_env} == {"their-openai"}
+    assert {k for _, k in filings_env} == {"their-key"}

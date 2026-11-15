@@ -11,7 +11,7 @@ import api.db as db_module
 from agents.model_registry import get_default_model
 from api import dependencies, llm_concurrency
 from api.main import app
-from tests.conftest import byok_header
+from tests.conftest import byok_header, model_where, set_operator_key
 
 
 client = TestClient(app)
@@ -302,8 +302,6 @@ class TestBriefingHistoryDaysValidation:
 
 CLERK_USER = "user_abc123"
 SIGNED_IN = {"X-Clerk-Session-Token": "good-token"}
-LENDABLE_MODEL = "gemini-3.6-flash"  # operator_lendable in models.json
-NON_LENDABLE_MODEL = "gpt-5.4"  # not operator_lendable
 
 
 class _CountingFakeLLM:
@@ -377,66 +375,76 @@ def _usage(user_id: str) -> int:
     return asyncio.run(db_module.get_llm_usage(user_id))
 
 
+@pytest.fixture
+def lendable():
+    return model_where(operator_lendable=True)
+
+
+@pytest.fixture
+def non_lendable():
+    return model_where(operator_lendable=False)
+
+
 class TestBriefingOperatorKeyGuard:
     @pytest.fixture(autouse=True)
-    def _operator_env(self, monkeypatch):
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-google")
-        monkeypatch.setenv("OPENAI_API_KEY", "operator-openai")
+    def _operator_env(self, monkeypatch, lendable, non_lendable):
+        set_operator_key(monkeypatch, lendable, "operator-key")
+        set_operator_key(monkeypatch, non_lendable, "operator-key")
 
     @pytest.mark.eval_unit
-    def test_lendable_model_on_operator_key_charges_one_unit_per_call(self, budget_env, clerk_on):
-        resp = client.get("/watchlist/briefing", headers={**SIGNED_IN, "X-Model-Id": LENDABLE_MODEL})
+    def test_lendable_model_on_operator_key_charges_one_unit_per_call(self, budget_env, clerk_on, lendable):
+        resp = client.get("/watchlist/briefing", headers={**SIGNED_IN, "X-Model-Id": lendable.id})
         assert resp.status_code == 200
         assert _usage(CLERK_USER) == 1  # one LLM call in the briefing chain
 
     @pytest.mark.eval_unit
-    def test_cached_briefing_makes_no_llm_call_and_is_not_charged(self, budget_env, clerk_on):
-        headers = {**SIGNED_IN, "X-Model-Id": LENDABLE_MODEL}
+    def test_cached_briefing_makes_no_llm_call_and_is_not_charged(self, budget_env, clerk_on, lendable):
+        headers = {**SIGNED_IN, "X-Model-Id": lendable.id}
         assert client.get("/watchlist/briefing", headers=headers).status_code == 200
         assert client.get("/watchlist/briefing", headers=headers).status_code == 200
         assert _usage(CLERK_USER) == 1
 
     @pytest.mark.eval_unit
-    def test_non_lendable_model_refused_on_operator_key(self, budget_env, clerk_on):
-        resp = client.get("/watchlist/briefing", headers={**SIGNED_IN, "X-Model-Id": NON_LENDABLE_MODEL})
+    def test_non_lendable_model_refused_on_operator_key(self, budget_env, clerk_on, non_lendable):
+        resp = client.get("/watchlist/briefing", headers={**SIGNED_IN, "X-Model-Id": non_lendable.id})
         assert resp.status_code == 400
         assert "own" in resp.json()["detail"].lower()
         assert budget_env.created == 0  # never reached the LLM
         assert _usage(CLERK_USER) == 0
 
     @pytest.mark.eval_unit
-    def test_byok_works_for_non_lendable_model_and_is_not_charged(self, budget_env, clerk_on):
+    def test_byok_works_for_non_lendable_model_and_is_not_charged(self, budget_env, clerk_on, non_lendable):
         resp = client.get(
             "/watchlist/briefing",
-            headers={**SIGNED_IN, "X-Model-Id": NON_LENDABLE_MODEL, "X-Openai-Api-Key": "mine"},
+            headers={**SIGNED_IN, "X-Model-Id": non_lendable.id, **byok_header(non_lendable.provider, "mine")},
         )
         assert resp.status_code == 200
         assert budget_env.created == 1
         assert _usage(CLERK_USER) == 0
 
     @pytest.mark.eval_unit
-    def test_budget_spent_refuses_before_any_llm_call(self, budget_env, clerk_on, monkeypatch):
+    def test_budget_spent_refuses_before_any_llm_call(self, budget_env, clerk_on, monkeypatch, lendable):
         monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 1)
         asyncio.run(db_module.increment_llm_usage(CLERK_USER))
-        resp = client.get("/watchlist/briefing", headers={**SIGNED_IN, "X-Model-Id": LENDABLE_MODEL})
+        resp = client.get("/watchlist/briefing", headers={**SIGNED_IN, "X-Model-Id": lendable.id})
         assert resp.status_code == 429
         assert budget_env.created == 0
         assert _usage(CLERK_USER) == 1
 
     @pytest.mark.eval_unit
-    def test_byok_ignores_spent_budget(self, budget_env, clerk_on, monkeypatch):
+    def test_byok_ignores_spent_budget(self, budget_env, clerk_on, monkeypatch, lendable):
         monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 1)
         asyncio.run(db_module.increment_llm_usage(CLERK_USER))
         resp = client.get(
             "/watchlist/briefing",
-            headers={**SIGNED_IN, "X-Model-Id": LENDABLE_MODEL, "X-Google-Api-Key": "mine"},
+            headers={**SIGNED_IN, "X-Model-Id": lendable.id, **byok_header(lendable.provider, "mine")},
         )
         assert resp.status_code == 200
         assert _usage(CLERK_USER) == 1
 
     @pytest.mark.eval_unit
-    def test_self_host_lends_operator_key_for_any_model(self, budget_env):
+    def test_self_host_lends_operator_key_for_any_model(self, budget_env, non_lendable):
         # Clerk unconfigured: the operator is the user, every model is lendable.
-        resp = client.get("/watchlist/briefing", headers={**HEADERS, "X-Model-Id": NON_LENDABLE_MODEL})
+        resp = client.get("/watchlist/briefing", headers={**HEADERS, "X-Model-Id": non_lendable.id})
         assert resp.status_code == 200
         assert _usage(USER_ID) == 1
