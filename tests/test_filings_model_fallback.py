@@ -34,7 +34,8 @@ TENK_RISK = "TENK-RISK: supply chain concentration and antitrust exposure."
 TENQ_RISK = "There have been no material changes to the risk factors previously disclosed."
 
 
-def _provider_with_lendable_and_non_lendable_models_other_than_default():
+def _operator_provider():
+    """A non-default provider with both lendable and non-lendable models."""
     default_provider = flagged_default_model().provider
     for provider in sorted({m.provider for m in get_all_models()} - {default_provider}):
         lendable = {m.operator_lendable for m in models_where(provider=provider)}
@@ -47,7 +48,7 @@ def _provider_with_lendable_and_non_lendable_models_other_than_default():
 
 
 # The only provider the operator holds a key for, and another one a caller brings.
-OPERATOR_PROVIDER = _provider_with_lendable_and_non_lendable_models_other_than_default()
+OPERATOR_PROVIDER = _operator_provider()
 OPERATOR_ENV = PROVIDER_ENV_VARS[OPERATOR_PROVIDER]
 BYOK_PROVIDER = next(p for p in PROVIDER_ENV_VARS if p != OPERATOR_PROVIDER)
 
