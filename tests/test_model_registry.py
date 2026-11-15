@@ -16,6 +16,21 @@ from agents.model_registry import (
     get_models_by_provider,
     get_token_threshold,
 )
+from agents.llm_factory import _PROVIDER_KEY_KWARG
+from api.dependencies import _PROVIDER_KEY_FIELDS, PROVIDER_ENV_VARS
+from tests.conftest import flagged_default_model, flagged_free_tier_model, other_model
+
+# Product decisions (which model is the default, the free tier, lendable…)
+# live in models.json; tests read them from there rather than restating them.
+_RAW = json.loads((Path(__file__).parent.parent / "agents" / "models.json").read_text())
+_PROVIDERS = sorted({entry["provider"] for entry in _RAW})
+
+
+@pytest.fixture
+def no_env_overrides(monkeypatch):
+    """Drop the env overrides so lookups reflect the models.json flags."""
+    monkeypatch.delenv("DEFAULT_MODEL_ID", raising=False)
+    monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
 
 
 class TestModelsJsonLoading:
@@ -33,15 +48,17 @@ class TestModelsJsonLoading:
         defaults = [m for m in get_all_models() if m.default]
         assert len(defaults) == 1, f"Expected 1 default, got {len(defaults)}"
 
-    def test_all_providers_are_known(self):
-        allowed = {"google_genai", "openai", "anthropic"}
-        for model in get_all_models():
-            assert model.provider in allowed, (
-                f"Unknown provider '{model.provider}' on model '{model.id}'"
-            )
+    @pytest.mark.parametrize("provider", _PROVIDERS)
+    def test_every_provider_is_wired_for_keys(self, provider):
+        # A provider with no env var, key field or factory key kwarg would
+        # silently resolve no key (or pass it under the wrong name).
+        assert provider in PROVIDER_ENV_VARS
+        assert provider in _PROVIDER_KEY_FIELDS
+        assert provider in _PROVIDER_KEY_KWARG
 
     def test_all_ids_are_unique(self):
-        ids = [m.id for m in get_all_models()]
+        # From the raw JSON: the registry dict would silently keep one of a duplicate pair.
+        ids = [e["id"] for e in _RAW]
         assert len(ids) == len(set(ids)), "Duplicate model IDs found"
 
     def test_at_most_one_free_tier_model(self):
@@ -50,18 +67,19 @@ class TestModelsJsonLoading:
 
 
 class TestGetFreeTierModel:
-    def test_returns_the_flagged_model(self):
+    def test_returns_the_flagged_model(self, no_env_overrides):
+        flagged = [e["id"] for e in _RAW if e.get("free_tier")]
         model = get_free_tier_model()
-        assert model.id == "claude-haiku-5-5"
-        assert model.free_tier is True
+        assert ([model.id] if model else []) == flagged
 
     def test_env_override(self, monkeypatch):
-        monkeypatch.setenv("ANON_FREE_MODEL_ID", "gpt-4.1-mini")
-        assert get_free_tier_model().id == "gpt-4.1-mini"
+        override = other_model(than=flagged_free_tier_model())
+        monkeypatch.setenv("ANON_FREE_MODEL_ID", override.id)
+        assert get_free_tier_model() == override
 
     def test_invalid_env_override_falls_back(self, monkeypatch):
-        monkeypatch.setenv("ANON_FREE_MODEL_ID", "nonexistent-model-xyz")
-        assert get_free_tier_model().id == "claude-haiku-5-5"
+        monkeypatch.setenv("ANON_FREE_MODEL_ID", "unknown-model")
+        assert get_free_tier_model() == flagged_free_tier_model()
 
     def test_returns_none_when_no_model_flagged(self, monkeypatch):
         # Fails closed: unflagging the free-tier model disables the trial rather
@@ -77,67 +95,52 @@ class TestGetFreeTierModel:
 
 
 class TestGetModel:
-    def test_known_model(self):
-        model = get_model("gemini-3.6-flash")
-        assert model is not None
-        assert model.id == "gemini-3.6-flash"
-        assert model.provider == "google_genai"
+    @pytest.mark.parametrize("entry", _RAW, ids=lambda e: e["id"])
+    def test_every_json_entry_is_found_by_id(self, entry):
+        model = get_model(entry["id"])
+        assert (model.id, model.provider) == (entry["id"], entry["provider"])
 
     def test_unknown_model_returns_none(self):
-        assert get_model("nonexistent-model-xyz") is None
+        assert get_model("unknown-model") is None
 
 
 class TestGetDefaultModel:
-    def test_returns_valid_model(self):
-        default = get_default_model()
-        assert isinstance(default, ModelDef)
-        assert default.default is True
+    def test_returns_the_flagged_model(self, no_env_overrides):
+        [flagged] = [e["id"] for e in _RAW if e["default"]]
+        assert get_default_model().id == flagged
 
-    def test_default_is_claude_haiku(self):
-        """Current default — update this test if the default changes."""
-        assert get_default_model().id == "claude-haiku-5-5"
+    def test_env_override(self, monkeypatch):
+        override = other_model(than=flagged_default_model())
+        monkeypatch.setenv("DEFAULT_MODEL_ID", override.id)
+        assert get_default_model() == override
+
+    def test_invalid_env_override_falls_back(self, monkeypatch):
+        monkeypatch.setenv("DEFAULT_MODEL_ID", "unknown-model")
+        assert get_default_model() == flagged_default_model()
 
 
 class TestGetModelsByProvider:
-    def test_google_models(self):
-        models = get_models_by_provider("google_genai")
-        assert len(models) >= 1
-        assert all(m.provider == "google_genai" for m in models)
-
-    def test_openai_models(self):
-        models = get_models_by_provider("openai")
-        assert len(models) >= 1
-        assert all(m.provider == "openai" for m in models)
+    @pytest.mark.parametrize("provider", _PROVIDERS)
+    def test_returns_exactly_that_providers_models(self, provider):
+        expected = [e["id"] for e in _RAW if e["provider"] == provider]
+        assert [m.id for m in get_models_by_provider(provider)] == expected
 
     def test_unknown_provider_returns_empty(self):
         assert get_models_by_provider("unknown_provider") == []
 
 
 class TestGetTokenThreshold:
-    def test_gemini_flash_threshold(self):
-        # 1_000_000 // 4 = 250_000
-        assert get_token_threshold("gemini-3.6-flash") == 250_000
-
-    def test_gpt41_mini_threshold(self):
-        # 1_000_000 // 4 = 250_000
-        assert get_token_threshold("gpt-4.1-mini") == 250_000
-
-    def test_gpt54_mini_threshold(self):
-        # 400_000 // 4 = 100_000
-        assert get_token_threshold("gpt-5.4-mini") == 100_000
+    @pytest.mark.parametrize("entry", _RAW, ids=lambda e: e["id"])
+    def test_threshold_is_a_quarter_of_the_context_window(self, entry):
+        assert get_token_threshold(entry["id"]) == entry["max_context"] // 4
 
     def test_unknown_model_returns_fallback(self):
-        assert get_token_threshold("nonexistent-model") == 30_000
-
-    def test_threshold_is_positive(self):
-        for model in get_all_models():
-            threshold = get_token_threshold(model.id)
-            assert threshold > 0
+        assert get_token_threshold("unknown-model") == 30_000
 
 
 class TestModelDefImmutability:
     def test_model_is_frozen(self):
-        model = get_model("gemini-3.6-flash")
+        model = get_default_model()
         with pytest.raises(Exception):
             model.id = "something-else"
 
@@ -159,14 +162,14 @@ def _entry(**overrides):
 
 class TestOperatorLendable:
     def test_every_json_entry_declares_lendable_and_price_fields(self):
-        raw = json.loads((Path(__file__).parent.parent / "agents" / "models.json").read_text())
-        for entry in raw:
+        for entry in _RAW:
             for key in ("operator_lendable", *_PRICE_KEYS):
                 assert key in entry, f"{entry['id']} is missing {key}"
 
-    def test_lendable_models_are_the_default_free_tier_and_google_fallbacks(self):
-        lendable = {m.id for m in get_all_models() if m.operator_lendable}
-        assert lendable == {"claude-haiku-5-5", "gemini-3.6-flash", "gemini-3.1-flash-lite"}
+    def test_free_tier_models_are_lendable(self):
+        # Anonymous visitors run the free-tier model on the operator's key, so
+        # signed-in users must be able to as well.
+        assert all(e["operator_lendable"] for e in _RAW if e.get("free_tier"))
 
     def test_lendable_defaults_to_false(self):
         models, _, _ = _build_registry([_entry()])
