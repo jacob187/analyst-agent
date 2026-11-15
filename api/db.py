@@ -68,7 +68,7 @@ def spawn_write(coro: Coroutine[Any, Any, Any], *, op: str, session_id: str | No
     Keeps a strong reference until the task finishes (the loop only holds tasks
     weakly). Logs carry the operation and session id, never row content.
     """
-    task = asyncio.create_task(coro)
+    task = asyncio.create_task(coro, name=f"{op} (session={session_id})")
     _background_writes.add(task)
 
     def _done(t: asyncio.Task) -> None:
@@ -432,9 +432,73 @@ async def get_llm_usage(user_id: str) -> int:
             return row["count"] if row else 0
 
 
+DEFAULT_DRAIN_TIMEOUT_SECONDS = 5.0
+
+
+def _drain_timeout_seconds() -> float:
+    """``DB_CLOSE_DRAIN_TIMEOUT_SECONDS`` (read per call), else the default."""
+    raw = os.getenv("DB_CLOSE_DRAIN_TIMEOUT_SECONDS")
+    if raw is None:
+        return DEFAULT_DRAIN_TIMEOUT_SECONDS
+    try:
+        timeout = float(raw)
+    except ValueError:
+        timeout = -1.0
+    if timeout < 0:
+        logger.warning(
+            "Ignoring invalid DB_CLOSE_DRAIN_TIMEOUT_SECONDS=%r; using %ss",
+            raw, DEFAULT_DRAIN_TIMEOUT_SECONDS,
+        )
+        return DEFAULT_DRAIN_TIMEOUT_SECONDS
+    return timeout
+
+
+async def _drain_background_writes() -> None:
+    """Wait (bounded) for this loop's `spawn_write` tasks before the connection
+    closes; cancel stragglers so none holds the lock or reopens the DB after.
+
+    Tasks bound to another event loop (tests drive this module from several)
+    can't be awaited here; they are dropped from the set, not awaited.
+    """
+    loop = asyncio.get_running_loop()
+    mine: list[asyncio.Task] = []
+    foreign: list[asyncio.Task] = []
+    for task in list(_background_writes):
+        if task.done():
+            continue
+        (mine if task.get_loop() is loop else foreign).append(task)
+
+    for task in foreign:
+        _background_writes.discard(task)
+    if foreign:
+        logger.warning(
+            "Not draining %d background DB write(s) bound to another event loop: %s",
+            len(foreign), ", ".join(t.get_name() for t in foreign),
+        )
+
+    if not mine:
+        return
+    timeout = _drain_timeout_seconds()
+    _, pending = await asyncio.wait(mine, timeout=timeout)
+    if not pending:
+        return
+    logger.warning(
+        "%d background DB write(s) unfinished after %ss at shutdown; cancelling: %s",
+        len(pending), timeout, ", ".join(t.get_name() for t in pending),
+    )
+    for task in pending:
+        task.cancel()
+    await asyncio.wait(pending, timeout=1.0)
+
+
 async def close_db():
-    """Close the database connection once in-flight operations finish."""
+    """Close the database connection once in-flight operations finish.
+
+    Pending `spawn_write` tasks are drained first (outside the lock: they need
+    it to finish).
+    """
     global _db
+    await _drain_background_writes()
     async with _lock():
         if _db:
             await _db.close()
