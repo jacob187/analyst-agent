@@ -270,17 +270,16 @@ def test_resolve_log_level_invalid_falls_back_and_warns_once(monkeypatch, caplog
     assert "EDGAR_LOG_LEVEL" in warnings[0].getMessage()
 
 
-def _import_main_with_env(**overrides: str) -> subprocess.CompletedProcess:
+_PRINT_LEVELS = "print(logging.getLogger().level, logging.getLogger('edgar').level)"
+
+
+def _import_main_with_env(*, prelude: str = "", **overrides: str) -> subprocess.CompletedProcess:
     """Import api.main in a fresh interpreter (module-level logging setup runs
     once per process, so reloading it in-process would swap `app` under other
     tests) and print the resulting root and edgar logger levels."""
     env = {**os.environ, **overrides}
     return subprocess.run(
-        [
-            sys.executable, "-c",
-            "import logging, api.main; "
-            "print(logging.getLogger().level, logging.getLogger('edgar').level)",
-        ],
+        [sys.executable, "-c", f"import logging, os; {prelude}import api.main; {_PRINT_LEVELS}"],
         cwd=_REPO_ROOT, env=env, capture_output=True, text=True, timeout=180,
     )
 
@@ -296,6 +295,24 @@ def test_app_imports_with_invalid_log_levels():
 
 def test_app_import_applies_valid_log_levels():
     result = _import_main_with_env(LOG_LEVEL="debug", EDGAR_LOG_LEVEL="error")
+    assert result.returncode == 0, result.stderr
+    root_level, edgar_level = map(int, result.stdout.split()[-2:])
+    assert (root_level, edgar_level) == (logging.DEBUG, logging.ERROR)
+
+
+def test_log_levels_set_in_dotenv_apply(monkeypatch):
+    """`.env` is the documented local config; its levels must be loaded before
+    logging is configured. The .env file loader is stubbed (the real one reads
+    the repo-root .env) to set what a .env would, without overriding the shell."""
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+    monkeypatch.delenv("EDGAR_LOG_LEVEL", raising=False)
+    stub = (
+        "import dotenv; "
+        "dotenv.load_dotenv = lambda *a, **k: ("
+        "os.environ.setdefault('LOG_LEVEL', 'debug'), "
+        "os.environ.setdefault('EDGAR_LOG_LEVEL', 'error')); "
+    )
+    result = _import_main_with_env(prelude=stub)
     assert result.returncode == 0, result.stderr
     root_level, edgar_level = map(int, result.stdout.split()[-2:])
     assert (root_level, edgar_level) == (logging.DEBUG, logging.ERROR)

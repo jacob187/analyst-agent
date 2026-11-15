@@ -16,6 +16,13 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# Load .env from project root so GOOGLE_API_KEY, TAVILY_API_KEY, etc.
+# are available via os.getenv() as fallbacks for local development.
+# Before the logging setup below, so LOG_LEVEL / EDGAR_LOG_LEVEL apply too.
+load_dotenv(Path(__file__).parent.parent / ".env")
+
 
 def resolve_log_level(env_var: str, default: str) -> int:
     """Level named by `env_var`, or `default` (with a warning) when it isn't a
@@ -44,14 +51,9 @@ logging.basicConfig(
 # own logs. Keep its warnings and errors; override with EDGAR_LOG_LEVEL.
 logging.getLogger("edgar").setLevel(resolve_log_level("EDGAR_LOG_LEVEL", "WARNING"))
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-
-# Load .env from project root so GOOGLE_API_KEY, TAVILY_API_KEY, etc.
-# are available via os.getenv() as fallbacks for local development.
-load_dotenv(Path(__file__).parent.parent / ".env")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
