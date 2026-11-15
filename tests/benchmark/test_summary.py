@@ -8,7 +8,7 @@ from evals.benchmark.cli import main
 from evals.benchmark.judge import judge_runs
 from evals.benchmark.runs import load_run, write_model
 from evals.benchmark.summary import build_summary, summary_text
-from tests.benchmark.helpers import FIXTURE_QUESTIONS, PRICED, UNPRICED, FakeJudge, write_run
+from tests.benchmark.helpers import FIXTURE_QUESTIONS, PRICED, UNPRICED, FakeJudge, pdf_text_blob, write_run
 
 pytestmark = pytest.mark.eval_unit
 
@@ -155,3 +155,84 @@ class TestSummarizeCli:
         code = main(["summarize", "--runs", str(tmp_path / "nope"), "--out", str(tmp_path / "s.json")])
         assert code == 2
         assert "Cannot read" in capsys.readouterr().err
+
+
+class TestDeltasAndFailingIds:
+    """Spec 08 AC4/AC5: the old-vs-new change per question, and which questions failed in each run."""
+
+    HEAVY = dict(llm_calls=6, input_tokens=2000, output_tokens=400, total_tokens=2400, latency_s=20.0)
+
+    def test_two_runs_get_absolute_and_percentage_deltas_old_to_new(self, tmp_path):
+        old = load_run(write_run(tmp_path, "old"))
+        new = load_run(write_run(tmp_path, "new", **self.HEAVY))
+        deltas = build_summary([old, new])["deltas"]
+
+        assert (deltas["old"], deltas["new"]) == ("old", "new")
+        calls = deltas["means"]["llm_calls"]
+        assert (calls["old"], calls["new"], calls["delta"], calls["pct"]) == (3, 6, 3, 100.0)
+        assert deltas["means"]["input_tokens"]["delta"] == 1000
+        assert deltas["means"]["output_tokens"]["delta"] == 200
+        assert deltas["means"]["latency_s"]["delta"] == 10 and deltas["means"]["latency_s"]["pct"] == 100.0
+        cost = deltas["means"]["cost_usd"]  # 0.004 -> 0.008 per question
+        assert cost["delta"] == pytest.approx(0.004) and cost["pct"] == 100.0
+        assert deltas["totals"]["cost_usd"]["delta"] == pytest.approx(0.02)
+
+    def test_a_decrease_is_negative(self, tmp_path):
+        old = load_run(write_run(tmp_path, "old", **self.HEAVY))
+        new = load_run(write_run(tmp_path, "new"))
+        calls = build_summary([old, new])["deltas"]["means"]["llm_calls"]
+        assert (calls["delta"], calls["pct"]) == (-3, -50.0)
+
+    def test_an_unknown_cost_gives_no_cost_delta_never_zero(self, tmp_path):
+        old = load_run(write_run(tmp_path, "old", pricing=UNPRICED))
+        new = load_run(write_run(tmp_path, "new"))
+        summary = build_summary([old, new])
+        cost = summary["deltas"]["means"]["cost_usd"]
+        assert cost["old"] is None and cost["delta"] is None and cost["pct"] is None
+        assert "cost change unknown" in summary_text(summary)
+
+    def test_a_zero_baseline_has_a_delta_but_no_percentage(self, tmp_path):
+        old = load_run(write_run(tmp_path, "old", llm_calls=0))
+        new = load_run(write_run(tmp_path, "new"))
+        calls = build_summary([old, new])["deltas"]["means"]["llm_calls"]
+        assert calls["delta"] == 3 and calls["pct"] is None
+
+    def test_deltas_exist_only_for_exactly_two_runs(self, tmp_path):
+        a, b, c = (load_run(write_run(tmp_path, n)) for n in ("a", "b", "c"))
+        assert build_summary([a])["deltas"] is None
+        assert build_summary([a, b, c])["deltas"] is None
+
+    def test_failed_and_errored_question_ids_are_listed_per_run(self, tmp_path):
+        run = load_run(write_run(tmp_path, "run-a", answers={"q-tech": None, "q-news": None}))
+        run.questions["q-risk"] = run.questions["q-risk"].model_copy(update={"errors": ["tool X failed"]})
+        (block,) = build_summary([run])["runs"]
+        assert block["failed_ids"] == ["q-news", "q-tech"]
+        assert block["error_ids"] == ["q-risk"]  # answered, but a tool errored along the way
+
+    def test_a_clean_run_lists_no_ids(self, tmp_path):
+        (block,) = build_summary([load_run(write_run(tmp_path, "run-a"))])["runs"]
+        assert block["failed_ids"] == [] and block["error_ids"] == []
+
+    def test_the_text_digest_prints_the_deltas_and_the_failing_ids(self, tmp_path):
+        old = load_run(write_run(tmp_path, "old"))
+        new = load_run(write_run(tmp_path, "new", answers={"q-tech": None}, **self.HEAVY))
+        text = summary_text(build_summary([old, new]))
+        assert "old -> new" in text and "LLM calls +3.0 (+100.0%)" in text
+        assert "cost +$0.0040 (+100.0%)" in text
+        assert "new: failed q-tech" in text
+        assert "old: failed none" in text
+
+    def test_the_cli_summary_json_and_the_pdf_carry_them(self, tmp_path, capsys):
+        a = write_run(tmp_path, "run-a")
+        b = write_run(tmp_path, "run-b", answers={"q-tech": None}, **self.HEAVY)
+        out = tmp_path / "s.json"
+        pdf = tmp_path / "r.pdf"
+        assert main(["summarize", "--runs", str(a), str(b), "--out", str(out)]) == 0
+        assert "run-a -> run-b" in capsys.readouterr().out
+        assert main(["report", "--runs", str(a), str(b), "--out", str(pdf)]) == 0
+
+        data = json.loads(out.read_text())
+        assert data["deltas"]["means"]["llm_calls"]["delta"] == 3
+        assert data["runs"][1]["failed_ids"] == ["q-tech"]
+        text = pdf_text_blob(pdf.read_bytes())
+        assert "Change run-a -> run-b" in text and "Failed questions" in text and "q-tech" in text

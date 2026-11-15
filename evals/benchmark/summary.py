@@ -51,6 +51,37 @@ def _aggregate(results: list[QuestionResult], pricing: Pricing) -> dict[str, Any
     }
 
 
+DELTA_FIELDS = ("llm_calls", "input_tokens", "output_tokens", "total_tokens", "latency_s", "cost_usd")
+
+
+def _change(old: float | None, new: float | None) -> dict[str, float | None]:
+    """``new - old`` and that as a percentage of ``old``; None where either side is unknown.
+
+    The percentage is also None for a zero baseline. An unknown cost stays unknown, never 0.
+    """
+    if old is None or new is None:
+        return {"old": old, "new": new, "delta": None, "pct": None}
+    delta = new - old
+    return {
+        "old": old,
+        "new": new,
+        "delta": round(delta, 6),
+        "pct": None if old == 0 else round(delta / old * 100, 2),
+    }
+
+
+def build_deltas(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    """Change from the ``old`` run block to the ``new`` one, per question (means) and in total."""
+    return {
+        "old": old["label"],
+        "new": new["label"],
+        **{
+            scope: {f: _change(old[scope][f], new[scope][f]) for f in DELTA_FIELDS}
+            for scope in ("means", "totals")
+        },
+    }
+
+
 def judgement_counts(judgement: Judgement, side: str) -> dict[str, int]:
     other = "b" if side == "a" else "a"
     judged = [q for q in judgement.questions if q.status == "judged"]
@@ -149,6 +180,9 @@ def build_summary(runs: list[LoadedRun], judgement: Judgement | None = None) -> 
                 "failed": sum(r.status == "failed" for r in results),
                 "with_errors": sum(bool(r.errors) for r in results),
             },
+            # Which questions went wrong: no answer at all, and any with an error recorded along the way.
+            "failed_ids": sorted(r.id for r in results if r.status == "failed"),
+            "error_ids": sorted(r.id for r in results if r.errors),
             **_aggregate(results, meta.pricing),
         }
         by_cat: dict[str, list[QuestionResult]] = defaultdict(list)
@@ -175,6 +209,8 @@ def build_summary(runs: list[LoadedRun], judgement: Judgement | None = None) -> 
         "prices_as_of": sorted(prices_as_of),
         "warnings": warnings,
         "runs": run_blocks,
+        # Only for exactly two runs: the first is the old one, the second the new one.
+        "deltas": build_deltas(run_blocks[0], run_blocks[1]) if len(run_blocks) == 2 else None,
         "judgement": None if judgement is None else _judgement_block(judgement),
         # Run cost plus the judge's own cost; None = unknown (a price or usage is missing).
         # Without a judgement the total is the runs alone (judge_included is false).
@@ -190,6 +226,31 @@ def build_summary(runs: list[LoadedRun], judgement: Judgement | None = None) -> 
 _cost_text = cost_text
 
 
+def _signed(change: dict[str, float | None], fmt: str, unit: str = "", prefix: str = "") -> str | None:
+    """``+3.0 (+100.0%)``; None when the change is unknown."""
+    if change["delta"] is None:
+        return None
+    sign = "+" if change["delta"] >= 0 else "-"
+    pct = "n/a" if change["pct"] is None else f"{change['pct']:+.1f}%"
+    return f"{sign}{prefix}{format(abs(change['delta']), fmt)}{unit} ({pct})"
+
+
+def delta_text(deltas: dict[str, Any]) -> str:
+    """One line: the change per question from the old run to the new one."""
+    m = deltas["means"]
+    parts = []
+    for name, field, fmt, unit, prefix in (
+        ("LLM calls", "llm_calls", ".1f", "", ""),
+        ("input tokens", "input_tokens", ".0f", "", ""),
+        ("output tokens", "output_tokens", ".0f", "", ""),
+        ("wall time", "latency_s", ".1f", "s", ""),
+        ("cost", "cost_usd", ".4f", "", "$"),
+    ):
+        text = _signed(m[field], fmt, unit, prefix)
+        parts.append(f"{name} {text}" if text else f"{name} change unknown")
+    return f"{deltas['old']} -> {deltas['new']} (per question): " + ", ".join(parts)
+
+
 def summary_text(summary: dict[str, Any]) -> str:
     """Short human-readable digest for the terminal (includes prices_as_of)."""
     lines = []
@@ -200,6 +261,13 @@ def summary_text(summary: dict[str, Any]) -> str:
             f"{run['questions']['answered']}/{run['questions']['selected']} answered, "
             f"mean {m['llm_calls'] or 0:.1f} LLM calls, {m['total_tokens'] or 0:.0f} tokens, "
             f"{m['latency_s'] or 0:.1f}s; total cost {_cost_text(t['cost_usd'])}"
+        )
+    if summary["deltas"] is not None:
+        lines.append(delta_text(summary["deltas"]))
+    for run in summary["runs"]:
+        lines.append(
+            f"{run['label']}: failed {', '.join(run['failed_ids']) or 'none'}; "
+            f"with errors {', '.join(run['error_ids']) or 'none'}"
         )
     if summary["judgement"] is not None:
         usage = summary["judgement"]["judge_usage"]
