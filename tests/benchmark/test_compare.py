@@ -535,10 +535,12 @@ class TestJudgeCost:
 
         summary = json.loads((out / "summary.json").read_text())
         run_cost = sum(m["totals"]["cost_usd"] for m in summary["models"].values())
-        assert summary["costs"]["judge_usd"] == pytest.approx(expected)
-        assert summary["costs"]["runs_usd"] == pytest.approx(run_cost)
-        assert summary["costs"]["total_usd"] == pytest.approx(run_cost + expected)
-        assert summary["models"][PAID.id]["judge"]["cost_usd"] == pytest.approx(expected)
+        # summary.json stores USD rounded to 6 decimals; the exact value depends on registry prices.
+        usd = {"abs": 1e-6}
+        assert summary["costs"]["judge_usd"] == pytest.approx(expected, **usd)
+        assert summary["costs"]["runs_usd"] == pytest.approx(run_cost, **usd)
+        assert summary["costs"]["total_usd"] == pytest.approx(run_cost + expected, **usd)
+        assert summary["models"][PAID.id]["judge"]["cost_usd"] == pytest.approx(expected, **usd)
 
         text = pdf_text_blob((out / "report.pdf").read_bytes())
         assert f"Judge cost: ${expected:.4f}." in text
