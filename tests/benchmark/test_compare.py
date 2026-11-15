@@ -63,8 +63,13 @@ JUDGE_LLMS: list[object] = []
 JUDGE_USAGE: dict[str, tuple[int, int]] = {}
 
 
+FAILING: set[str] = set()  # models whose agent cannot be built (like an exhausted provider quota)
+
+
 async def _build(ticker: str, model_id: str):
     BUILDS.append(model_id)
+    if model_id in FAILING:
+        raise RuntimeError("RateLimitError: 429 no credits remaining")
     return FakeAgent(f"{STYLE.get(model_id, 'plain')} answer about {ticker}")
 
 
@@ -87,6 +92,7 @@ def env(monkeypatch):
     monkeypatch.setitem(ARCHITECTURES, "fake", _build)
     monkeypatch.setattr(sys, "stdin", _UnreadableStdin())
     STYLE.clear()
+    FAILING.clear()
     BUILDS.clear()
     JUDGE_LLMS.clear()
     JUDGE_USAGE.clear()
@@ -615,3 +621,128 @@ class TestJudgeCost:
         write_model(prior / "judgement.json", asyncio.run(judge_runs(a, b, FakeJudge(), "j", 0, progress=lambda _m: None)))
         assert compare(qfile, out, "--models", PAID.id, "--estimate-judge-from", str(prior), "--dry-run") == 2
         assert "no judged question with recorded token usage" in capsys.readouterr().err
+
+
+class TestExcludedModels:
+    """A model whose run failed outright is reported as excluded and warned about, never dropped silently."""
+
+    def test_a_run_where_every_question_failed_is_excluded_not_judged_and_warned_about(
+        self, monkeypatch, qfile, out, capsys
+    ):
+        give_keys(monkeypatch, FREE)
+        FAILING.add(PAID.id)
+        assert compare(qfile, out, "--models", f"{PAID.id},{PAID2.id}", "--yes") == 0
+
+        summary = json.loads((out / "summary.json").read_text())
+        assert list(summary["models"]) == [FREE.id, PAID2.id]
+        (entry,) = summary["excluded_models"]
+        assert entry["model_id"] == PAID.id
+        assert f"all {N} questions failed" in entry["reason"] and "RateLimitError" in entry["reason"]
+        assert not (out / "judgements" / f"{PAID.id}-vs-{FREE.id}").exists()  # no judge spend on it
+        (judge,) = JUDGE_LLMS
+        assert len(judge.prompts) == N  # PAID2 only
+
+        printed = capsys.readouterr().out
+        assert f"WARNING: {PAID.id} excluded from the comparison" in printed
+        text = pdf_text_blob((out / "report.pdf").read_bytes())
+        assert PAID.id in text and "Excluded models" in text
+
+    def test_a_reference_that_answered_nothing_stops_before_any_judging(self, monkeypatch, qfile, out, capsys):
+        give_keys(monkeypatch, FREE)
+        FAILING.add(FREE.id)
+        assert compare(qfile, out, "--models", PAID.id, "--yes") == 2
+        assert f"The reference run {FREE.id} cannot anchor a comparison" in capsys.readouterr().err
+        assert JUDGE_LLMS == []
+
+
+def _rebuild(out, summary_out, *extra, pdf=None):
+    args = ["compare-report", "--dir", str(out), "--summary-out", str(summary_out), *extra]
+    return main([*args, "--out", str(pdf)] if pdf else args)
+
+
+class TestRebuildFromDisk:
+    """`compare-report` recomputes the summary from the runs and judgements on disk: no model is called."""
+
+    def _finished(self, monkeypatch, qfile, out, *models):
+        give_keys(monkeypatch, FREE)
+        assert compare(qfile, out, "--models", ",".join(m.id for m in models), "--yes") == 0
+        JUDGE_LLMS.clear()
+        BUILDS.clear()
+
+    def test_it_recomputes_without_running_or_judging_and_leaves_the_recorded_summary_alone(
+        self, monkeypatch, qfile, out, tmp_path
+    ):
+        self._finished(monkeypatch, qfile, out, PAID)
+        recorded = (out / "summary.json").read_text()
+        scratch = tmp_path / "scratch"
+
+        assert _rebuild(out, scratch / "summary.json", pdf=scratch / "report.pdf") == 0
+
+        assert (out / "summary.json").read_text() == recorded
+        rebuilt = json.loads((scratch / "summary.json").read_text())
+        assert list(rebuilt["models"]) == [FREE.id, PAID.id]
+        assert rebuilt["models"][FREE.id]["reference_standing"]["pairings_used"] == 1
+        assert rebuilt["models"][PAID.id]["vs_reference"]["judged"] == N
+        assert (scratch / "report.pdf").read_bytes().startswith(b"%PDF-")
+        assert BUILDS == [] and JUDGE_LLMS == []
+
+    def test_a_run_on_disk_that_the_recorded_summary_left_out_comes_back(self, monkeypatch, qfile, out, tmp_path):
+        self._finished(monkeypatch, qfile, out, PAID, PAID2)
+        assert compare(qfile, out, "--models", PAID.id, "--yes") == 0  # this summary no longer lists PAID2
+        assert PAID2.id not in json.loads((out / "summary.json").read_text())["models"]
+
+        assert _rebuild(out, tmp_path / "s.json", pdf=tmp_path / "r.pdf") == 0
+        rebuilt = json.loads((tmp_path / "s.json").read_text())
+        assert PAID2.id in rebuilt["models"]
+
+    @pytest.mark.parametrize("damage", ["removed", "emptied"])
+    def test_a_missing_or_empty_run_directory_is_excluded_with_a_reason_and_a_warning(
+        self, monkeypatch, qfile, out, tmp_path, capsys, damage
+    ):
+        self._finished(monkeypatch, qfile, out, PAID, PAID2)
+        import shutil
+
+        shutil.rmtree(out / "runs" / PAID.id)
+        if damage == "emptied":
+            (out / "runs" / PAID.id).mkdir()
+        capsys.readouterr()
+
+        assert _rebuild(out, tmp_path / "s.json", pdf=tmp_path / "r.pdf") == 0
+
+        rebuilt = json.loads((tmp_path / "s.json").read_text())
+        assert list(rebuilt["models"]) == [FREE.id, PAID2.id]
+        (entry,) = rebuilt["excluded_models"]
+        assert entry["model_id"] == PAID.id and "missing, empty or unreadable" in entry["reason"]
+        assert f"WARNING: {PAID.id} excluded from the comparison" in capsys.readouterr().out
+
+    def test_a_run_that_failed_entirely_is_excluded(self, monkeypatch, qfile, out, tmp_path, capsys):
+        give_keys(monkeypatch, FREE)
+        FAILING.add(PAID.id)
+        assert compare(qfile, out, "--models", PAID.id, "--yes") == 0
+        capsys.readouterr()
+
+        assert _rebuild(out, tmp_path / "s.json") == 0
+        (entry,) = json.loads((tmp_path / "s.json").read_text())["excluded_models"]
+        assert entry["model_id"] == PAID.id and "RateLimitError" in entry["reason"]
+        assert "excluded from the comparison" in capsys.readouterr().out
+
+    def test_a_judgement_of_other_runs_is_refused(self, monkeypatch, qfile, out, tmp_path, capsys):
+        self._finished(monkeypatch, qfile, out, PAID)
+        judgement_dir = out / "judgements" / f"{PAID.id}-vs-{FREE.id}"
+        judgement = load_judgement(judgement_dir)
+        judgement.a.run_id = "some-other-run"
+        write_model(judgement_dir / "judgement.json", judgement)
+        assert _rebuild(out, tmp_path / "s.json") == 2
+        assert "judges different runs" in capsys.readouterr().err
+
+    def test_the_cost_multiple_defaults_to_the_recorded_one_and_can_be_overridden(
+        self, monkeypatch, qfile, out, tmp_path
+    ):
+        give_keys(monkeypatch, FREE)
+        assert compare(qfile, out, "--models", PAID.id, "--chat-cost-multiple", "7", "--yes") == 0
+        JUDGE_LLMS.clear()
+        assert _rebuild(out, tmp_path / "a.json") == 0
+        assert json.loads((tmp_path / "a.json").read_text())["chat_cost_multiple"] == 7
+        assert _rebuild(out, tmp_path / "b.json", "--chat-cost-multiple", "2") == 0
+        assert json.loads((tmp_path / "b.json").read_text())["chat_cost_multiple"] == 2
+        assert _rebuild(out, tmp_path / "c.json", "--chat-cost-multiple", "0") == 2

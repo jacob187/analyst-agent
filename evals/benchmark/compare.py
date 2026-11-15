@@ -29,7 +29,7 @@ from evals.benchmark.common import (
     resolve_model,
 )
 from evals.benchmark.compare_report import write_comparison_report
-from evals.benchmark.compare_summary import DEFAULT_CHAT_COST_MULTIPLE, build_comparison_summary
+from evals.benchmark.compare_summary import DEFAULT_CHAT_COST_MULTIPLE, build_comparison_summary, unusable_reason
 from evals.benchmark.judge import judge_runs
 from evals.benchmark.pricing import estimate_cost, pricing_from_model
 from evals.benchmark.questions import Question, question_set_hash
@@ -430,12 +430,15 @@ async def execute(
             only=plan.only, timeout_s=timeout_s, progress=progress,
         )
 
-    runs = {p.model.id: load_run(p.dir) for p in plan.run_plans}
-    reference_run = runs[plan.reference.id]
+    runs, excluded = load_runs({p.model.id: p.dir for p in plan.run_plans})
+    reference_run = _reference_run(runs, excluded, plan.reference.id)
     judgements: dict[str, Judgement] = {}
     judge_llm = None
     for model_id, model_run in runs.items():
         if model_id == plan.reference.id:
+            continue
+        if (reason := unusable_reason(model_run)) is not None:
+            progress(f"{model_id}: excluded from the comparison ({reason}); not judged")
             continue
         model = next(p.model for p in plan.run_plans if p.model.id == model_id)
         path = _judgement_file(plan.out, model, plan.reference)
@@ -456,30 +459,83 @@ async def execute(
         judgements[model_id] = judgement
 
     others = [r for model_id, r in runs.items() if model_id != plan.reference.id]
+    for model_id, why in excluded.items():
+        progress(f"{model_id}: excluded from the comparison ({why})")
     summary = build_comparison_summary(
         reference_run, others, judgements,
         graph=plan.graph,
         judge_model=plan.judge_model.id,
-        run_dirs={model_id: str(Path(RUNS_DIR) / model_id) for model_id in runs},
+        run_dirs={model_id: str(Path(RUNS_DIR) / model_id) for model_id in [*runs, *excluded]},
         chat_cost_multiple=chat_cost_multiple,
+        excluded=excluded,
     )
     write_json(plan.out / SUMMARY_FILE, summary)
     write_comparison_report(plan.out / REPORT_FILE, summary, runs, judgements)
     return summary
 
 
-def load_comparison(out: Path) -> tuple[dict[str, Any], dict[str, LoadedRun], dict[str, Judgement]]:
-    """Reload a finished comparison directory (for ``report --comparison``)."""
+def load_runs(dirs: dict[str, Path]) -> tuple[dict[str, LoadedRun], dict[str, str]]:
+    """Load each model's run; a missing, empty or unreadable directory becomes an exclusion reason."""
+    runs: dict[str, LoadedRun] = {}
+    excluded: dict[str, str] = {}
+    for model_id, path in dirs.items():
+        try:
+            runs[model_id] = load_run(path)
+        except BenchmarkError as e:
+            excluded[model_id] = f"run directory missing, empty or unreadable: {e}"
+    return runs, excluded
+
+
+def _reference_run(runs: dict[str, LoadedRun], excluded: dict[str, str], reference_id: str) -> LoadedRun:
+    """The reference's run, or a BenchmarkError when it cannot anchor the comparison (checked before judging)."""
+    if reference_id not in runs:
+        raise BenchmarkError(f"The reference run {reference_id} cannot be loaded: {excluded[reference_id]}")
+    if (reason := unusable_reason(runs[reference_id])) is not None:
+        raise BenchmarkError(f"The reference run {reference_id} cannot anchor a comparison: {reason}")
+    return runs[reference_id]
+
+
+def rebuild_comparison(
+    out: Path, chat_cost_multiple: float | None = None
+) -> tuple[dict[str, Any], dict[str, LoadedRun], dict[str, Judgement]]:
+    """Recompute the summary of a finished comparison directory from the runs and judgements on disk.
+
+    Calls no model: it reads ``runs/`` and ``judgements/`` and re-applies the current rules.
+    The recorded ``summary.json`` supplies only the reference, graph and judge model (and the
+    cost multiple unless overridden). Every directory under ``runs/`` takes part, listed in
+    the old summary or not, so a model the old summary dropped is neither lost nor hidden.
+    """
     summary_path = out / SUMMARY_FILE
     try:
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
+        recorded = json.loads(summary_path.read_text(encoding="utf-8"))
+        reference_id = recorded["reference"]
+        listed = [*recorded["models"], *(e["model_id"] for e in recorded.get("excluded_models", []))]
+    except (OSError, ValueError, KeyError) as e:
         raise BenchmarkError(f"Cannot read {summary_path}: {e}") from e
-    reference = summary["reference"]
-    runs = {model_id: load_run(out / block["run_dir"]) for model_id, block in summary["models"].items()}
-    judgements = {
-        model_id: load_judgement(out / JUDGEMENTS_DIR / judgement_dirname(model_id, reference))
-        for model_id in summary["models"]
-        if model_id != reference
-    }
+    on_disk = sorted(p.name for p in (out / RUNS_DIR).iterdir() if p.is_dir()) if (out / RUNS_DIR).is_dir() else []
+    model_ids = list(dict.fromkeys([reference_id, *listed, *on_disk]))
+
+    runs, excluded = load_runs({m: out / RUNS_DIR / m for m in model_ids})
+    reference_run = _reference_run(runs, excluded, reference_id)
+    judgements: dict[str, Judgement] = {}
+    for model_id, run in runs.items():
+        path = out / JUDGEMENTS_DIR / judgement_dirname(model_id, reference_id) / JUDGEMENT_FILE
+        if model_id != reference_id and path.exists():
+            judgement = load_judgement(path.parent)
+            _check_judgement(judgement, run, reference_run, path)
+            judgements[model_id] = judgement
+    summary = build_comparison_summary(
+        reference_run,
+        [r for m, r in runs.items() if m != reference_id],
+        judgements,
+        graph=recorded.get("graph", reference_run.meta.architecture),
+        judge_model=recorded.get("judge_model", "unknown"),
+        run_dirs={m: str(Path(RUNS_DIR) / m) for m in model_ids},
+        chat_cost_multiple=(
+            chat_cost_multiple
+            if chat_cost_multiple is not None
+            else recorded.get("chat_cost_multiple", DEFAULT_CHAT_COST_MULTIPLE)
+        ),
+        excluded=excluded,
+    )
     return summary, runs, judgements
