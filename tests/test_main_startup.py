@@ -13,6 +13,11 @@ Two layers of coverage:
   startup path, proving uvicorn would fail in the same condition.
 """
 
+import logging
+import os
+import subprocess
+import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -23,8 +28,11 @@ from api.main import (
     app,
     check_production_auth_config,
     check_production_sec_config,
+    resolve_log_level,
     set_sec_identity,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture(autouse=True)
@@ -226,3 +234,68 @@ def test_app_starts_in_prod_with_sec_header_configured(monkeypatch):
     monkeypatch.delenv("DISABLE_AUTH", raising=False)
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# LOG_LEVEL / EDGAR_LOG_LEVEL — an invalid value must not crash startup
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_log_level_unset_uses_default(monkeypatch, caplog):
+    monkeypatch.delenv("EDGAR_LOG_LEVEL", raising=False)
+    caplog.set_level(logging.WARNING, logger="api.main")
+    assert resolve_log_level("EDGAR_LOG_LEVEL", "WARNING") == logging.WARNING
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("error", logging.ERROR),
+    ("DEBUG", logging.DEBUG),
+    (" Info ", logging.INFO),
+])
+def test_resolve_log_level_applies_valid_value(monkeypatch, caplog, raw, expected):
+    monkeypatch.setenv("EDGAR_LOG_LEVEL", raw)
+    caplog.set_level(logging.WARNING, logger="api.main")
+    assert resolve_log_level("EDGAR_LOG_LEVEL", "WARNING") == expected
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize("raw", ["verbose", "", "10"])
+def test_resolve_log_level_invalid_falls_back_and_warns_once(monkeypatch, caplog, raw):
+    monkeypatch.setenv("EDGAR_LOG_LEVEL", raw)
+    caplog.set_level(logging.WARNING, logger="api.main")
+    assert resolve_log_level("EDGAR_LOG_LEVEL", "WARNING") == logging.WARNING
+    warnings = [r for r in caplog.records if r.name == "api.main"]
+    assert len(warnings) == 1
+    assert "EDGAR_LOG_LEVEL" in warnings[0].getMessage()
+
+
+def _import_main_with_env(**overrides: str) -> subprocess.CompletedProcess:
+    """Import api.main in a fresh interpreter (module-level logging setup runs
+    once per process, so reloading it in-process would swap `app` under other
+    tests) and print the resulting root and edgar logger levels."""
+    env = {**os.environ, **overrides}
+    return subprocess.run(
+        [
+            sys.executable, "-c",
+            "import logging, api.main; "
+            "print(logging.getLogger().level, logging.getLogger('edgar').level)",
+        ],
+        cwd=_REPO_ROOT, env=env, capture_output=True, text=True, timeout=180,
+    )
+
+
+def test_app_imports_with_invalid_log_levels():
+    result = _import_main_with_env(LOG_LEVEL="loud", EDGAR_LOG_LEVEL="verbose")
+    assert result.returncode == 0, result.stderr
+    root_level, edgar_level = map(int, result.stdout.split()[-2:])
+    assert (root_level, edgar_level) == (logging.INFO, logging.WARNING)
+    assert "LOG_LEVEL='loud'" in result.stderr
+    assert "EDGAR_LOG_LEVEL='verbose'" in result.stderr
+
+
+def test_app_import_applies_valid_log_levels():
+    result = _import_main_with_env(LOG_LEVEL="debug", EDGAR_LOG_LEVEL="error")
+    assert result.returncode == 0, result.stderr
+    root_level, edgar_level = map(int, result.stdout.split()[-2:])
+    assert (root_level, edgar_level) == (logging.DEBUG, logging.ERROR)

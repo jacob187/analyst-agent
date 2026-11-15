@@ -16,14 +16,33 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+
+def resolve_log_level(env_var: str, default: str) -> int:
+    """Level named by `env_var`, or `default` (with a warning) when it isn't a
+    known level name, so a typo can't crash startup."""
+    raw = os.getenv(env_var)
+    levels = logging.getLevelNamesMapping()
+    if raw is None:
+        return levels[default]
+    level = levels.get(raw.strip().upper())
+    if level is None:
+        # A named logger, not logging.warning(): that would run basicConfig()
+        # implicitly and turn the real configuration below into a no-op.
+        logging.getLogger(__name__).warning(
+            "Ignoring invalid %s=%r; using %s", env_var, raw, default
+        )
+        return levels[default]
+    return level
+
+
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    level=resolve_log_level("LOG_LEVEL", "INFO"),
     format="%(asctime)s  %(name)s  %(message)s",
     datefmt="%H:%M:%S",
 )
 # edgartools logs every section-detection step at INFO, which buries the app's
 # own logs. Keep its warnings and errors; override with EDGAR_LOG_LEVEL.
-logging.getLogger("edgar").setLevel(os.getenv("EDGAR_LOG_LEVEL", "WARNING").upper())
+logging.getLogger("edgar").setLevel(resolve_log_level("EDGAR_LOG_LEVEL", "WARNING"))
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
