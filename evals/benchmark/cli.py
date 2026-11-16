@@ -111,7 +111,8 @@ def build_parser() -> argparse.ArgumentParser:
     compare_report.add_argument(
         "--summary-out", type=Path,
         help="summary JSON file (default: <dir>/summary.json). An existing file whose content differs "
-        "(ignoring generated_at) is kept as <name>.prev.json first",
+        "(ignoring generated_at) is kept as <name>.prev.json first (one previous copy only: a later "
+        "differing rebuild replaces it)",
     )
     compare_report.add_argument(
         "--chat-cost-multiple", type=float,
@@ -169,6 +170,8 @@ def _cmd_judge(args: argparse.Namespace) -> int:
     run_a, run_b = load_run(args.a), load_run(args.b)
     check_comparable(run_a, run_b)
     previous = _previous_judgement(args, run_a, run_b, model.id)  # before any key or LLM is touched
+    if previous is not None and args.seed is not None and args.seed != previous.seed:
+        print(f"Completing the judgement in {args.out}: using its recorded seed {previous.seed}, not --seed {args.seed}.")
     provider_api_key(model)
     seed = args.seed if args.seed is not None else secrets.randbits(32)
     judgement = asyncio.run(
