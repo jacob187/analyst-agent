@@ -137,8 +137,8 @@ class LLMCallCharger(BaseCallbackHandler):
             await charger.settle()
 
     Enforcement: the charger tracks today's usage, starting from `used` (what
-    the pre-flight read; routes always pass it, 0 means unknown) plus its own
-    calls, and raised to the count each DB
+    the pre-flight read — required, so a caller can't silently start from 0)
+    plus its own calls, and raised to the count each DB
     increment returns, which includes other requests' charges. A call that
     starts once that reaches `LLM_DAILY_BUDGET` raises `LLMBudgetExceeded`
     from the LLM call (`raise_error`), so the run stops. The check never
@@ -163,7 +163,7 @@ class LLMCallCharger(BaseCallbackHandler):
     run_inline = True  # fire on the calling thread; scheduling is ours
     raise_error = True  # LLMBudgetExceeded must reach the LLM call
 
-    def __init__(self, user_id: str, *, used: int = 0) -> None:
+    def __init__(self, user_id: str, *, used: int) -> None:
         self.user_id = user_id
         self.calls = 0
         self._used = used
