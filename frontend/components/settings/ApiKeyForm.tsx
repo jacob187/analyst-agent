@@ -13,10 +13,15 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { PROVIDER_KEY_FIELD, modelNeedsOwnKey, useApiKeys } from "@/hooks/useApiKeys";
+import {
+  PROVIDER_KEY_FIELD,
+  modelHasKey,
+  operatorModelIds,
+  useApiKeys,
+} from "@/hooks/useApiKeys";
 import { useModels } from "@/hooks/useModels";
-import { authDisabled, useAuth } from "@/lib/auth";
-import { PROVIDER_LABELS, type Provider } from "@/lib/constants";
+import { useAuth } from "@/lib/auth";
+import { AUTH_DISABLED, PROVIDER_LABELS, type Provider } from "@/lib/constants";
 import type { ApiKeys, Model } from "@/types";
 
 export function ApiKeyForm() {
@@ -48,12 +53,16 @@ export function ApiKeyForm() {
   const providers: Provider[] = ["google_genai", "openai", "anthropic"];
   const keyField = PROVIDER_KEY_FIELD;
 
-  // The server lends its keys only for operator-lendable models, and only to
-  // signed-in users; self-host (auth disabled) runs every model on its keys.
-  const enforcesOwnKey = !!isSignedIn && !authDisabled;
-  const needsOwnKey = (m: Model) => enforcesOwnKey && modelNeedsOwnKey(m, draft);
-  const selectedModel =
-    models.find((m) => m.id === draft.model_id) ?? models.find((m) => m.default);
+  // Which models the server's keys pay for comes from the server
+  // (`operator_models`); signed-in users on a hosted deploy need their own key
+  // for any other model. Self-host (auth disabled) uses the server's keys.
+  const enforcesOwnKey = !!isSignedIn && !AUTH_DISABLED && !!envKeys;
+  const operatorModels = envKeys ? operatorModelIds(envKeys, models) : new Set<string>();
+  const needsOwnKey = (m: Model) =>
+    enforcesOwnKey && !modelHasKey(m, draft, operatorModels);
+  // Only an explicit choice is held to its own key: with "Default model" the
+  // backend runs whichever model a key can run.
+  const selectedModel = models.find((m) => m.id === draft.model_id);
 
   return (
     <form onSubmit={handleSave} className="space-y-6">

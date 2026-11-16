@@ -16,9 +16,13 @@ export async function serverAuthHeaders(): Promise<Record<string, string>> {
     return DEV_USER_ID ? { "X-User-Id": DEV_USER_ID } : {};
   }
   try {
-    const { getToken } = await auth();
+    const { getToken, userId } = await auth();
     const token = await getToken();
-    return token ? { "X-Clerk-Session-Token": token } : {};
+    if (!token) return {};
+    // The id must equal the token's subject; older backends read only the id.
+    return userId
+      ? { "X-Clerk-Session-Token": token, "X-User-Id": userId }
+      : { "X-Clerk-Session-Token": token };
   } catch (err) {
     // Clerk unconfigured or middleware not applied: fall back to anonymous.
     console.error("serverAuthHeaders: could not read Clerk session", err);

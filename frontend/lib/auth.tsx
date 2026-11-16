@@ -23,8 +23,6 @@ import type { ReactNode } from "react";
 
 import { AUTH_DISABLED, LOCAL_DEV_USER_ID } from "./constants";
 
-export const authDisabled = AUTH_DISABLED;
-
 interface UseAuthShape {
   isLoaded: boolean;
   isSignedIn: boolean | undefined;
@@ -35,7 +33,7 @@ function noAuthUseAuth(): UseAuthShape {
   return { isLoaded: true, isSignedIn: true, userId: LOCAL_DEV_USER_ID };
 }
 
-export const useAuth: () => UseAuthShape = authDisabled
+export const useAuth: () => UseAuthShape = AUTH_DISABLED
   ? noAuthUseAuth
   : (clerkUseAuth as () => UseAuthShape);
 
@@ -45,7 +43,7 @@ interface ShowProps {
 }
 
 export function Show({ when, children }: ShowProps) {
-  if (authDisabled) {
+  if (AUTH_DISABLED) {
     // Treat the local-dev user as always-signed-in.
     return when === "signed-in" ? <>{children}</> : null;
   }
@@ -58,11 +56,11 @@ interface SignInButtonProps {
 }
 
 export function SignInButton({ mode, children }: SignInButtonProps) {
-  if (authDisabled) return null;
+  if (AUTH_DISABLED) return null;
   return <ClerkSignInButton mode={mode}>{children}</ClerkSignInButton>;
 }
 
 export function UserButton(props: React.ComponentProps<typeof ClerkUserButton>) {
-  if (authDisabled) return null;
+  if (AUTH_DISABLED) return null;
   return <ClerkUserButton {...props} />;
 }
