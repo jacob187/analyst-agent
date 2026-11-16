@@ -215,6 +215,12 @@ class TestToolOutputText:
         assert tool_output_text(blocks)[0] == "one\ntwo"
         assert tool_output_text("plain text output") == ("plain text output", False)
 
+    @pytest.mark.parametrize("data", [[1, 2], None, "text", 3])
+    def test_a_raw_tool_json_whose_data_is_not_an_object_is_kept_as_raw_text(self, data):
+        # The planner worker records a tool's raw return string, not a ToolMessage.
+        raw = json.dumps({"data": data, "x": "y"})
+        assert tool_output_text(raw) == (raw, False)
+
 
 class TestOlderQuestionFilesStillLoad:
     def test_a_question_json_without_the_evidence_fields_loads_with_evidence_unrecorded(self, tmp_path):

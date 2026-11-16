@@ -107,7 +107,9 @@ def tool_output_text(raw: str) -> tuple[str, bool]:
             except json.JSONDecodeError:
                 return _partial_json_string(body), True
         return raw, cut
-    content = data.get("data", {}).get("content") if isinstance(data, dict) else None
+    # A raw tool return (planner path) can be any JSON; only a ToolMessage has a dict ``data``.
+    inner = data.get("data") if isinstance(data, dict) else None
+    content = inner.get("content") if isinstance(inner, dict) else None
     if isinstance(content, str):
         return content, cut
     if isinstance(content, list):  # provider content blocks
