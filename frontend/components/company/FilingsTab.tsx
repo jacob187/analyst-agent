@@ -37,6 +37,7 @@ function ProgressRow({ step }: { step: FilingProgressEvent }) {
   const cached = step.status === "cached";
   const failed = step.status === "failed";
   const needsKey = step.status === "needs_key";
+  const overBudget = step.status === "budget_exceeded";
 
   return (
     <div className="flex items-center gap-2 text-xs">
@@ -44,7 +45,7 @@ function ProgressRow({ step }: { step: FilingProgressEvent }) {
         <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
       ) : failed ? (
         <XCircle className="h-3 w-3 shrink-0 text-destructive" />
-      ) : needsKey ? (
+      ) : needsKey || overBudget ? (
         <Lock className="h-3 w-3 shrink-0 text-amber-400" />
       ) : cached ? (
         <Zap className="h-3 w-3 shrink-0 text-blue-400" />
@@ -65,6 +66,15 @@ function ProgressRow({ step }: { step: FilingProgressEvent }) {
       {needsKey && (
         <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-400">
           sign in to generate
+        </span>
+      )}
+
+      {overBudget && (
+        <span
+          className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-400"
+          title={step.message}
+        >
+          daily limit reached
         </span>
       )}
 
@@ -97,7 +107,13 @@ function PendingSection({ title }: { title: string }) {
 
 // ─── Locked section — cached miss with no key (anon / keyless) ─────────────────
 
-function LockedSection({ title }: { title: string }) {
+function LockedSection({
+  title,
+  reason = "Sign in or add a key to generate",
+}: {
+  title: string;
+  reason?: string;
+}) {
   return (
     <div className="rounded-xl border border-border/60 bg-card overflow-hidden">
       <div className="flex items-center gap-3 px-4 py-3">
@@ -105,9 +121,7 @@ function LockedSection({ title }: { title: string }) {
         <span className="font-display text-sm font-semibold text-muted-foreground">
           {title}
         </span>
-        <span className="ml-auto text-xs text-muted-foreground">
-          Sign in or add a key to generate
-        </span>
+        <span className="ml-auto text-xs text-muted-foreground">{reason}</span>
       </div>
     </div>
   );
@@ -173,8 +187,13 @@ export function FilingsTab({ data, loading, progressSteps }: FilingsTabProps) {
     progressSteps.filter((s) => s.status === "needs_key").map((s) => s.step),
   );
   const anyNeedsKey = needsKeySteps.size > 0;
+  // Sections refused because today's LLM budget ran out mid-request.
+  const overBudgetSteps = new Set(
+    progressSteps.filter((s) => s.status === "budget_exceeded").map((s) => s.step),
+  );
 
-  // One section slot: real analysis → pending skeleton → locked prompt → nothing.
+  // One section slot: real analysis → pending skeleton → locked prompt (no key, or
+  // daily budget spent) → nothing.
   const sect = (
     title: string,
     step: string,
@@ -184,6 +203,14 @@ export function FilingsTab({ data, loading, progressSteps }: FilingsTabProps) {
     if (analysis) return <FilingSection title={title} analysis={analysis} metadata={metadata} />;
     if (loading) return <PendingSection title={title} />;
     if (needsKeySteps.has(step)) return <LockedSection title={title} />;
+    if (overBudgetSteps.has(step)) {
+      return (
+        <LockedSection
+          title={title}
+          reason="Daily limit reached. Try tomorrow or add your own key"
+        />
+      );
+    }
     return null;
   };
 
