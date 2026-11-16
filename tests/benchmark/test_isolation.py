@@ -194,6 +194,68 @@ class TestCompareModelsIsolation:
         assert not default_db.exists()
 
 
+# What the process-wide caches held when each question's agent was built.
+CACHE_SIZES: list[dict[str, int]] = []
+
+
+def _process_caches():
+    from agents.sec_workflow import analysis_cache
+    from agents.technical_workflow import indicator_window
+    from agents.tools import research_tools
+
+    return {
+        "sec_retrievers": analysis_cache._shared_retrievers,
+        "latest_filings": analysis_cache._latest_filings,
+        "latest_locks": analysis_cache._latest_locks,
+        "analysis_locks": analysis_cache._analysis_locks,
+        "research": research_tools._research_cache,
+        "price_data": indicator_window._retriever_cache,
+    }
+
+
+async def _build_cache_probe(ticker: str, model_id: str):
+    """Records the cache sizes, then warms every cache the way a real question would."""
+    caches = _process_caches()
+    CACHE_SIZES.append({name: len(cache) for name, cache in caches.items()})
+    for name, cache in caches.items():
+        cache[(ticker, name)] = object()
+    return FakeAgent(f"Answer about {ticker}.")
+
+
+class TestProcessCaches:
+    @pytest.fixture(autouse=True)
+    def _probe(self, monkeypatch):
+        from evals.benchmark.isolation import reset_process_caches
+
+        CACHE_SIZES.clear()
+        monkeypatch.setitem(ARCHITECTURES, "probe", _build_cache_probe)
+        yield
+        reset_process_caches()  # leave nothing warm for the next test
+
+    def test_each_run_in_one_process_starts_with_cold_caches(self, default_db, monkeypatch, tmp_path):
+        free = get_free_tier_model()
+        paid = other_model(free, provider=free.provider)
+        for m in (free, paid):
+            set_operator_key(monkeypatch, m)
+        monkeypatch.setattr("evals.benchmark.judge.build_judge_llm", lambda _model: FakeJudge())
+        qfile = tmp_path / "questions.yaml"
+        qfile.write_text(yaml.safe_dump(
+            [{"id": i, "ticker": "AAPL", "category": "filing_lookup", "question": f"Question {i}?"} for i in ("q1", "q2")]
+        ))
+        code = main(["compare-models", "--graph", "probe", "--questions", str(qfile), "--out", str(tmp_path / "out"),
+                     "--models", paid.id, "--yes"])
+
+        assert code == 0
+        first_run_q1, first_run_q2, second_run_q1, _ = CACHE_SIZES
+        assert set(first_run_q1.values()) == {0}
+        assert set(first_run_q2.values()) == {1}  # within a run the caches do warm up
+        assert set(second_run_q1.values()) == {0}  # the next model's run does not inherit them
+
+    async def test_the_run_note_says_what_is_reset(self, default_db, model, tmp_path):
+        meta = await run_benchmark("probe", model, [_q("q1")], tmp_path / "run", progress=lambda _m: None)
+        assert "caches are cleared" in meta.notes[0]
+
+
 class TestOtelTruncationWarning:
     TRUNCATION = "exceeds max length"
 

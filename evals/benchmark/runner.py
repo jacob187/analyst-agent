@@ -34,8 +34,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _RUN_NOTES = [
     "Questions run sequentially in one process against a fresh temporary SQLite database "
-    "created for this run. Filing analyses are cached in that database, so later questions "
-    "on the same filing can be cheaper than the first, but nothing carries over between runs.",
+    "created for this run, and the agent's process-wide caches are cleared when the run starts "
+    "(SEC filing retrievers and latest-filing lookups, Tavily research results, Yahoo Finance "
+    "retrievers). Within the run those caches and the database fill up, so later questions on "
+    "the same filing can be cheaper and faster than the first; none of them is reused by the "
+    "next run. Caches inside libraries (e.g. edgartools) are not controlled.",
     "Token counts come from LLM spans; calls whose span has no usage are counted in "
     "llm_calls_without_usage and make that question's cost unknown.",
     "Each question records its tool calls' inputs and outputs as judge evidence (outermost tool "
