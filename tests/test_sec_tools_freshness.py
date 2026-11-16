@@ -61,13 +61,7 @@ async def _row(form: str, accession: str, analysis_type: str):
 
 
 def _restart_process() -> None:
-    for cache in (
-        analysis_cache._shared_retrievers,
-        analysis_cache._latest_filings,
-        analysis_cache._latest_locks,
-        analysis_cache._analysis_locks,
-    ):
-        cache.clear()
+    analysis_cache.clear_caches()
 
 
 # ── #1: raw tools go through the freshness check too ─────────────────────────

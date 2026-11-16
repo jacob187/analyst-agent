@@ -31,7 +31,8 @@ from api.routes import chat
 from tests.conftest import (
     byok_auth_field,
     clear_operator_keys,
-    non_lendable_model,
+    llm_usage,
+    model_where,
     other_model,
     set_operator_key,
 )
@@ -683,7 +684,7 @@ class TestAnonFreeTrial:
         # setting it must not make the free-trial branch unreachable.
         _patch_agent(monkeypatch)
         _enable_trial(monkeypatch)
-        monkeypatch.setenv("DEFAULT_MODEL_ID", non_lendable_model().id)
+        monkeypatch.setenv("DEFAULT_MODEL_ID", model_where(operator_lendable=False).id)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
             ws.send_text(json.dumps({"type": "auth"}))
@@ -787,7 +788,7 @@ class TestAnonFreeTrial:
         # a different model without a key is still refused.
         _patch_agent(monkeypatch)
         _enable_trial(monkeypatch)
-        other = non_lendable_model()
+        other = model_where(operator_lendable=False)
         set_operator_key(monkeypatch, other)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -1036,11 +1037,9 @@ class TestAnonFreeTrial:
 # ── Operator key only pays for operator_lendable models ─────────────────────
 
 # The free-trial model is operator_lendable by registry validation; the
-# non-lendable one is whichever the registry flags as such.
+# non-lendable one comes from the `non_lendable` fixture (tests/conftest.py).
 _LENDABLE_MODEL = get_free_tier_model()
 _LENDABLE = _LENDABLE_MODEL.id
-_NON_LENDABLE_MODEL = non_lendable_model()
-_NON_LENDABLE = _NON_LENDABLE_MODEL.id
 
 
 def _set_operator_keys(monkeypatch):
@@ -1056,21 +1055,21 @@ def _first_frame(client, auth):
 
 class TestOperatorKeyAllowlist:
     def test_signed_in_non_lendable_model_without_own_key_is_refused(
-        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch, non_lendable
     ):
         _patch_agent(monkeypatch)
         _set_operator_keys(monkeypatch)
         priv, _ = rsa_keypair
-        auth = {"type": "auth", "clerk_session_token": _make_token(priv), "model_id": _NON_LENDABLE}
+        auth = {"type": "auth", "clerk_session_token": _make_token(priv), "model_id": non_lendable.id}
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
             ws.send_text(json.dumps(auth))
             err = ws.receive_json()
-            provider = _NON_LENDABLE_MODEL.provider.replace("_", " ").title()
+            provider = non_lendable.provider.replace("_", " ").title()
             assert err == {
                 "type": "error",
                 "message": (
-                    f"{provider} API key required for {_NON_LENDABLE_MODEL.display_name}. "
+                    f"{provider} API key required for {non_lendable.display_name}. "
                     "Add your key in Settings."
                 ),
             }
@@ -1090,66 +1089,61 @@ class TestOperatorKeyAllowlist:
         assert ok["model_id"] == _LENDABLE
 
     def test_signed_in_byok_key_runs_non_lendable_model(
-        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch, non_lendable
     ):
         _patch_agent(monkeypatch)
         _set_operator_keys(monkeypatch)
         priv, _ = rsa_keypair
         auth = {
             "type": "auth", "clerk_session_token": _make_token(priv),
-            "model_id": _NON_LENDABLE,
-            **byok_auth_field(_NON_LENDABLE_MODEL.provider, "their-key"),
+            "model_id": non_lendable.id,
+            **byok_auth_field(non_lendable.provider, "their-key"),
         }
         ok = _first_frame(client, auth)
         assert ok["type"] == "auth_success"
-        assert ok["model_id"] == _NON_LENDABLE
+        assert ok["model_id"] == non_lendable.id
 
-    def test_anon_byok_key_runs_non_lendable_model(self, client, temp_db, clerk_env, monkeypatch):
+    def test_anon_byok_key_runs_non_lendable_model(self, client, temp_db, clerk_env, monkeypatch, non_lendable):
         _patch_agent(monkeypatch)
         auth = {
-            "type": "auth", "model_id": _NON_LENDABLE,
-            **byok_auth_field(_NON_LENDABLE_MODEL.provider, "their-key"),
+            "type": "auth", "model_id": non_lendable.id,
+            **byok_auth_field(non_lendable.provider, "their-key"),
         }
         ok = _first_frame(client, auth)
         assert ok["type"] == "auth_success"
-        assert ok["model_id"] == _NON_LENDABLE
+        assert ok["model_id"] == non_lendable.id
 
     def test_signed_in_without_model_choice_lands_on_a_lendable_model(
-        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch, non_lendable
     ):
         # The operator's default points at a model it won't lend; the caller
         # picked nothing, so they get a lendable model instead of a refusal.
         _patch_agent(monkeypatch)
         _set_operator_keys(monkeypatch)
-        monkeypatch.setenv("DEFAULT_MODEL_ID", _NON_LENDABLE)
+        monkeypatch.setenv("DEFAULT_MODEL_ID", non_lendable.id)
         priv, _ = rsa_keypair
         ok = _first_frame(client, {"type": "auth", "clerk_session_token": _make_token(priv)})
         assert ok["type"] == "auth_success"
         assert get_model(ok["model_id"]).operator_lendable is True
 
-    def test_self_host_may_use_any_model_on_env_keys(self, client, temp_db, monkeypatch):
+    def test_self_host_may_use_any_model_on_env_keys(self, client, temp_db, monkeypatch, non_lendable):
         # Clerk unconfigured (conftest default): the env keys are the
         # self-hoster's own, so the allowlist doesn't apply.
         _patch_agent(monkeypatch)
         _set_operator_keys(monkeypatch)
-        ok = _first_frame(client, {"type": "auth", "model_id": _NON_LENDABLE})
+        ok = _first_frame(client, {"type": "auth", "model_id": non_lendable.id})
         assert ok["type"] == "auth_success"
-        assert ok["model_id"] == _NON_LENDABLE
+        assert ok["model_id"] == non_lendable.id
 
 
 # ── Daily budget counts LLM calls ───────────────────────────────────────────
-
-
-def _usage(user_id: str) -> int:
-    import api.db as db_module
-    return asyncio.run(db_module.get_llm_usage(user_id))
 
 
 def _wait_for_usage(user_id: str, expected: int) -> int:
     """Charges settle after the response frame is sent; poll briefly."""
     deadline = time.monotonic() + 3
     while True:
-        used = _usage(user_id)
+        used = llm_usage(user_id)
         if used >= expected or time.monotonic() > deadline:
             return used
         time.sleep(0.05)
@@ -1246,7 +1240,7 @@ class TestPerCallBudget:
             assert err["type"] == "error"
             assert err["message"].startswith("Daily LLM budget reached.")
 
-        assert _usage(_SIGNED_IN) == 3
+        assert llm_usage(_SIGNED_IN) == 3
 
     def test_run_stops_once_the_budget_is_spent_mid_query(self, client, temp_db, monkeypatch):
         import api.db as db_module
@@ -1310,7 +1304,7 @@ class TestPerCallBudget:
             _drain_until(ws, "response")
 
         time.sleep(0.2)
-        assert _usage(_SIGNED_IN) == 0
+        assert llm_usage(_SIGNED_IN) == 0
 
 
 # ── One INFO line per query: which model answered, and who paid ─────────────

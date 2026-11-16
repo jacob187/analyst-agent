@@ -8,8 +8,10 @@ explicit args schemas that ignore unknown arguments, while the graph's
 ``tool.ainvoke("")`` / single-string call shape keeps working.
 """
 
-import inspect
+from datetime import date
 
+import numpy as np
+import pandas as pd
 import pytest
 
 import api.db as db_module
@@ -21,6 +23,15 @@ from agents.tools import (
     research_tools,
     sec_tools,
     stock_tools,
+)
+from tests.sec_fakes import (
+    CountingChatModel,
+    FakeEdgar,
+    FakeEightK,
+    FakeFiling,
+    eightk,
+    tenk,
+    tenq,
 )
 
 USER_ID = "user_2abcdefghijklmnopqrstuvwxyz"
@@ -163,7 +174,7 @@ class _AllowAll:
 
 def _build(family: str) -> list:
     if family == "sec":
-        return sec_tools.create_sec_tools("AAPL", object())
+        return sec_tools.create_sec_tools("AAPL", CountingChatModel())
     if family == "stock":
         return stock_tools.create_stock_tools("AAPL")
     if family == "market":
@@ -207,35 +218,83 @@ def _clear_research_cache():
     research_tools._research_cache.clear()
 
 
+def _daily_bars(n: int = 400) -> pd.DataFrame:
+    """Deterministic OHLCV bars: enough history for MA200 and pattern scans."""
+    index = pd.bdate_range(end="2026-11-13", periods=n, tz="America/New_York")
+    close = 100 + 10 * np.sin(np.arange(n) / 9) + 0.05 * np.arange(n)
+    return pd.DataFrame(
+        {"Open": close - 0.5, "High": close + 1.0, "Low": close - 1.0,
+         "Close": close, "Volume": np.full(n, 1_000_000)},
+        index=index,
+    )
+
+
+def _statement(rows: dict[str, tuple[float, float]]) -> pd.DataFrame:
+    return pd.DataFrame(rows, index=["2025-12-31", "2024-12-31"]).T
+
+
+class _FakeYfTicker:
+    """yfinance ``Ticker`` at the external-API boundary."""
+
+    info = {"longName": "Test Co", "currentPrice": 150.0, "previousClose": 148.0,
+            "marketCap": 2.5e12, "trailingPE": 28.0, "sector": "Technology"}
+    income_stmt = _statement({"Total Revenue": (400e9, 380e9), "Net Income": (100e9, 95e9)})
+    balance_sheet = _statement({"Total Assets": (350e9, 340e9), "Total Debt": (100e9, 110e9)})
+    calendar: dict = {}
+
+    def __init__(self, symbol: str):
+        self.symbol = symbol
+
+    def history(self, period: str = "1y", interval: str = "1d", **_kwargs) -> pd.DataFrame:
+        return _daily_bars()
+
+
+class _FakeTavilyClient:
+    """Tavily's research client: completes on the first poll."""
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    def research(self, input: str):
+        return {"request_id": "req-1"}
+
+    def get_research(self, request_id: str):
+        return {"status": "completed", "content": "Research findings.", "sources": []}
+
+
 @pytest.fixture
-def stubbed_impls(monkeypatch):
-    """Replace each tool's implementation function with a recorder.
+async def boundaries(tmp_path, monkeypatch):
+    """Fakes at every external boundary the tool bodies reach, so the real
+    implementations run behind the argument layer under test: an in-memory
+    EDGAR plus a fake chat model (tests/sec_fakes.py; `_build("sec")`),
+    yfinance's ``Ticker``, Tavily's search and research clients, and a temp
+    SQLite DB (analysis cache, briefings)."""
+    from agents.technical_workflow import indicator_window
 
-    The impls need yfinance, EDGAR, Tavily or an LLM; this test is about the
-    argument layer in front of them, so the network-bound bodies are swapped
-    for functions that record their arguments and return a fixed string.
-    """
-    calls: list[tuple[str, tuple]] = []
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr(db_module, "_db", None)
+    await db_module.init_db()
 
-    def _recorder(name, fn):
-        if inspect.iscoroutinefunction(fn):
+    edgar = FakeEdgar()
+    edgar.publish(tenk("0000320193-25-000101", "2025-11-01", "10-K risk: supply chain."))
+    edgar.publish(tenq("0000320193-26-000111", "2026-02-01", "10-Q risk: new tariffs."))
+    edgar.publish(eightk("0000320193-26-000121", "2026-01-30"))
+    edgar.install(monkeypatch)
 
-            async def wrapper(*args, **kwargs):
-                calls.append((name, args))
-                return f"ok:{name}"
-        else:
+    monkeypatch.setattr("yfinance.Ticker", _FakeYfTicker)
+    indicator_window._retriever_cache.clear()
+    monkeypatch.setattr(research_tools, "TavilySearch", _FixtureTavilySearch)
+    monkeypatch.setattr(research_tools, "TavilyClient", _FakeTavilyClient)
+    yield
+    indicator_window._retriever_cache.clear()
+    await db_module.close_db()
 
-            def wrapper(*args, **kwargs):
-                calls.append((name, args))
-                return f"ok:{name}"
 
-        return wrapper
-
-    for module in (sec_tools, stock_tools, market_tools, research_tools, briefing_tools):
-        for name, fn in list(vars(module).items()):
-            if name.startswith("_tool_") and inspect.isfunction(fn):
-                monkeypatch.setattr(module, name, _recorder(name, fn))
-    return calls
+def _assert_ran(name: str, out: str) -> None:
+    """The real implementation ran with usable arguments: every tool body
+    turns an exception (e.g. a mis-shaped argument) into "Failed to ..."."""
+    assert isinstance(out, str), name
+    assert not out.startswith("Failed"), (name, out)
 
 
 # ── AC2: every tool accepts every call shape ─────────────────────────────────
@@ -243,22 +302,21 @@ def stubbed_impls(monkeypatch):
 
 @pytest.mark.parametrize("shape", list(_SHAPES), ids=list(_SHAPES))
 @pytest.mark.parametrize(("family", "name"), _CASES, ids=_CASE_IDS)
-async def test_every_tool_accepts_every_call_shape(stubbed_impls, family, name, shape):
+async def test_every_tool_accepts_every_call_shape(boundaries, family, name, shape):
     tool = {t.name: t for t in _build(family)}[name]
     out = await tool.ainvoke(_SHAPES[shape])
-    assert isinstance(out, str)
-    assert out.startswith("ok:")
+    _assert_ran(name, out)
 
 
 @pytest.mark.parametrize(("family", "name"), _CASES, ids=_CASE_IDS)
-async def test_every_tool_accepts_a_model_tool_call_envelope(stubbed_impls, family, name):
+async def test_every_tool_accepts_a_model_tool_call_envelope(boundaries, family, name):
     # What LangGraph's ToolNode sends for a model-emitted call.
     tool = {t.name: t for t in _build(family)}[name]
     message = await tool.ainvoke(
         {"name": name, "args": dict(_ALL_ARGS), "id": "call_1", "type": "tool_call"}
     )
     assert message.status == "success"
-    assert message.content.startswith("ok:")
+    _assert_ran(name, message.content)
 
 
 @pytest.mark.parametrize(("family", "name"), _CASES, ids=_CASE_IDS)
@@ -269,14 +327,14 @@ async def test_tools_are_not_single_input(family, name):
     assert isinstance(tool, StructuredTool)
 
 
-async def test_graph_worker_runs_every_tool_with_its_empty_string_call(stubbed_impls):
+async def test_graph_worker_runs_every_tool_with_its_empty_string_call(boundaries):
     tools = {t.name: t for family in FAMILIES for t in _build(family)}
     worker = create_worker_node(tools)
     for step_id, name in enumerate(tools, start=1):
         step = AnalysisStep(id=step_id, action="x", tool=name, rationale="y")
         result = (await worker({"step": step}))["step_results"][step_id]
         assert not result["error"], (name, result["error"])
-        assert result["raw"].startswith("ok:"), name
+        _assert_ran(name, result["raw"])
 
 
 # ── AC3: names, descriptions, return formats are unchanged ───────────────────
@@ -453,19 +511,14 @@ async def test_latest_briefing_accepts_named_arguments(fresh_db):
 # ── 8-K item: named, numeric and empty forms (EDGAR retriever boundary) ──────
 
 
-class _FakeRetriever:
-    def get_8k_item(self, item):
-        return {"found": True, "text": f"text for item {item}"}
-
-
-async def _latest_filings(ticker, forms):
-    return {form: object() for form in forms}
-
-
 @pytest.fixture
 def edgar(monkeypatch):
-    monkeypatch.setattr(sec_tools, "latest_filings", _latest_filings)
-    monkeypatch.setattr(sec_tools, "get_retriever", lambda ticker: _FakeRetriever())
+    """An in-memory EDGAR whose latest 8-K holds items 1.01, 2.02 and 5.02."""
+    items = {item: f"text for item {item}" for item in ("1.01", "2.02", "5.02")}
+    filing = FakeFiling(
+        "8-K", "0000320193-26-000121", date(2026, 1, 30), FakeEightK(items, True, "2026-01-30"),
+    )
+    FakeEdgar(filings={"8-K": [filing]}).install(monkeypatch)
 
 
 @pytest.mark.parametrize(

@@ -99,6 +99,16 @@ def freshness_ttl_seconds() -> float:
     )
 
 
+def clear_caches() -> None:
+    """Drop every process-wide cache and per-key lock in this module, as a
+    process restart would. For test and benchmark isolation, not request paths."""
+    with _lock:
+        _shared_retrievers.clear()
+        _latest_filings.clear()
+    _latest_locks.clear()
+    _analysis_locks.clear()
+
+
 def get_retriever(ticker: str):
     """Process-wide ``SECDataRetrieval`` for ``ticker``. Blocking (edgartools):
     call from a worker thread."""

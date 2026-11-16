@@ -11,10 +11,9 @@ Primitives:
   `ApiKeys.is_operator_paid(provider)` so BYOK requests aren't charged.
   `ensure_budget_available(user_id)` refuses a request up front once today's
   usage is at/over the budget and returns the usage it saw; after that each
-  LLM call is charged as it happens — `LLMCallCharger` (a callback on the run
-  config, which also stops the run once the budget is spent) for agent runs,
-  `charge_llm_call` for single direct analyses. The budget unit is one LLM
-  call, not one request.
+  LLM call is charged as it happens by `LLMCallCharger` (a callback on the
+  run config or the LLM, which also refuses calls once the budget is spent).
+  The budget unit is one LLM call, not one request.
 
 The cap and budget are env-tunable. Tests override the module constants via
 `monkeypatch.setattr` and call `_rebuild_semaphore()` to pick up a new
@@ -114,11 +113,6 @@ async def ensure_budget_available(user_id: str | None) -> int:
     return used
 
 
-async def charge_llm_call(user_id: str) -> None:
-    """Charge one LLM call to user_id's daily usage."""
-    await increment_llm_usage(user_id)
-
-
 class LLMCallCharger(BaseCallbackHandler):
     """LangChain callback that charges one budget unit per LLM call started,
     and stops the run once the user's daily budget is spent.
@@ -137,8 +131,8 @@ class LLMCallCharger(BaseCallbackHandler):
             await charger.settle()
 
     Enforcement: the charger tracks today's usage, starting from `used` (what
-    the pre-flight read; routes always pass it, 0 means unknown) plus its own
-    calls, and raised to the count each DB
+    the pre-flight read — required, so a caller can't silently start from 0)
+    plus its own calls, and raised to the count each DB
     increment returns, which includes other requests' charges. A call that
     starts once that reaches `LLM_DAILY_BUDGET` raises `LLMBudgetExceeded`
     from the LLM call (`raise_error`), so the run stops. The check never
@@ -163,7 +157,7 @@ class LLMCallCharger(BaseCallbackHandler):
     run_inline = True  # fire on the calling thread; scheduling is ours
     raise_error = True  # LLMBudgetExceeded must reach the LLM call
 
-    def __init__(self, user_id: str, *, used: int = 0) -> None:
+    def __init__(self, user_id: str, *, used: int) -> None:
         self.user_id = user_id
         self.calls = 0
         self._used = used

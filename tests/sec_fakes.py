@@ -27,7 +27,13 @@ from pydantic import Field
 
 from agents.sec_workflow.sec_llm_models import (
     BalanceSheetAnalysis,
+    BusinessOverviewAnalysis,
+    CashFlowAnalysis,
+    CybersecurityAnalysis,
     EarningsAnalysis,
+    IncomeStatementAnalysis,
+    LegalProceedingsAnalysis,
+    MarketRiskAnalysis,
     MaterialEventAnalysis,
     MDnAAnalysis,
     RiskFactorAnalysis,
@@ -285,41 +291,72 @@ class _FakeCompany:
 # ── LLM boundary ─────────────────────────────────────────────────────────────
 
 
+# Each analysis schema's field that no other schema has → a valid answer
+# (``n`` numbers the call, so tests can tell answers apart).
+_ANSWERS: dict[str, Any] = {
+    '"key_risks"': lambda n: RiskFactorAnalysis(
+        summary=f"risk analysis #{n}", key_risks=["Supply chain"],
+        risk_categories={"operational": ["Supply chain"]}, sentiment_score=-2.0,
+        sentiment_analysis="Moderate risk.", form_type="10-K",
+    ),
+    '"future_outlook"': lambda n: MDnAAnalysis(
+        summary=f"mda analysis #{n}", key_points=["Growth"], financial_highlights=["Revenue up"],
+        future_outlook="Positive.", sentiment_score=5.0, sentiment_analysis="Upbeat.",
+        form_type="10-K",
+    ),
+    '"liquidity_analysis"': lambda n: BalanceSheetAnalysis(
+        summary=f"balance analysis #{n}", key_metrics=["Assets $352B"],
+        liquidity_analysis="Strong.", solvency_analysis="Low leverage.",
+        growth_trends="Steady.", financial_highlights=["Cash $60B"], red_flags=[],
+    ),
+    '"beats_misses"': lambda n: EarningsAnalysis(
+        summary=f"earnings analysis #{n}", key_metrics=["EPS $2.40"], beats_misses=["Beat"],
+        sentiment_score=6.0, sentiment_analysis="Strong quarter.",
+    ),
+    '"impact_assessment"': lambda n: MaterialEventAnalysis(
+        summary=f"event analysis #{n}", event_type="leadership_change", key_points=["CEO change"],
+        impact_assessment="Short-term volatility.", sentiment_score=-1.0,
+        sentiment_analysis="Mildly negative.",
+    ),
+    '"business_segments"': lambda n: BusinessOverviewAnalysis(
+        summary=f"business analysis #{n}", business_segments=["Devices"],
+        key_products_services=["Phones"], competitive_position="Strong brand.",
+        sentiment_score=4.0, sentiment_analysis="Solid.",
+    ),
+    '"governance_overview"': lambda n: CybersecurityAnalysis(
+        summary=f"cybersecurity analysis #{n}", governance_overview="Board audit committee.",
+        key_disclosures=["NIST CSF"], red_flags=[], sentiment_score=2.0,
+        sentiment_analysis="Adequate.",
+    ),
+    '"key_cases"': lambda n: LegalProceedingsAnalysis(
+        summary=f"legal analysis #{n}", key_cases=["Antitrust suit"], red_flags=[],
+        overall_risk="Moderate.", sentiment_score=-1.0, sentiment_analysis="Manageable.",
+    ),
+    '"key_exposures"': lambda n: MarketRiskAnalysis(
+        summary=f"market risk analysis #{n}", key_exposures=["FX"],
+        risk_assessment="Hedged.", red_flags=[], sentiment_score=0.0,
+        sentiment_analysis="Neutral.",
+    ),
+    '"revenue_analysis"': lambda n: IncomeStatementAnalysis(
+        summary=f"income statement analysis #{n}", key_metrics=["Revenue $400B"],
+        revenue_analysis="Growing.", profitability_analysis="Stable margins.", red_flags=[],
+        outlook="Positive.", sentiment_score=5.0, sentiment_analysis="Healthy.",
+    ),
+    '"operating_cash_flow_analysis"': lambda n: CashFlowAnalysis(
+        summary=f"cash flow analysis #{n}", key_metrics=["FCF $100B"],
+        operating_cash_flow_analysis="Strong.", free_cash_flow_analysis="Rising.",
+        red_flags=[], outlook="Flexible.", sentiment_score=5.0, sentiment_analysis="Healthy.",
+    ),
+}
+
+
 def _response_for(prompt: str, n: int) -> str:
     """A valid structured answer for whichever analysis the prompt asks for
     (picked by the schema field names in the format instructions)."""
-    if '"key_risks"' in prompt:
-        model = RiskFactorAnalysis(
-            summary=f"risk analysis #{n}", key_risks=["Supply chain"],
-            risk_categories={"operational": ["Supply chain"]}, sentiment_score=-2.0,
-            sentiment_analysis="Moderate risk.", form_type="10-K",
-        )
-    elif '"future_outlook"' in prompt:
-        model = MDnAAnalysis(
-            summary=f"mda analysis #{n}", key_points=["Growth"], financial_highlights=["Revenue up"],
-            future_outlook="Positive.", sentiment_score=5.0, sentiment_analysis="Upbeat.",
-            form_type="10-K",
-        )
-    elif '"liquidity_analysis"' in prompt:
-        model = BalanceSheetAnalysis(
-            summary=f"balance analysis #{n}", key_metrics=["Assets $352B"],
-            liquidity_analysis="Strong.", solvency_analysis="Low leverage.",
-            growth_trends="Steady.", financial_highlights=["Cash $60B"], red_flags=[],
-        )
-    elif '"beats_misses"' in prompt:
-        model = EarningsAnalysis(
-            summary=f"earnings analysis #{n}", key_metrics=["EPS $2.40"], beats_misses=["Beat"],
-            sentiment_score=6.0, sentiment_analysis="Strong quarter.",
-        )
-    elif '"impact_assessment"' in prompt:
-        model = MaterialEventAnalysis(
-            summary=f"event analysis #{n}", event_type="leadership_change", key_points=["CEO change"],
-            impact_assessment="Short-term volatility.", sentiment_score=-1.0,
-            sentiment_analysis="Mildly negative.",
-        )
-    else:
-        raise AssertionError("fake LLM got a prompt for an analysis it can't answer")
-    return model.model_dump_json()
+    for marker, answer in _ANSWERS.items():
+        if marker in prompt:
+            return answer(n).model_dump_json()
+    raise AssertionError("fake LLM got a prompt for an analysis it can't answer")
 
 
 class CountingChatModel(BaseChatModel):
@@ -331,6 +368,8 @@ class CountingChatModel(BaseChatModel):
 
     prompts: list[str] = Field(default_factory=list)
     delay: float = 0.0
+    in_flight: int = 0
+    peak_in_flight: int = 0  # most calls ever awaiting an answer at once
 
     @property
     def _llm_type(self) -> str:
@@ -340,13 +379,26 @@ class CountingChatModel(BaseChatModel):
     def calls(self) -> int:
         return len(self.prompts)
 
+    @property
+    def analyses(self) -> list[str]:
+        """The analysis each prompt asked for, named by its schema's
+        distinguishing field (e.g. "key_risks" for risk factors)."""
+        return [
+            next((m.strip('"') for m in _ANSWERS if m in p), "unknown") for p in self.prompts
+        ]
+
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         raise AssertionError("SEC analyses must call the LLM via ainvoke")
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         prompt = "\n".join(str(m.content) for m in messages)
         self.prompts.append(prompt)
-        if self.delay:
-            await asyncio.sleep(self.delay)
+        self.in_flight += 1
+        self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
+        try:
+            if self.delay:
+                await asyncio.sleep(self.delay)
+        finally:
+            self.in_flight -= 1
         message = AIMessage(content=_response_for(prompt, len(self.prompts)))
         return ChatResult(generations=[ChatGeneration(message=message)])

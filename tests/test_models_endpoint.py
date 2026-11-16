@@ -132,17 +132,6 @@ def operator_keys(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
 
-@pytest.fixture
-def clerk_on(monkeypatch):
-    """Hosted deploy: Clerk enabled; token verification faked at the JWT boundary."""
-    monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
-    monkeypatch.setattr(
-        dependencies, "verify_clerk_token",
-        lambda token: "user_abc123" if token == "good-token" else None,
-    )
-    dependencies._clerk_unconfigured_warned = False
-
-
 SIGNED_IN = {"X-Clerk-Session-Token": "good-token"}
 
 

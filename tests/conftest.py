@@ -145,19 +145,11 @@ def _reset_sec_analysis_caches():
     per-key asyncio locks between tests: a retriever (or patched fake) cached
     by one test must not serve the next, and a lock used on one test's event
     loop must not be reused on another's."""
-    from agents.sec_workflow import analysis_cache
+    from agents.sec_workflow.analysis_cache import clear_caches
 
-    caches = (
-        analysis_cache._shared_retrievers,
-        analysis_cache._latest_filings,
-        analysis_cache._latest_locks,
-        analysis_cache._analysis_locks,
-    )
-    for cache in caches:
-        cache.clear()
+    clear_caches()
     yield
-    for cache in caches:
-        cache.clear()
+    clear_caches()
 
 
 # ---------------------------------------------------------------------------
@@ -393,11 +385,32 @@ def byok_header(provider, value="byok-key"):
     return {f"X-{name}": value}
 
 
-def non_lendable_model():
-    """A registry model the operator's key may not pay for."""
-    from agents.model_registry import get_all_models
+def llm_usage(user_id):
+    """Today's charged LLM calls for `user_id` (the test's temp DB must be open)."""
+    import asyncio
 
-    return next(m for m in get_all_models() if not m.operator_lendable)
+    from api import db
+
+    return asyncio.run(db.get_llm_usage(user_id))
+
+
+# The user a `clerk_on` session token ("good-token") verifies as.
+CLERK_USER = "user_abc123"
+
+
+@pytest.fixture
+def clerk_on(monkeypatch):
+    """Hosted deploy: Clerk enabled, JWT verification faked at its boundary.
+    Send {"X-Clerk-Session-Token": "good-token"} to sign in as CLERK_USER."""
+    from api import dependencies
+
+    monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
+    monkeypatch.setattr(
+        dependencies, "verify_clerk_token",
+        lambda token: CLERK_USER if token == "good-token" else None,
+    )
+    dependencies._clerk_unconfigured_warned = False
+    return CLERK_USER
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +452,18 @@ def one_per_provider(**fields):
     for model in models_where(**fields):
         firsts.setdefault(model.provider, model)
     return list(firsts.values())
+
+
+@pytest.fixture
+def lendable():
+    """A registry model the operator's key may pay for."""
+    return model_where(operator_lendable=True)
+
+
+@pytest.fixture
+def non_lendable():
+    """A registry model the operator's key may not pay for."""
+    return model_where(operator_lendable=False)
 
 
 def flagged_default_model():
