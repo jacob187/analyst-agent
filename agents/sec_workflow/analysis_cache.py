@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import threading
 import time
 import weakref
@@ -32,6 +31,8 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from cachetools import LRUCache, TTLCache
+
+from agents.env_utils import env_float
 
 logger = logging.getLogger(__name__)
 
@@ -93,20 +94,9 @@ class CachedAnalysis:
 
 def freshness_ttl_seconds() -> float:
     """``FILING_FRESHNESS_TTL_SECONDS`` (read per call), else the default."""
-    raw = os.getenv("FILING_FRESHNESS_TTL_SECONDS")
-    if raw is None:
-        return DEFAULT_FRESHNESS_TTL_SECONDS
-    try:
-        ttl = float(raw)
-    except ValueError:
-        ttl = -1.0
-    if ttl < 0:
-        logger.warning(
-            "Ignoring invalid FILING_FRESHNESS_TTL_SECONDS=%r; using %ss",
-            raw, DEFAULT_FRESHNESS_TTL_SECONDS,
-        )
-        return DEFAULT_FRESHNESS_TTL_SECONDS
-    return ttl
+    return env_float(
+        "FILING_FRESHNESS_TTL_SECONDS", DEFAULT_FRESHNESS_TTL_SECONDS, minimum=0
+    )
 
 
 def get_retriever(ticker: str):
