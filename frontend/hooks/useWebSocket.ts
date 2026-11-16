@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { WS_BASE, DEV_USER_ID } from "@/lib/constants";
 import { api, getClerkIdentity } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -42,9 +42,11 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
   // ── Refs for unstable values ────────────────────────────────────────────────
   // Reading from refs inside connect() means we never need them as deps,
   // so the effect only fires once per ticker change (not on every render).
+  // Synced in a layout effect (not during render), which runs before the
+  // passive effects below, so connect() still sees the current values.
   const keysRef = useRef(keys);
   const sessionIdRef = useRef(sessionId);
-  useEffect(() => {
+  useLayoutEffect(() => {
     keysRef.current = keys;
     sessionIdRef.current = sessionId;
   });
