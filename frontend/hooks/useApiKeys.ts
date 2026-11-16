@@ -2,7 +2,8 @@
 
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { api } from "@/lib/api";
-import { authDisabled, useAuth } from "@/lib/auth";
+import { useAuth } from "@/lib/auth";
+import { AUTH_DISABLED } from "@/lib/constants";
 import type { ApiKeys, EnvKeysResponse, Model } from "@/types";
 
 const STORAGE_KEY = "analyst_agent_keys";
@@ -21,16 +22,35 @@ export const PROVIDER_KEY_FIELD: Record<Model["provider"], keyof ApiKeys> = {
   anthropic: "anthropic_api_key",
 };
 
+const PROVIDER_ENV_FLAG = {
+  google_genai: "google",
+  openai: "openai",
+  anthropic: "anthropic",
+} as const;
+
 /**
- * True when the server won't lend its key for `model` and the user hasn't
- * supplied their own key for that model's provider. Callers add the identity
- * conditions (signed in, auth enabled) — self-host and anonymous callers are
- * not subject to the operator-lendable rule. An absent `operator_lendable`
- * (older backend) counts as lendable so we never block on missing data.
+ * Ids of the models the server's own keys pay for, for this caller. The
+ * server's `operator_models` is the source of truth — it already folds in key
+ * presence, the lending rule and who is asking. A backend that predates the
+ * field only reports per-provider flags, so those stand in for it.
  */
-export function modelNeedsOwnKey(model: Model | undefined, keys: ApiKeys): boolean {
-  if (!model || model.operator_lendable !== false) return false;
-  return !keys[PROVIDER_KEY_FIELD[model.provider]];
+export function operatorModelIds(
+  envKeys: EnvKeysResponse,
+  models: Model[]
+): Set<string> {
+  if (envKeys.operator_models) return new Set(envKeys.operator_models);
+  return new Set(
+    models.filter((m) => envKeys[PROVIDER_ENV_FLAG[m.provider]]).map((m) => m.id)
+  );
+}
+
+/** True when the user has their own key for `model`'s provider, or the server's keys pay for it. */
+export function modelHasKey(
+  model: Model,
+  keys: ApiKeys,
+  operatorModels: Set<string>
+): boolean {
+  return !!keys[PROVIDER_KEY_FIELD[model.provider]] || operatorModels.has(model.id);
 }
 
 // Module-level store over localStorage, read via useSyncExternalStore. The
@@ -106,17 +126,17 @@ export function useApiKeys() {
   // relying on the env key) or against a model id about to be cleared.
   const loaded = envLoaded && modelsLoaded && authLoaded;
 
-  // The model the backend will run: the saved choice, else the registry
-  // default. Signed-in callers on a hosted deploy need their own key when it
-  // isn't operator-lendable; self-host (auth disabled) runs everything on the
-  // server's keys.
-  const selectedModel =
-    models.find((m) => m.id === keys.model_id) ??
-    models.find((m) => m.default) ??
-    models[0];
+  // Mirrors the backend's resolve_model: an explicitly saved model runs on its
+  // own key or not at all; with no saved choice the backend picks whichever
+  // model a key can run, so one runnable model is enough. Which models the
+  // server's keys pay for comes from the server (operatorModelIds), not from a
+  // client-side copy of its lending rule.
+  const operatorModels = envKeys ? operatorModelIds(envKeys, models) : new Set<string>();
+  const explicitModel = models.find((m) => m.id === keys.model_id);
   const ownKeyModel =
-    !!isSignedIn && !authDisabled && modelNeedsOwnKey(selectedModel, keys)
-      ? selectedModel
+    !!isSignedIn && !AUTH_DISABLED && envKeys && explicitModel &&
+    !modelHasKey(explicitModel, keys, operatorModels)
+      ? explicitModel
       : null;
 
   function setKeys(updated: ApiKeys) {
@@ -124,15 +144,16 @@ export function useApiKeys() {
   }
 
   function hasRequiredKeys(): boolean {
-    // Operator env provider keys are lent only to signed-in (or self-host)
-    // callers — mirror the backend's _env_keys_allowed gate. Counting them for
-    // anonymous visitors makes the chat tab render and then fail on WS connect.
-    const canUseEnvKeys = !!isSignedIn || authDisabled;
-
-    // A non-lendable model never runs on the operator's key, whatever env keys
-    // exist — chat would connect and then fail. ownKeyModel is set only when
-    // the user has no own key for that model's provider.
-    if (ownKeyModel) return false;
+    // Some key can run the model the backend will pick. The server reports
+    // operator coverage only to callers allowed to spend its keys (signed-in or
+    // self-host), so anonymous visitors never count it — otherwise the chat tab
+    // would render and then fail on WS connect.
+    const hasRunnableKey = explicitModel
+      ? modelHasKey(explicitModel, keys, operatorModels)
+      : models.length > 0
+        ? models.some((m) => modelHasKey(m, keys, operatorModels))
+        : // Model list unavailable: any own key is the best signal left.
+          Object.values(PROVIDER_KEY_FIELD).some((field) => !!keys[field]);
 
     // Anonymous free trial: the backend lends its key for exactly one light
     // model, capped per-IP. Only counts if the user hasn't picked a different
@@ -141,16 +162,12 @@ export function useApiKeys() {
     const usingFreeTrialModel =
       !keys.model_id || keys.model_id === envKeys?.free_trial_model_id;
     const canUseFreeTrial =
-      !canUseEnvKeys && !!envKeys?.free_trial_model_id && usingFreeTrialModel;
+      !isSignedIn &&
+      !AUTH_DISABLED &&
+      !!envKeys?.free_trial_model_id &&
+      usingFreeTrialModel;
 
-    return (
-      !!keys.google_api_key ||
-      !!keys.openai_api_key ||
-      !!keys.anthropic_api_key ||
-      (canUseEnvKeys &&
-        (!!envKeys?.google || !!envKeys?.openai || !!envKeys?.anthropic)) ||
-      canUseFreeTrial
-    );
+    return hasRunnableKey || canUseFreeTrial;
   }
 
   return { keys, setKeys, loaded, envKeys, hasRequiredKeys, ownKeyModel };

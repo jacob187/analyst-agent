@@ -1,9 +1,11 @@
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
-// When set, the entire Clerk middleware is bypassed — for self-hosters who
-// don't want a Clerk account. Pair with `DISABLE_AUTH=true` on the backend.
-const authDisabled = process.env.NEXT_PUBLIC_DISABLE_AUTH === "true";
+import { AUTH_DISABLED } from "./lib/constants";
+
+// When AUTH_DISABLED, the entire Clerk middleware is bypassed — for
+// self-hosters who don't want a Clerk account. Pair with `DISABLE_AUTH=true`
+// on the backend.
 
 // Progressive auth: most routes are public — signed-out visitors browse, chat
 // (BYOK), and read filings anonymously. The exceptions are the routes whose
@@ -17,7 +19,7 @@ const isProtectedRoute = createRouteMatcher([
   "/session(.*)",
 ]);
 
-export default authDisabled
+export default AUTH_DISABLED
   ? () => NextResponse.next()
   : clerkMiddleware(async (auth, req) => {
       if (isProtectedRoute(req)) {

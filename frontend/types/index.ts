@@ -7,8 +7,6 @@ export interface Model {
   max_context: number;
   thinking_capable: boolean;
   default: boolean;
-  /** Server-lent provider keys may pay for this model. Absent on older backends. */
-  operator_lendable?: boolean;
 }
 
 export interface ModelsResponse {

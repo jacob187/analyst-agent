@@ -8,9 +8,11 @@ export const AUTH_DISABLED = process.env.NEXT_PUBLIC_DISABLE_AUTH === "true";
 export const LOCAL_DEV_USER_ID = "user_localdev";
 
 /**
- * Identity sent as X-User-Id / user_id. Only exists in auth-disabled mode: with
- * Clerk enabled the backend derives identity from the verified session token
- * and rejects a mismatching X-User-Id with 401, so nothing else may send one.
+ * Configured identity sent as X-User-Id / user_id in auth-disabled mode, where
+ * there is no Clerk session to take one from. With Clerk enabled this is
+ * undefined: the id sent is the signed-in Clerk user's (alongside the session
+ * token; see getClerkIdentity in lib/api.ts and lib/server-auth.ts), which the
+ * backend requires to equal the token's subject — a mismatch is rejected (401).
  */
 export const DEV_USER_ID: string | undefined = AUTH_DISABLED
   ? (process.env.NEXT_PUBLIC_DEV_USER_ID ?? LOCAL_DEV_USER_ID)

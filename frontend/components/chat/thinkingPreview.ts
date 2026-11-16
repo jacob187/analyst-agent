@@ -7,11 +7,16 @@ const MAX_CHARS = 160;
  */
 export function latestThinkingPreview(thinking: string | undefined): string {
   if (!thinking) return "";
-  const lines = thinking
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .slice(-MAX_LINES);
+  // Scan backwards so the cost tracks the preview, not the whole transcript
+  // (this runs on every streamed chunk).
+  const lines: string[] = [];
+  let end = thinking.length;
+  while (end > 0 && lines.length < MAX_LINES) {
+    const newline = thinking.lastIndexOf("\n", end - 1);
+    const line = thinking.slice(newline + 1, end).trim();
+    if (line) lines.unshift(line);
+    end = newline;
+  }
   const joined = lines.join("\n");
   if (joined.length <= MAX_CHARS) return joined;
   return `…${joined.slice(-(MAX_CHARS - 1)).trimStart()}`;

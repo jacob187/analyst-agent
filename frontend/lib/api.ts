@@ -28,32 +28,44 @@ function keyHeaders(keys: Partial<ApiKeys>): Record<string, string> {
   return h;
 }
 
+interface ClerkBrowser {
+  user?: { id: string } | null;
+  session?: { getToken: () => Promise<string | null> } | null;
+}
+
 /**
- * Read a Clerk session JWT, if a Clerk session exists.
- * Returns null when Clerk hasn't loaded yet or the user is signed out.
- * In dev/self-host with Clerk disabled, the backend ignores the missing token.
+ * Read the Clerk identity from the browser, if a Clerk session exists: the
+ * session JWT plus the signed-in user's id (the token's subject). Returns `{}`
+ * when Clerk hasn't loaded yet or the user is signed out. In dev/self-host with
+ * Clerk disabled, the backend ignores the missing token.
  */
-export async function getClerkToken(): Promise<string | null> {
-  if (typeof window === "undefined") return null;
-  const clerk = (window as unknown as { Clerk?: { session?: { getToken: () => Promise<string | null> } } }).Clerk;
+export async function getClerkIdentity(): Promise<{ token?: string; userId?: string }> {
+  if (typeof window === "undefined") return {};
+  const clerk = (window as unknown as { Clerk?: ClerkBrowser }).Clerk;
   try {
-    const token = (await clerk?.session?.getToken()) ?? null;
-    return token;
+    const token = await clerk?.session?.getToken();
+    // The id only travels with a token: the backend rejects an id it can't verify.
+    return token ? { token, userId: clerk?.user?.id } : {};
   } catch {
-    return null;
+    return {};
   }
 }
 
 /**
- * Identity headers for browser calls. With Clerk enabled only the session token
- * is sent (the backend derives the user from it); X-User-Id is sent solely in
- * auth-disabled mode. Server components pass `serverAuthHeaders()` instead.
+ * Identity headers for browser calls. With Clerk enabled the session token is
+ * sent together with the signed-in user's id, which the backend requires to
+ * equal the token's subject (older backends read only the id). In
+ * auth-disabled mode X-User-Id is the configured dev id. Server components pass
+ * `serverAuthHeaders()` instead.
  */
 async function authHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = {};
   if (DEV_USER_ID) headers["X-User-Id"] = DEV_USER_ID;
-  const token = await getClerkToken();
-  if (token) headers["X-Clerk-Session-Token"] = token;
+  const { token, userId } = await getClerkIdentity();
+  if (token) {
+    headers["X-Clerk-Session-Token"] = token;
+    if (userId) headers["X-User-Id"] = userId;
+  }
   return headers;
 }
 

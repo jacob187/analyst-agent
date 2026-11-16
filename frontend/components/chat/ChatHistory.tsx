@@ -7,13 +7,13 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
-import { useUserId } from "@/hooks/useUserId";
+import { useAuth } from "@/lib/auth";
 import { formatDate, cn } from "@/lib/utils";
 import type { Session, TickerSummary } from "@/types";
 
 export function ChatHistory() {
   const router = useRouter();
-  const { loaded } = useUserId();
+  const { isLoaded: loaded } = useAuth();
   const [tickers, setTickers] = useState<TickerSummary[]>([]);
   const [loading, setLoading] = useState(true);
 
