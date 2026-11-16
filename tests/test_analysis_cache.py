@@ -83,13 +83,7 @@ async def _row(form: str, accession: str, analysis_type: str) -> dict | None:
 
 def _restart_process() -> None:
     """Drop every in-process cache, as a restart of the sleeping host would."""
-    for cache in (
-        analysis_cache._shared_retrievers,
-        analysis_cache._latest_filings,
-        analysis_cache._latest_locks,
-        analysis_cache._analysis_locks,
-    ):
-        cache.clear()
+    analysis_cache.clear_caches()
 
 
 # ── AC1 / AC2: hit serves without LLM; miss generates once under the page's key ──

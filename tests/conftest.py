@@ -145,19 +145,11 @@ def _reset_sec_analysis_caches():
     per-key asyncio locks between tests: a retriever (or patched fake) cached
     by one test must not serve the next, and a lock used on one test's event
     loop must not be reused on another's."""
-    from agents.sec_workflow import analysis_cache
+    from agents.sec_workflow.analysis_cache import clear_caches
 
-    caches = (
-        analysis_cache._shared_retrievers,
-        analysis_cache._latest_filings,
-        analysis_cache._latest_locks,
-        analysis_cache._analysis_locks,
-    )
-    for cache in caches:
-        cache.clear()
+    clear_caches()
     yield
-    for cache in caches:
-        cache.clear()
+    clear_caches()
 
 
 # ---------------------------------------------------------------------------

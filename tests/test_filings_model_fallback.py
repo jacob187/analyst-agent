@@ -15,7 +15,6 @@ from fastapi.testclient import TestClient
 
 import api.db as db_module
 from agents.model_registry import get_all_models, get_model
-from agents.sec_workflow import analysis_cache
 from api.dependencies import PROVIDER_ENV_VARS
 from api.main import app
 from tests.conftest import byok_header, clear_operator_keys, flagged_default_model, models_where
@@ -65,13 +64,6 @@ def filings_env(tmp_path, monkeypatch):
     monkeypatch.setattr(db_module, "_db", None)
     asyncio.run(db_module.init_db())
 
-    for cache in (
-        analysis_cache._shared_retrievers,
-        analysis_cache._latest_filings,
-        analysis_cache._latest_locks,
-        analysis_cache._analysis_locks,
-    ):
-        cache.clear()
     edgar = FakeEdgar()
     edgar.publish(tenk("0000320193-25-000101", "2025-11-01", TENK_RISK))
     edgar.publish(tenq("0000320193-26-000111", "2026-02-01", TENQ_RISK, mda="TENQ-MDA: services grew."))

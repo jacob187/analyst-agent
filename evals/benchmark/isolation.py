@@ -29,18 +29,13 @@ def reset_process_caches() -> None:
     lookups, Tavily research results and Yahoo Finance retrievers an earlier run built,
     and its latency would look better than it is. The per-key asyncio locks go too: they
     belong to the event loop of the run that made them. These are the agent's own module
-    caches (no public reset exists for them); caches inside libraries such as edgartools
-    are outside the harness's control.
+    caches; caches inside libraries such as edgartools are outside the harness's control.
     """
     from agents.sec_workflow import analysis_cache
     from agents.technical_workflow import indicator_window
     from agents.tools.research_tools import clear_research_cache
 
-    with analysis_cache._lock:
-        analysis_cache._shared_retrievers.clear()
-        analysis_cache._latest_filings.clear()
-    analysis_cache._latest_locks.clear()
-    analysis_cache._analysis_locks.clear()
+    analysis_cache.clear_caches()
     clear_research_cache()
     indicator_window._retriever_cache.clear()
 
