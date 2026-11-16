@@ -21,11 +21,20 @@ const isProtectedRoute = createRouteMatcher([
 
 export default AUTH_DISABLED
   ? () => NextResponse.next()
-  : clerkMiddleware(async (auth, req) => {
-      if (isProtectedRoute(req)) {
-        await auth.protect();
-      }
-    });
+  : clerkMiddleware(
+      async (auth, req) => {
+        if (isProtectedRoute(req)) {
+          await auth.protect();
+        }
+      },
+      {
+        // The production Clerk instance serves its Frontend API through this
+        // app at /__clerk (Clerk production needs a custom domain otherwise;
+        // *.vercel.app can't take DNS records). Development keys talk to
+        // *.clerk.accounts.dev directly, so `next dev` leaves the proxy off.
+        frontendApiProxy: { enabled: process.env.NODE_ENV === "production" },
+      },
+    );
 
 export const config = {
   matcher: [
