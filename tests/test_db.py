@@ -131,12 +131,15 @@ class TestGetOrCreateSession:
         b = await db_module.get_or_create_session("AAPL", USER_B)
         assert a != b
 
-    async def test_reuse_records_the_current_model(self, fresh_db):
-        """History shows sessions.model, so resuming with another model must
-        record that model, not the one the session was first created with."""
+    async def test_reuse_leaves_the_model_to_update_session_model(self, fresh_db):
+        """`model` only seeds a new session. Recording the model answering a
+        resumed one is `update_session_model`'s job (the chat route calls it
+        on every resume path), so there is one place that writes it."""
         first = await db_module.get_or_create_session("AAPL", USER_A, model="model-a")
         second = await db_module.get_or_create_session("AAPL", USER_A, model="model-b")
         assert first == second
+        assert (await db_module.get_session(first))["model"] == "model-a"
+        assert await db_module.update_session_model(first, USER_A, "model-b") is True
         assert (await db_module.get_session(first))["model"] == "model-b"
 
     async def test_reuse_without_model_keeps_stored_model(self, fresh_db):

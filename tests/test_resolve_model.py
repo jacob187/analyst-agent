@@ -84,13 +84,74 @@ def test_default_model_used_when_a_key_runs_it():
     assert (model.id, key) == (default.id, "k")
 
 
+def _price(model):
+    if model.input_price_per_mtok is None or model.output_price_per_mtok is None:
+        return None
+    return model.input_price_per_mtok + model.output_price_per_mtok
+
+
 def test_falls_back_to_a_model_the_caller_has_a_byok_key_for():
     other = _other_provider_model()
     model, key = resolve_model(_keys(byok={other.provider: "k"}), None)
     assert model.provider == other.provider
     assert key == "k"
-    # The first registry model of that provider.
-    assert model.id == next(m.id for m in get_all_models() if m.provider == other.provider)
+
+
+def test_fallback_is_the_cheapest_runnable_model_not_the_first_in_file():
+    # Find a provider (not the default's, whose key would run the default)
+    # whose first model in models.json isn't its cheapest priced one.
+    default = get_default_model()
+    for provider in {m.provider for m in get_all_models()} - {default.provider}:
+        mine = [m for m in get_all_models() if m.provider == provider]
+        priced = [m for m in mine if _price(m) is not None]
+        if priced and _price(mine[0]) != min(_price(m) for m in priced):
+            break
+    else:
+        pytest.skip("every provider lists its cheapest model first")
+    model, _ = resolve_model(_keys(byok={provider: "k"}), None)
+    assert _price(model) == min(_price(m) for m in priced)
+
+
+def _fake(model_id, provider, inp=None, out=None):
+    from agents.model_registry import ModelDef
+
+    return ModelDef(
+        id=model_id, provider=provider, display_name=model_id, max_context=1000,
+        thinking_capable=False, default=False,
+        input_price_per_mtok=inp, output_price_per_mtok=out,
+    )
+
+
+@pytest.fixture
+def fake_registry(monkeypatch):
+    """Swap the fallback's model list for fakes on a provider the default
+    doesn't use, so the default never runs and step 3 decides."""
+    provider = _another_provider(get_default_model().provider)
+
+    def install(*specs):
+        models = [_fake(f"fake-model-{i}", provider, *spec) for i, spec in enumerate(specs)]
+        monkeypatch.setattr(dependencies, "get_all_models", lambda: models)
+        return provider, models
+
+    return install
+
+
+def test_unpriced_models_rank_after_priced_ones(fake_registry):
+    provider, models = fake_registry((None, None), (5.0, 20.0), (2.0, None))
+    model, _ = resolve_model(_keys(byok={provider: "k"}), None)
+    assert model is models[1]
+
+
+def test_price_ties_keep_file_order(fake_registry):
+    provider, models = fake_registry((3.0, 1.0), (1.0, 3.0), (0.5, 3.5))
+    model, _ = resolve_model(_keys(byok={provider: "k"}), None)
+    assert model is models[0]
+
+
+def test_all_unpriced_falls_back_to_file_order(fake_registry):
+    provider, models = fake_registry((None, None), (None, None))
+    model, _ = resolve_model(_keys(byok={provider: "k"}), None)
+    assert model is models[0]
 
 
 def test_operator_key_only_counts_for_lendable_models(clerk_env):

@@ -17,6 +17,9 @@ User identity gates persistence and operator-paid LLM access:
     must equal the token's subject. Verified users unlock DB persistence and
     may use the operator's env keys for `operator_lendable` models (bounded
     by the per-user daily budget); other models need their own key.
+    An invalid/expired token alone means anonymous; a token that can't be
+    checked at all (CLERK_ISSUER_URL unset, JWKS unreachable) is a 503 /
+    WS error frame, not a silent downgrade.
 
 If Clerk is unconfigured (local dev / self-host) verification is skipped and
 the single operator is trusted with env keys. `DISABLE_AUTH=true` does the same.
@@ -34,7 +37,6 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any
 
 from fastapi import Header, HTTPException
 
@@ -42,7 +44,9 @@ from agents.model_registry import (
     ModelDef, get_all_models, get_default_model, get_free_tier_model, get_model,
 )
 from api.db import get_llm_usage
-from api.clerk_auth import is_auth_disabled, is_clerk_enabled, verify_clerk_token
+from api.clerk_auth import (
+    ClerkVerifierUnavailable, is_auth_disabled, is_clerk_enabled, verify_clerk_token,
+)
 from api.validators import USER_ID_RE
 
 logger = logging.getLogger(__name__)
@@ -125,6 +129,27 @@ def _maybe_warn_clerk_unconfigured() -> None:
     _clerk_unconfigured_warned = True
 
 
+_ignored_token_warned = False
+
+
+def _maybe_warn_ignored_token() -> None:
+    """A Clerk token arrived but the backend has no CLERK_SECRET_KEY: the
+    frontend is signed in with Clerk, yet every user lands here anonymous."""
+    global _ignored_token_warned
+    if _ignored_token_warned:
+        return
+    _ignored_token_warned = True
+    logger.warning(
+        "Received a Clerk session token but CLERK_SECRET_KEY is not set on the "
+        "backend; the token is ignored and signed-in users are treated as "
+        "anonymous (nothing is saved). Set CLERK_SECRET_KEY and CLERK_ISSUER_URL "
+        "to match the frontend's Clerk instance, or run both sides with auth disabled."
+    )
+
+
+VERIFIER_UNAVAILABLE = "Sign-in verification is temporarily unavailable. Please try again shortly."
+
+
 def _validate_user_id(raw: str | None) -> str | None:
     """Return the user ID if it matches an accepted format, otherwise None."""
     if raw and isinstance(raw, str) and USER_ID_RE.match(raw):
@@ -137,30 +162,19 @@ def _is_clerk_user_id(user_id: str) -> bool:
     return user_id.startswith("user_")
 
 
-def _trusted_user_id(user_id: str | None) -> str | None:
-    """The identity trusted for persistence/scoping and operator resources.
-
-    When Clerk is enabled, only Clerk-format ids are trustworthy; a missing id
-    or a legacy UUID (which cannot be checked against Clerk) is anonymous —
-    trusting an unverifiable id would let anyone claim any UUID's data. Clerk
-    ids still require token verification by the caller (`_resolve_identity`)
-    before they're acted on.
-    """
-    if is_auth_disabled() or not is_clerk_enabled():
-        return user_id
-    return user_id if (user_id and _is_clerk_user_id(user_id)) else None
-
-
 def _env_keys_allowed(user_id: str | None) -> bool:
     """Whether the operator's env keys may resolve for this caller.
 
     Lent only to trusted callers: the local/self-host operator (auth disabled
     or Clerk unconfigured) or a verified signed-in user. Anonymous visitors
     resolve only their own BYOK keys — they never spend the operator's keys.
+    With Clerk on, only a Clerk-format id counts (callers pass the id
+    `_resolve_identity` verified); a legacy UUID can't be checked against
+    Clerk and stays anonymous.
     """
     if is_auth_disabled() or not is_clerk_enabled():
         return True
-    return _trusted_user_id(user_id) is not None
+    return user_id is not None and _is_clerk_user_id(user_id)
 
 
 def operator_may_lend(model: ModelDef) -> bool:
@@ -198,10 +212,16 @@ def _resolve_identity(
 
     DISABLE_AUTH=true or Clerk unconfigured (local dev / self-host): the
     token is ignored and the validated user id is trusted as-is.
+
+    Raises `ClerkVerifierUnavailable` when a token is present but can't be
+    verified at all (misconfiguration or JWKS outage); the REST and WS
+    wrappers turn that into a 503 / an error frame.
     """
     _maybe_warn_clerk_unconfigured()
 
     if is_auth_disabled() or not is_clerk_enabled():
+        if token and not is_auth_disabled():
+            _maybe_warn_ignored_token()
         return _validate_user_id(raw_user_id), None
 
     if token:
@@ -230,8 +250,12 @@ def _resolve_identity(
 
 
 def _verify_user_identity(user_id: str | None, token: str | None) -> str | None:
-    """REST wrapper over `_resolve_identity`: raises HTTPException(401) on rejection."""
-    resolved, error = _resolve_identity(user_id, token)
+    """REST wrapper over `_resolve_identity`: raises HTTPException(401) on
+    rejection, 503 when the token can't be verified at all."""
+    try:
+        resolved, error = _resolve_identity(user_id, token)
+    except ClerkVerifierUnavailable:
+        raise HTTPException(status_code=503, detail=VERIFIER_UNAVAILABLE)
     if error:
         raise HTTPException(status_code=401, detail=error)
     return resolved
@@ -300,6 +324,16 @@ class ApiKeys:
         return self.key_sources.get(provider) == "env"
 
 
+def _price_rank(model: ModelDef) -> tuple[bool, float]:
+    """Sort key for "cheapest": input + output USD per million tokens from
+    models.json. A model missing either price can't be compared, so it ranks
+    after every priced one."""
+    inp, out = model.input_price_per_mtok, model.output_price_per_mtok
+    if inp is None or out is None:
+        return (True, 0.0)
+    return (False, inp + out)
+
+
 def resolve_model(keys: ApiKeys, requested_model_id: object) -> tuple[ModelDef, str | None]:
     """Pick the model a request runs on and the key that may run it.
 
@@ -316,8 +350,8 @@ def resolve_model(keys: ApiKeys, requested_model_id: object) -> tuple[ModelDef, 
     model rename, non-string) is no choice. Order:
       1. an explicit, registered request wins, key or not;
       2. the default model, if a key may run it;
-      3. the first registry model a key may run (BYOK, or an operator key for
-         a model it may lend);
+      3. the cheapest registry model a key may run (BYOK, or an operator key
+         for a model it may lend) — see `_price_rank`;
       4. the free-trial (else default) model with no key.
     """
     if not isinstance(requested_model_id, str) or not get_model(requested_model_id):
@@ -330,7 +364,9 @@ def resolve_model(keys: ApiKeys, requested_model_id: object) -> tuple[ModelDef, 
     elif keys.key_for_model(default_model):
         model = default_model
     else:
-        model = next((m for m in get_all_models() if keys.key_for_model(m)), None)
+        runnable = [m for m in get_all_models() if keys.key_for_model(m)]
+        # min() keeps the first of equal ranks, so ties go to file order.
+        model = min(runnable, key=_price_rank, default=None)
         if model is None:
             trial_id = free_trial_model_id()
             model = (trial_id and get_model(trial_id)) or default_model
@@ -404,22 +440,16 @@ async def get_api_keys(
     )
 
 
-_UNRESOLVED: Any = object()
-
-
-def resolve_ws_keys(auth_message: dict, user_id: str | None = _UNRESOLVED) -> ApiKeys:
+def resolve_ws_keys(auth_message: dict, *, user_id: str | None) -> ApiKeys:
     """Resolve API keys from a WebSocket auth message -> env vars.
 
     WebSocket connections can't use HTTP headers, so the frontend sends
     keys in the first JSON message. Same fallback to env vars applies.
 
-    Pass the id returned by `resolve_ws_identity` so the Clerk token is
-    verified once; the route runs that first so it can send a structured
-    error frame and close with policy-violation code. When omitted, identity
-    is resolved here and a rejected identity degrades to anonymous.
+    `user_id` is the id `resolve_ws_identity` returned for this frame: the
+    route resolves identity first (once, off the event loop) so it can send
+    a structured error frame and close on rejection.
     """
-    if user_id is _UNRESOLVED:
-        user_id, _error = resolve_ws_identity(auth_message)
     # The auth frame is untrusted JSON — a non-string model_id would blow up
     # registry lookups downstream.
     raw_model_id = auth_message.get("model_id")
@@ -448,6 +478,9 @@ def resolve_ws_identity(auth_message: dict) -> tuple[str | None, str | None]:
     it. Errors are user-safe strings (no token contents).
     """
     token = auth_message.get("clerk_session_token")
-    return _resolve_identity(
-        auth_message.get("user_id"), token if isinstance(token, str) else None
-    )
+    try:
+        return _resolve_identity(
+            auth_message.get("user_id"), token if isinstance(token, str) else None
+        )
+    except ClerkVerifierUnavailable:
+        return None, VERIFIER_UNAVAILABLE

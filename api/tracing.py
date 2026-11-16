@@ -36,6 +36,8 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcess
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.sdk.trace.sampling import ALWAYS_ON, Sampler
 
+from agents.env_utils import env_int
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_SERVICE_NAME = "analyst-agent"
@@ -58,16 +60,17 @@ def _build_provider(
     """Build a TracerProvider with the app's resource and attribute-size cap.
 
     ``sampler=None`` lets the SDK resolve ``OTEL_TRACES_SAMPLER``/``_ARG``.
-    An explicit ``max_attribute_length`` wins over everything else. Otherwise an
-    explicit ``OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT`` is honoured by the SDK, and
-    failing that the default cap is passed via ``SpanLimits`` rather than written
-    into ``os.environ``, so it doesn't leak to other providers or child processes.
+    An explicit ``max_attribute_length`` wins over everything else. Otherwise
+    ``OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT`` applies, or the default cap when it is
+    unset or malformed (with a warning; the SDK would raise). Either way the cap
+    is passed via ``SpanLimits`` rather than written into ``os.environ``, so it
+    doesn't leak to other providers or child processes.
     """
-    span_limits = None
-    if max_attribute_length is not None:
-        span_limits = SpanLimits(max_attribute_length=max_attribute_length)
-    elif not (os.getenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT") or "").strip():
-        span_limits = SpanLimits(max_attribute_length=DEFAULT_ATTRIBUTE_VALUE_LENGTH_LIMIT)
+    if max_attribute_length is None:
+        max_attribute_length = env_int(
+            "OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", DEFAULT_ATTRIBUTE_VALUE_LENGTH_LIMIT, minimum=0
+        )
+    span_limits = SpanLimits(max_attribute_length=max_attribute_length)
     service_name = (os.getenv("OTEL_SERVICE_NAME") or "").strip() or DEFAULT_SERVICE_NAME
     return TracerProvider(
         resource=Resource.create({SERVICE_NAME: service_name}),
@@ -96,7 +99,13 @@ def setup_tracing() -> TracerProvider | None:
         logger.info("Tracing: OFF")
         return None
 
-    provider = _build_provider()
+    try:
+        provider = _build_provider()
+    except ValueError as e:
+        # A malformed standard OTEL_* setting (e.g. a span limit): the SDK
+        # raises, but tracing is optional and must not take startup down.
+        logger.warning("Tracing: OFF (invalid OpenTelemetry configuration: %s)", e)
+        return None
     provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
     LangChainInstrumentor().instrument(tracer_provider=provider)
     _provider = provider
@@ -147,9 +156,6 @@ class CapturedSpans:
     def spans(self) -> list[ReadableSpan]:
         """Finished spans so far, in completion order (children before parents)."""
         return list(self._exporter.get_finished_spans())
-
-    def clear(self) -> None:
-        self._exporter.clear()
 
 
 @contextmanager

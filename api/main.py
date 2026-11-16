@@ -100,6 +100,14 @@ def check_production_auth_config() -> None:
             "Refusing to start: ENV=production but CLERK_SECRET_KEY is not set. "
             "Configure Clerk, or set ANALYST_ALLOW_DISABLED_AUTH=1 to override."
         )
+    if not (os.getenv("CLERK_ISSUER_URL") or "").strip():
+        # Without it no session token can be verified: every signed-in
+        # request would fail with 503.
+        raise RuntimeError(
+            "Refusing to start: ENV=production with CLERK_SECRET_KEY set but "
+            "CLERK_ISSUER_URL unset. Set it to the Clerk frontend API origin, "
+            "or set ANALYST_ALLOW_DISABLED_AUTH=1 to override."
+        )
 
 
 def check_production_sec_config() -> None:
@@ -144,7 +152,13 @@ async def lifespan(app: FastAPI):
     set_sec_identity()
     tracing_provider = setup_tracing()
     try:
-        await init_db()
+        try:
+            await init_db()
+        except BaseException:
+            # Close what init_db opened: aiosqlite's non-daemon worker thread
+            # would otherwise keep the process alive after startup fails.
+            await close_db()
+            raise
         yield
         await close_db()
     finally:

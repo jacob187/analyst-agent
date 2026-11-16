@@ -213,6 +213,31 @@ class TestAttributeLengthLimit:
         provider = setup_tracing()
         assert _long_attribute_length(provider) == 100
 
+    @pytest.mark.parametrize("raw", ["8k", "-1", "1.5"])
+    def test_malformed_limit_falls_back_to_default_with_warning(
+        self, otlp_endpoint, monkeypatch, caplog, raw
+    ):
+        from agents import env_utils
+
+        monkeypatch.setattr(env_utils, "_warned", set())
+        monkeypatch.setenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", raw)
+        with caplog.at_level(logging.WARNING):
+            provider = setup_tracing()
+        assert provider is not None
+        assert _long_attribute_length(provider) == 8192
+        assert any(
+            "OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT" in r.getMessage() for r in caplog.records
+        )
+
+    def test_other_malformed_limit_turns_tracing_off_not_startup(
+        self, otlp_endpoint, monkeypatch, caplog
+    ):
+        monkeypatch.setenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "lots")
+        with caplog.at_level(logging.WARNING, logger="api.tracing"):
+            assert setup_tracing() is None
+        assert any("Tracing: OFF" in r.getMessage() for r in caplog.records)
+        assert tracing._provider is None
+
     def test_capture_spans_applies_the_same_cap(self):
         with capture_spans() as captured:
             with get_tracer().start_as_current_span("s") as span:
