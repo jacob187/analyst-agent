@@ -12,18 +12,18 @@ import pytest
 import yaml
 
 import api.db as db_module
-from agents.model_registry import get_all_models, get_free_tier_model
-from api.dependencies import PROVIDER_ENV_VARS
+from agents.model_registry import get_free_tier_model
 from api.tracing import get_tracer
 from evals.benchmark.architectures import ARCHITECTURES
 from evals.benchmark.cli import main
-from evals.benchmark.common import provider_env_var, resolve_model
+from evals.benchmark.common import resolve_model
 from evals.benchmark.isolation import isolated_db
 from evals.benchmark.metrics import SPAN_ATTRIBUTE_CAP
 from evals.benchmark.questions import Question
 from evals.benchmark.runner import run_benchmark
 from evals.benchmark.runs import load_run
 from tests.benchmark.helpers import FakeAgent, FakeJudge
+from tests.conftest import clear_operator_keys, other_model, set_operator_key
 
 pytestmark = pytest.mark.eval_unit
 
@@ -77,8 +77,7 @@ def _arch(monkeypatch):
     LOOKUPS.clear()
     monkeypatch.setitem(ARCHITECTURES, "cache", _build)
     monkeypatch.setitem(ARCHITECTURES, "oversized", _build_oversized)
-    for var in PROVIDER_ENV_VARS.values():
-        monkeypatch.delenv(var, raising=False)
+    clear_operator_keys(monkeypatch)
     monkeypatch.setattr("evals.benchmark.cli.prepare_environment", lambda: None)  # no .env reload
 
 
@@ -167,13 +166,11 @@ class TestIsolatedDb:
 
 class TestCompareModelsIsolation:
     def test_each_models_run_gets_its_own_fresh_database(self, default_db, monkeypatch, tmp_path):
-        paid = next(
-            m for m in get_all_models()
-            if m.provider == get_free_tier_model().provider and m.id != get_free_tier_model().id
-        )
-        for m in (get_free_tier_model(), paid):
-            monkeypatch.setenv(provider_env_var(m), "fake-key-value-0123")
-        monkeypatch.setattr("evals.benchmark.compare.make_judge_llm", lambda _model: FakeJudge())
+        free = get_free_tier_model()
+        paid = other_model(free, provider=free.provider)
+        for m in (free, paid):
+            set_operator_key(monkeypatch, m)
+        monkeypatch.setattr("evals.benchmark.judge.build_judge_llm", lambda _model: FakeJudge())
         qfile = tmp_path / "questions.yaml"
         qfile.write_text(
             yaml.safe_dump(
@@ -212,7 +209,7 @@ class TestOtelTruncationWarning:
     def test_the_cli_silences_it_during_a_run_and_restores_the_logger(
         self, default_db, monkeypatch, tmp_path, caplog
     ):
-        monkeypatch.setenv(provider_env_var(get_free_tier_model()), "fake-key-value-0123")
+        set_operator_key(monkeypatch, get_free_tier_model())
         qfile = tmp_path / "questions.yaml"
         qfile.write_text(
             yaml.safe_dump([{"id": "q1", "ticker": "AAPL", "category": "filing_lookup", "question": "Question?"}])
@@ -227,8 +224,8 @@ class TestOtelTruncationWarning:
         assert logging.getLogger(OTEL_LOGGER).level == before
 
     def test_the_cli_silences_it_during_compare_models_too(self, default_db, monkeypatch, tmp_path, caplog):
-        monkeypatch.setenv(provider_env_var(get_free_tier_model()), "fake-key-value-0123")
-        monkeypatch.setattr("evals.benchmark.compare.make_judge_llm", lambda _model: FakeJudge())
+        set_operator_key(monkeypatch, get_free_tier_model())
+        monkeypatch.setattr("evals.benchmark.judge.build_judge_llm", lambda _model: FakeJudge())
         qfile = tmp_path / "questions.yaml"
         qfile.write_text(
             yaml.safe_dump([{"id": "q1", "ticker": "AAPL", "category": "filing_lookup", "question": "Question?"}])

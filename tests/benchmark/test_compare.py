@@ -15,7 +15,6 @@ import pytest
 import yaml
 
 from agents.model_registry import get_all_models
-from api.dependencies import PROVIDER_ENV_VARS
 from evals.benchmark.architectures import ARCHITECTURES
 from evals.benchmark.cli import main
 from evals.benchmark.common import BenchmarkError, provider_env_var
@@ -32,7 +31,7 @@ from evals.benchmark.compare import (
 from evals.benchmark.judge import judge_runs
 from evals.benchmark.runs import load_judgement, load_run, write_model
 from tests.benchmark.helpers import FakeAgent, FakeJudge, pdf_text_blob, write_run
-from tests.conftest import flagged_free_tier_model
+from tests.conftest import clear_operator_keys, flagged_free_tier_model, set_operator_key
 
 pytestmark = pytest.mark.eval_unit
 
@@ -88,8 +87,7 @@ class _UnreadableStdin:
 @pytest.fixture(autouse=True)
 def env(monkeypatch):
     monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
-    for var in PROVIDER_ENV_VARS.values():
-        monkeypatch.delenv(var, raising=False)
+    clear_operator_keys(monkeypatch)
     monkeypatch.setattr("evals.benchmark.cli.prepare_environment", lambda: None)  # no .env reload
     monkeypatch.setitem(ARCHITECTURES, "fake", _build)
     monkeypatch.setattr(sys, "stdin", _UnreadableStdin())
@@ -104,12 +102,12 @@ def env(monkeypatch):
         JUDGE_LLMS.append(judge)
         return judge
 
-    monkeypatch.setattr("evals.benchmark.compare.make_judge_llm", judge_factory)
+    monkeypatch.setattr("evals.benchmark.judge.build_judge_llm", judge_factory)
 
 
 def give_keys(monkeypatch, *models):
     for model in models:
-        monkeypatch.setenv(provider_env_var(model), "fake-key-value-0123")
+        set_operator_key(monkeypatch, model)
 
 
 @pytest.fixture

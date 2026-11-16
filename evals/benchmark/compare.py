@@ -61,13 +61,6 @@ ASSUMED_JUDGE_INPUT_TOKENS_PER_PAIR = 20_000
 ASSUMED_JUDGE_OUTPUT_TOKENS_PER_PAIR = 300
 
 
-def make_judge_llm(model: ModelDef) -> Any:
-    """The judge chat model (the compare command's seam for tests; see ``judge.build_judge_llm``)."""
-    from evals.benchmark.judge import build_judge_llm
-
-    return build_judge_llm(model)
-
-
 def judgement_dirname(model_id: str, reference_id: str) -> str:
     return f"{model_id}-vs-{reference_id}"
 

@@ -185,6 +185,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
 
 def _cmd_compare_models(args: argparse.Namespace) -> int:
     from evals.benchmark import compare
+    from evals.benchmark.judge import build_judge_llm
 
     if args.chat_cost_multiple <= 0:
         raise BenchmarkError("--chat-cost-multiple must be greater than 0.")
@@ -209,7 +210,7 @@ def _cmd_compare_models(args: argparse.Namespace) -> int:
         summary = asyncio.run(
             compare.execute(
                 plan,
-                lambda: compare.make_judge_llm(plan.judge_model),
+                lambda: build_judge_llm(plan.judge_model),
                 timeout_s=args.timeout,
                 chat_cost_multiple=args.chat_cost_multiple,
             )
