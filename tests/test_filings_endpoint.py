@@ -13,6 +13,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 
 from api.main import app
+from tests.conftest import llm_usage, model_where
 from tests.test_dependencies import (  # noqa: F401  (clerk_env / rsa_keypair are fixtures)
     TEST_SUB,
     _make_token,
@@ -536,12 +537,6 @@ def budget_db(tmp_path, monkeypatch):
     _asyncio.run(db_module.close_db())
 
 
-def _usage(user_id: str) -> int:
-    import asyncio as _asyncio
-    import api.db as db_module
-    return _asyncio.run(db_module.get_llm_usage(user_id))
-
-
 class TestFilingsLLMBudget:
     """The daily budget gate fires when the request's provider key comes from
     server env (operator pays). BYOK requests bypass it."""
@@ -556,7 +551,7 @@ class TestFilingsLLMBudget:
         for _ in range(5):
             resp = client.get("/api/company/AAPL/filings", headers=headers)
             assert resp.status_code == 200
-        assert _usage("user_byoktest") == 0
+        assert llm_usage("user_byoktest") == 0
 
     def test_env_key_subject_to_budget(self, client, mock_filings_deps, budget_db, monkeypatch):
         """When the key resolves from env (no header), the daily budget applies:
@@ -568,11 +563,11 @@ class TestFilingsLLMBudget:
         monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 2)
         headers = {"X-User-Id": "user_envbudget"}
         assert client.get("/api/company/AAPL/filings", headers=headers).status_code == 200
-        assert _usage("user_envbudget") == 6
+        assert llm_usage("user_envbudget") == 6
         resp = client.get("/api/company/AAPL/filings", headers=headers)
         assert resp.status_code == 429
         assert "budget" in resp.json()["detail"].lower()
-        assert _usage("user_envbudget") == 6
+        assert llm_usage("user_envbudget") == 6
 
     def test_stream_over_budget_emits_error(self, client, mock_filings_deps, budget_db, monkeypatch):
         import asyncio as _asyncio
@@ -589,7 +584,7 @@ class TestFilingsLLMBudget:
         assert events[-1]["type"] == "error"
         assert "budget" in events[-1]["message"].lower()
         mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
-        assert _usage("user_streamover") == 1
+        assert llm_usage("user_streamover") == 1
 
 
 # ── Process-wide LLM dispatch concurrency cap ────────────────────────────
@@ -869,7 +864,7 @@ class TestBudgetChargedPerSection:
 
         resp = client.get("/api/company/AAPL/filings", headers={"X-User-Id": _ENV_USER})
         assert resp.status_code == 200
-        assert _usage(_ENV_USER) == 4
+        assert llm_usage(_ENV_USER) == 4
 
     def test_stream_n_uncached_sections_charge_n(self, client, mock_filings_deps, budget_db, monkeypatch):
         _core_only(mock_filings_deps)
@@ -879,7 +874,7 @@ class TestBudgetChargedPerSection:
         events = _stream_events(client, "/api/company/AAPL/filings/stream", {"X-User-Id": _ENV_USER})
         assert events[-1]["type"] == "complete"
         assert len(_generated(events)) == 5
-        assert _usage(_ENV_USER) == 5
+        assert llm_usage(_ENV_USER) == 5
 
     def test_section_refused_a_dispatch_slot_charges_nothing(
         self, client, mock_filings_deps, budget_db, monkeypatch
@@ -894,7 +889,7 @@ class TestBudgetChargedPerSection:
         resp = client.get("/api/company/AAPL/filings", headers={"X-User-Id": _ENV_USER})
         assert resp.status_code == 200
         mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
-        assert _usage(_ENV_USER) == 0
+        assert llm_usage(_ENV_USER) == 0
 
     def test_fully_cached_charges_nothing(self, client, mock_filings_deps, budget_db, monkeypatch):
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
@@ -903,7 +898,7 @@ class TestBudgetChargedPerSection:
         }
         resp = client.get("/api/company/AAPL/filings", headers={"X-User-Id": _ENV_USER})
         assert resp.status_code == 200
-        assert _usage(_ENV_USER) == 0
+        assert llm_usage(_ENV_USER) == 0
 
     def test_fully_cached_served_even_when_over_budget(self, client, mock_filings_deps, budget_db, monkeypatch):
         import asyncio as _asyncio
@@ -917,7 +912,7 @@ class TestBudgetChargedPerSection:
         }
         resp = client.get("/api/company/AAPL/filings", headers={"X-User-Id": _ENV_USER})
         assert resp.status_code == 200
-        assert _usage(_ENV_USER) == 1
+        assert llm_usage(_ENV_USER) == 1
 
     def test_stream_fully_cached_charges_nothing(self, client, mock_filings_deps, budget_db, monkeypatch):
         _core_only(mock_filings_deps)
@@ -927,7 +922,7 @@ class TestBudgetChargedPerSection:
         }
         events = _stream_events(client, "/api/company/AAPL/filings/stream", {"X-User-Id": _ENV_USER})
         assert events[-1]["type"] == "complete"
-        assert _usage(_ENV_USER) == 0
+        assert llm_usage(_ENV_USER) == 0
 
     def test_stream_cache_only_miss_charges_nothing(self, client, mock_filings_deps, budget_db, monkeypatch):
         """Failed-extraction sections never generate, so their cache misses cost nothing."""
@@ -943,18 +938,15 @@ class TestBudgetChargedPerSection:
         events = _stream_events(client, "/api/company/AAPL/filings/stream", {"X-User-Id": _ENV_USER})
         assert events[-1]["type"] == "complete"
         assert not any(e.get("type") == "section" for e in events)
-        assert _usage(_ENV_USER) == 0
+        assert llm_usage(_ENV_USER) == 0
 
 
 # ── Operator key only pays for operator_lendable models ─────────────────────
 
 
 def _google_model(*, lendable: bool):
-    from agents.model_registry import get_all_models
-    return next(
-        m for m in get_all_models()
-        if m.provider == "google_genai" and m.operator_lendable is lendable
-    )
+    # Google, to match the GOOGLE_API_KEY the `signed_in` fixture sets.
+    return model_where(provider="google_genai", operator_lendable=lendable)
 
 
 class TestFilingsOperatorKeyAllowlist:
@@ -986,7 +978,7 @@ class TestFilingsOperatorKeyAllowlist:
         sec = mock_filings_deps["sec"]
         sec.get_risk_factors_raw.assert_not_called()  # treated as keyless
         mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
-        assert _usage(TEST_SUB) == 0
+        assert llm_usage(TEST_SUB) == 0
 
     def test_lendable_model_runs_on_operator_key(self, client, mock_filings_deps, budget_db, signed_in):
         _core_only(mock_filings_deps)
@@ -994,7 +986,7 @@ class TestFilingsOperatorKeyAllowlist:
 
         events = _stream_events(client, "/api/company/AAPL/filings/stream", headers)
         assert len(_generated(events)) == 6
-        assert _usage(TEST_SUB) == 6
+        assert llm_usage(TEST_SUB) == 6
 
     def test_own_key_runs_non_lendable_model(self, client, mock_filings_deps, budget_db, signed_in):
         _core_only(mock_filings_deps)
@@ -1004,4 +996,4 @@ class TestFilingsOperatorKeyAllowlist:
             {**signed_in, "X-Model-Id": _google_model(lendable=False).id, "X-Google-Api-Key": "their-key"},
         )
         assert len(_generated(events)) == 6
-        assert _usage(TEST_SUB) == 0  # BYOK: operator not charged
+        assert llm_usage(TEST_SUB) == 0  # BYOK: operator not charged

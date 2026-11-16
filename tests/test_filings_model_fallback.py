@@ -17,7 +17,7 @@ import api.db as db_module
 from agents.model_registry import get_all_models, get_model
 from api.dependencies import PROVIDER_ENV_VARS
 from api.main import app
-from tests.conftest import byok_header, clear_operator_keys, flagged_default_model, models_where
+from tests.conftest import byok_header, clear_operator_keys, flagged_default_model, llm_usage, models_where
 from tests.sec_fakes import CountingChatModel, FakeEdgar, eightk, tenk, tenq
 from tests.test_dependencies import (  # noqa: F401  (clerk_env / rsa_keypair are fixtures)
     _make_token,
@@ -93,10 +93,6 @@ def signed_in(clerk_env, rsa_keypair):
     return {"X-Clerk-Session-Token": _make_token(priv, sub=USER)}
 
 
-def _usage(user_id: str) -> int:
-    return asyncio.run(db_module.get_llm_usage(user_id))
-
-
 def _stream(client, headers) -> list[dict]:
     events = []
     with client.stream("GET", STREAM_PATH, headers=headers) as resp:
@@ -138,7 +134,7 @@ def test_signed_in_gets_a_lendable_model_of_the_only_configured_provider(
         assert model.operator_lendable is True
         assert api_key == "env-key"
     # The operator paid: one budget unit per generated section.
-    assert _usage(USER) == len(filings_env)
+    assert llm_usage(USER) == len(filings_env)
 
 
 def test_stream_gets_a_lendable_model_of_the_only_configured_provider(
@@ -154,7 +150,7 @@ def test_stream_gets_a_lendable_model_of_the_only_configured_provider(
     assert filings_env
     assert {get_model(m).provider for m, _ in filings_env} == {OPERATOR_PROVIDER}
     assert all(get_model(m).operator_lendable for m, _ in filings_env)
-    assert _usage(USER) == len(filings_env)
+    assert llm_usage(USER) == len(filings_env)
 
 
 def test_env_default_model_id_does_not_count_as_an_explicit_request(
@@ -179,7 +175,7 @@ def test_byok_for_another_provider_is_used_without_an_explicit_model(
     assert filings_env
     assert {get_model(m).provider for m, _ in filings_env} == {BYOK_PROVIDER}
     assert {k for _, k in filings_env} == {"their-key"}
-    assert _usage(USER) == 0  # BYOK: the operator doesn't pay
+    assert llm_usage(USER) == 0  # BYOK: the operator doesn't pay
 
 
 # ── AC2: explicit request for a model the operator won't lend ────────────────
@@ -197,7 +193,7 @@ def test_explicit_non_lendable_model_without_byok_needs_key(
 
     assert _section_statuses(_stream(client, headers)) == {"needs_key"}
     assert filings_env == []
-    assert _usage(USER) == 0
+    assert llm_usage(USER) == 0
 
 
 def test_explicit_lendable_model_is_honoured(client, filings_env, signed_in, monkeypatch):

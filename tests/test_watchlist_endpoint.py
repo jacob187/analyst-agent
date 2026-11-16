@@ -9,9 +9,9 @@ from fastapi.testclient import TestClient
 
 import api.db as db_module
 from agents.model_registry import get_default_model
-from api import dependencies, llm_concurrency
+from api import llm_concurrency
 from api.main import app
-from tests.conftest import byok_header, model_where, set_operator_key
+from tests.conftest import CLERK_USER, byok_header, llm_usage, set_operator_key
 
 
 client = TestClient(app)
@@ -300,7 +300,6 @@ class TestBriefingHistoryDaysValidation:
 # Operator-key cost guard: lendable models only, one budget unit per LLM call
 # ---------------------------------------------------------------------------
 
-CLERK_USER = "user_abc123"
 SIGNED_IN = {"X-Clerk-Session-Token": "good-token"}
 
 
@@ -360,31 +359,6 @@ def budget_env(monkeypatch):
     asyncio.run(db_module.close_db())
 
 
-@pytest.fixture
-def clerk_on(monkeypatch):
-    """Hosted deploy: Clerk enabled, JWT verification faked at its boundary."""
-    monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
-    monkeypatch.setattr(
-        dependencies, "verify_clerk_token",
-        lambda token: CLERK_USER if token == "good-token" else None,
-    )
-    dependencies._clerk_unconfigured_warned = False
-
-
-def _usage(user_id: str) -> int:
-    return asyncio.run(db_module.get_llm_usage(user_id))
-
-
-@pytest.fixture
-def lendable():
-    return model_where(operator_lendable=True)
-
-
-@pytest.fixture
-def non_lendable():
-    return model_where(operator_lendable=False)
-
-
 class TestBriefingOperatorKeyGuard:
     @pytest.fixture(autouse=True)
     def _operator_env(self, monkeypatch, lendable, non_lendable):
@@ -395,14 +369,14 @@ class TestBriefingOperatorKeyGuard:
     def test_lendable_model_on_operator_key_charges_one_unit_per_call(self, budget_env, clerk_on, lendable):
         resp = client.get("/watchlist/briefing", headers={**SIGNED_IN, "X-Model-Id": lendable.id})
         assert resp.status_code == 200
-        assert _usage(CLERK_USER) == 1  # one LLM call in the briefing chain
+        assert llm_usage(CLERK_USER) == 1  # one LLM call in the briefing chain
 
     @pytest.mark.eval_unit
     def test_cached_briefing_makes_no_llm_call_and_is_not_charged(self, budget_env, clerk_on, lendable):
         headers = {**SIGNED_IN, "X-Model-Id": lendable.id}
         assert client.get("/watchlist/briefing", headers=headers).status_code == 200
         assert client.get("/watchlist/briefing", headers=headers).status_code == 200
-        assert _usage(CLERK_USER) == 1
+        assert llm_usage(CLERK_USER) == 1
 
     @pytest.mark.eval_unit
     def test_non_lendable_model_refused_on_operator_key(self, budget_env, clerk_on, non_lendable):
@@ -410,7 +384,7 @@ class TestBriefingOperatorKeyGuard:
         assert resp.status_code == 400
         assert "own" in resp.json()["detail"].lower()
         assert budget_env.created == 0  # never reached the LLM
-        assert _usage(CLERK_USER) == 0
+        assert llm_usage(CLERK_USER) == 0
 
     @pytest.mark.eval_unit
     def test_byok_works_for_non_lendable_model_and_is_not_charged(self, budget_env, clerk_on, non_lendable):
@@ -420,7 +394,7 @@ class TestBriefingOperatorKeyGuard:
         )
         assert resp.status_code == 200
         assert budget_env.created == 1
-        assert _usage(CLERK_USER) == 0
+        assert llm_usage(CLERK_USER) == 0
 
     @pytest.mark.eval_unit
     def test_budget_spent_refuses_before_any_llm_call(self, budget_env, clerk_on, monkeypatch, lendable):
@@ -429,7 +403,7 @@ class TestBriefingOperatorKeyGuard:
         resp = client.get("/watchlist/briefing", headers={**SIGNED_IN, "X-Model-Id": lendable.id})
         assert resp.status_code == 429
         assert budget_env.created == 0
-        assert _usage(CLERK_USER) == 1
+        assert llm_usage(CLERK_USER) == 1
 
     @pytest.mark.eval_unit
     def test_byok_ignores_spent_budget(self, budget_env, clerk_on, monkeypatch, lendable):
@@ -440,7 +414,7 @@ class TestBriefingOperatorKeyGuard:
             headers={**SIGNED_IN, "X-Model-Id": lendable.id, **byok_header(lendable.provider, "mine")},
         )
         assert resp.status_code == 200
-        assert _usage(CLERK_USER) == 1
+        assert llm_usage(CLERK_USER) == 1
 
     @pytest.mark.eval_unit
     def test_generation_failure_detail_is_generic_and_logged(
@@ -467,4 +441,4 @@ class TestBriefingOperatorKeyGuard:
         # Clerk unconfigured: the operator is the user, every model is lendable.
         resp = client.get("/watchlist/briefing", headers={**HEADERS, "X-Model-Id": non_lendable.id})
         assert resp.status_code == 200
-        assert _usage(USER_ID) == 1
+        assert llm_usage(USER_ID) == 1

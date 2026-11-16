@@ -207,7 +207,7 @@ def test_env_default_model_id_is_not_an_explicit_request(monkeypatch):
     # DEFAULT_MODEL_ID is env-defaulted into keys.model_id; with no usable key
     # it must not beat the free-trial fallback.
     trial = get_free_tier_model()
-    other = next(m for m in get_all_models() if m.id != trial.id)
+    other = other_model(trial)
     monkeypatch.setenv("DEFAULT_MODEL_ID", other.id)
     model, key = resolve_model(_keys(model_id=other.id), None)
     assert model.id == trial.id
