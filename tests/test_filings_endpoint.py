@@ -489,19 +489,48 @@ class TestFilingsLLMBudget:
 
     def test_env_key_subject_to_budget(self, client, mock_filings_deps, budget_db, monkeypatch):
         """When the key resolves from env (no header), the daily budget applies:
-        a request admitted under budget is charged per generated section and
-        may finish past it; the next one is refused up front."""
+        a request admitted under budget generates sections until the budget is
+        spent and leaves the rest out; the next one is refused up front."""
         from api import llm_concurrency
         _core_only(mock_filings_deps)  # 6 sections: 10-K x3, 10-Q x2, 8-K
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
         monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 2)
         headers = {"X-User-Id": "user_envbudget"}
-        assert client.get("/api/company/AAPL/filings", headers=headers).status_code == 200
-        assert llm_usage("user_envbudget") == 6
+
+        resp = client.get("/api/company/AAPL/filings", headers=headers)
+        assert resp.status_code == 200
+        body = resp.json()
+        served = [k for s in ("tenk", "tenq") for k in body[s] if k != "metadata"]
+        served += ["8-K"] if "analysis" in body["eightk"] else []
+        assert len(served) == 2
+        assert mock_filings_deps["llm"].calls == 2
+        assert llm_usage("user_envbudget") == 2
+
         resp = client.get("/api/company/AAPL/filings", headers=headers)
         assert resp.status_code == 429
         assert "budget" in resp.json()["detail"].lower()
-        assert llm_usage("user_envbudget") == 6
+        assert llm_usage("user_envbudget") == 2
+
+    def test_stream_stops_generating_when_budget_runs_out(
+        self, client, mock_filings_deps, budget_db, monkeypatch
+    ):
+        """Sections past the budget are refused with their own status; the
+        ones generated before it ran out still stream, and the stream completes."""
+        from api import llm_concurrency
+        _core_only(mock_filings_deps)  # 6 sections
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 2)
+
+        events = _stream_events(
+            client, "/api/company/AAPL/filings/stream", {"X-User-Id": "user_streambudget"}
+        )
+        refused = [e for e in events if e.get("status") == "budget_exceeded"]
+        assert len(_generated(events)) == 2
+        assert len([e for e in events if e.get("type") == "section"]) == 2
+        assert len(refused) == 4
+        assert all("budget" in e["message"].lower() for e in refused)
+        assert events[-1]["type"] == "complete"
+        assert llm_usage("user_streambudget") == 2
 
     def test_stream_over_budget_emits_error(self, client, mock_filings_deps, budget_db, monkeypatch):
         import asyncio as _asyncio

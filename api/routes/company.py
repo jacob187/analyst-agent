@@ -34,7 +34,7 @@ from agents.sec_workflow.analysis_cache import (
 from api.dependencies import ApiKeys, get_api_keys, resolve_model
 from api.llm_concurrency import (
     LLMBudgetExceeded,
-    charge_llm_call,
+    LLMCallCharger,
     ensure_budget_available,
     llm_slot,
 )
@@ -510,22 +510,22 @@ async def _reported_eightk_kind(
 async def _analyze_or_cache(
     ticker: str, filing: FilingRef, analysis_type: str,
     llm_input: dict[str, Any], model_id: str, api_key: str | None,
-    on_progress=None, cache_only: bool = False, charge_user_id: str | None = None,
+    on_progress=None, cache_only: bool = False, charger: LLMCallCharger | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     """Resolve one filing section — the single source of truth for the
     cache → keyless-gate → generate flow shared by the JSON and SSE endpoints (#10).
     Cache read/generate/save is the shared ``get_or_analyze`` the chat tools use.
 
-    Returns ``(status, data)``: 'cached'|'needs_key'|'unavailable'|'done'|'failed'.
+    Returns ``(status, data)``:
+    'cached'|'needs_key'|'unavailable'|'done'|'failed'|'budget_exceeded'.
     ``data`` (the analysis plus its ``filing_reference``) is None for everything
     but cached/done. ``cache_only`` (input failed to extract) serves a cache
     hit but returns 'unavailable' on a miss, silently.
     ``on_progress(status, extra)`` (optional) is called as the state advances so the SSE endpoint can stream progress; the
-    JSON endpoint passes None. ``charge_user_id`` (operator-paid requests
-    only) is charged one daily-budget unit when this section actually runs
-    its LLM analysis; cache hits and skipped sections cost nothing. The
-    caller's pre-flight (`_ensure_budget_if_generating`) decides whether
-    the request may generate at all.
+    JSON endpoint passes None. ``charger`` (operator-paid requests only, from
+    `_budget_charger`) charges one daily-budget unit as this section's LLM
+    call starts and refuses the call once the budget is spent
+    ('budget_exceeded'); cache hits and skipped sections cost nothing.
     """
     form_type = filing.form
 
@@ -542,11 +542,11 @@ async def _analyze_or_cache(
         logger.info("[%s] LLM CALL   %s/%s — calling %s", ticker, form_type, analysis_type, model_id)
         started.append(time.monotonic())
         async with llm_slot():
-            # Charged only once a slot is held: a saturated pool fails the
-            # section before any LLM call, so it costs nothing.
-            if charge_user_id:
-                await charge_llm_call(charge_user_id)
             llm = await asyncio.to_thread(create_llm, model_id, api_key)
+            if charger is not None:
+                # Charged as the LLM call starts, inside the slot: a saturated
+                # pool fails the section before any call, so it costs nothing.
+                llm = llm.with_config(callbacks=[charger])
             return await run_analysis(llm, ticker, analysis_type, llm_input)
 
     try:
@@ -554,6 +554,10 @@ async def _analyze_or_cache(
             ticker, filing, analysis_type,
             None if cache_only or not api_key else generate,
         )
+    except LLMBudgetExceeded as e:
+        logger.info("[%s] BUDGET     %s/%s refused: %s", ticker, form_type, analysis_type, e)
+        progress("budget_exceeded", message=str(e))
+        return "budget_exceeded", None
     except Exception as e:
         logger.error("[%s] LLM FAILED %s/%s: %s", ticker, form_type, analysis_type, e)
         progress("failed")
@@ -585,25 +589,33 @@ def _budget_user(keys: ApiKeys, api_key: str | None, provider: str) -> str | Non
     return None
 
 
-async def _ensure_budget_if_generating(
+async def _budget_charger(
     charge_user_id: str | None, ticker: str, plan: list[dict[str, Any]],
-) -> None:
-    """Pre-flight for operator-paid requests that will run ≥1 LLM analysis
-    (#6): refuse when the user's daily budget is already spent. Sections are
-    then charged one unit each as they generate (`_analyze_or_cache`). A
-    fully-cached, BYOK or keyless request is never refused or charged.
+) -> LLMCallCharger | None:
+    """The per-call budget charger for an operator-paid request (None when
+    the operator isn't paying). Must run on the event loop.
+
+    Pre-flight (#6): a request that will run ≥1 LLM analysis is refused when
+    the user's daily budget is already spent. After that the charger charges
+    one unit per section LLM call and refuses the calls that would exceed the
+    budget, so a request admitted under budget stops generating once it is
+    spent (`_analyze_or_cache` → 'budget_exceeded'). A fully-cached, BYOK or
+    keyless request is never refused or charged.
 
     Raises LLMBudgetExceeded so the caller can surface a 429 / SSE error.
     """
     if charge_user_id is None:
-        return
-    from api.db import get_filing_analysis
+        return None
+    from api.db import get_filing_analysis, get_llm_usage
     cached = await asyncio.gather(*[
         get_filing_analysis(ticker, p["form"], p["accession"], p["atype"])
         for p in plan if not p["cache_only"]
     ])
     if any(c is None for c in cached):
-        await ensure_budget_available(charge_user_id)
+        used = await ensure_budget_available(charge_user_id)
+    else:
+        used = await get_llm_usage(charge_user_id)  # nothing to generate: never refused
+    return LLMCallCharger(charge_user_id, used=used)
 
 
 @router.get("/{ticker}/filings")
@@ -659,11 +671,10 @@ async def get_company_filings(
     plan = _plan_sections(filing_data)
 
     # Operator-paid: refuse if today's budget is spent and an LLM call would
-    # run; each generated section is then charged one unit. Fully-cached /
-    # BYOK / keyless reads cost nothing.
-    charge_user_id = _budget_user(keys, api_key, model.provider)
+    # run; each generated section is then charged one unit, and sections past
+    # the budget are left out. Fully-cached / BYOK / keyless reads cost nothing.
     try:
-        await _ensure_budget_if_generating(charge_user_id, ticker, plan)
+        charger = await _budget_charger(_budget_user(keys, api_key, model.provider), ticker, plan)
     except LLMBudgetExceeded as e:
         raise HTTPException(status_code=429, detail=str(e))
 
@@ -672,10 +683,12 @@ async def get_company_filings(
     results = await asyncio.gather(*[
         _analyze_or_cache(
             ticker, _filing_ref(filing_data, p), p["atype"], p["input"], model.id, api_key,
-            cache_only=p["cache_only"], charge_user_id=charge_user_id,
+            cache_only=p["cache_only"], charger=charger,
         )
         for p in plan
     ])
+    if charger is not None:
+        await charger.settle()
 
     response: dict[str, Any] = {"ticker": ticker}
     if "tenk" in filing_data:
@@ -729,6 +742,7 @@ async def stream_company_filings(
         {"type": "progress", "step": "10-K/risk_10k",     "status": "processing"}
         {"type": "progress", "step": "10-K/risk_10k",     "status": "done",  "duration": 14.1}
         {"type": "progress", "step": "10-K/risk_10k",     "status": "cached"}
+        {"type": "progress", "step": "10-K/risk_10k",     "status": "budget_exceeded", "message": "..."}
         {"type": "section",  "form": "10-K", "key": "risk_10k", "data": {...}}
         {"type": "complete"}
         {"type": "error",    "message": "..."}
@@ -803,9 +817,10 @@ async def stream_company_filings(
             })
 
             # Operator-paid + ≥1 cache miss with today's budget spent → error +
-            # stop. Otherwise each generated section is charged one unit.
+            # stop. Otherwise each generated section is charged one unit, and
+            # sections past the budget report 'budget_exceeded'.
             try:
-                await _ensure_budget_if_generating(charge_user_id, ticker, plan)
+                charger = await _budget_charger(charge_user_id, ticker, plan)
             except LLMBudgetExceeded as e:
                 yield _sse({"type": "error", "message": str(e)})
                 return
@@ -825,7 +840,7 @@ async def stream_company_filings(
                 _status, data = await _analyze_or_cache(
                     ticker, _filing_ref(filing_data, p), p["atype"], p["input"],
                     model.id, api_key, on_progress=on_progress, cache_only=p["cache_only"],
-                    charge_user_id=charge_user_id,
+                    charger=charger,
                 )
                 if data is not None:
                     await queue.put(_sse({"type": "section", "form": p["form"], "key": p["key"], "data": data}))
@@ -850,6 +865,8 @@ async def stream_company_filings(
                 # Propagate any unexpected errors from the gather
                 await runner
 
+            if charger is not None:
+                await charger.settle()
             yield _sse({"type": "complete"})
         finally:
             semaphore.release()
