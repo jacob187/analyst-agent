@@ -74,7 +74,7 @@ _EXPECTED_DESCRIPTIONS = {
     'get_8k_item': (
         "Get raw text of a specific 8-K item by number (e.g. '2.02' for earnings, "
         "'1.01' for material agreements, '5.02' for leadership changes). Pass the "
-        'item number as the query.'
+        'item number as `item`.'
     ),
     'get_stock_price_history': (
         'Get recent stock price history (last 10 trading days with open, close, '
@@ -163,7 +163,7 @@ class _AllowAll:
 
 def _build(family: str) -> list:
     if family == "sec":
-        return sec_tools.create_sec_tools("AAPL", object())[0]
+        return sec_tools.create_sec_tools("AAPL", object())
     if family == "stock":
         return stock_tools.create_stock_tools("AAPL")
     if family == "market":
@@ -458,8 +458,13 @@ class _FakeRetriever:
         return {"found": True, "text": f"text for item {item}"}
 
 
+async def _latest_filings(ticker, forms):
+    return {form: object() for form in forms}
+
+
 @pytest.fixture
 def edgar(monkeypatch):
+    monkeypatch.setattr(sec_tools, "latest_filings", _latest_filings)
     monkeypatch.setattr(sec_tools, "get_retriever", lambda ticker: _FakeRetriever())
 
 
@@ -471,8 +476,9 @@ def edgar(monkeypatch):
         ({"item": "5.02", "ticker": "AAPL", "filing": "latest"}, "5.02"),
         ({}, "2.02"),
         ("1.01", "1.01"),
+        ({"query": "5.02"}, "5.02"),
     ],
 )
 async def test_get_8k_item_argument_forms(edgar, args, expected):
-    tools = {t.name: t for t in sec_tools.create_sec_tools("AAPL", object())[0]}
+    tools = {t.name: t for t in sec_tools.create_sec_tools("AAPL", object())}
     assert await tools["get_8k_item"].ainvoke(args) == f"text for item {expected}"

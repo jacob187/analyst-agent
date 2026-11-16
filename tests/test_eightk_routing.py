@@ -220,3 +220,25 @@ async def test_run_analysis_unknown_type_still_raises():
     with pytest.raises(ValueError, match="Unknown analysis type"):
         await run_analysis(llm, _TICKER, "not_a_real_type", {})
     assert llm.calls == 0
+
+
+# ── One 8-K kind rule for chat and the company page ─────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("overview", "kind"),
+    [({"has_earnings": True}, "earnings"), ({"has_earnings": False}, "event"), ({}, "event")],
+)
+def test_eightk_kind(overview, kind):
+    from agents.sec_workflow.analysis_cache import eightk_kind
+
+    assert eightk_kind(overview) == kind
+
+
+def test_processor_has_only_the_async_analysis_entry_point():
+    # The sync analyze_* methods (and their "Error analyzing…" placeholder
+    # models) were dead once every caller moved to `aanalyze`.
+    from agents.sec_workflow.sec_llm_models import SECDocumentProcessor
+
+    assert not [name for name in vars(SECDocumentProcessor) if name.startswith("analyze_")]
+    assert callable(SECDocumentProcessor.aanalyze)

@@ -64,7 +64,7 @@ def llm():
 
 
 def _tools(llm):
-    tools, _ = create_sec_tools(TICKER, llm)
+    tools = create_sec_tools(TICKER, llm)
     return {t.name: t for t in tools}
 
 
@@ -390,7 +390,7 @@ async def test_graph_worker_charges_the_runs_callbacks(fresh_db, edgar, llm):
     )
     from agents.planner import AnalysisStep, QueryPlan
 
-    tools, _ = create_sec_tools(TICKER, llm)
+    tools = create_sec_tools(TICKER, llm)
     graph = StateGraph(AnalysisState)
     graph.add_node("planner_stub", lambda state: state)
     graph.add_node("worker", create_worker_node(_build_tools_dict(tools)))

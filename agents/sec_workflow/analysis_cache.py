@@ -308,19 +308,26 @@ async def run_analysis(
     return result.model_dump()
 
 
+def eightk_kind(overview: dict[str, Any]) -> str:
+    """The 8-K's analysis type: ``"earnings"`` (Item 2.02 with a parseable
+    press release) or ``"event"`` (everything else)."""
+    return "earnings" if overview.get("has_earnings") else "event"
+
+
 def eightk_input(retriever, overview: dict[str, Any], metadata: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """``(kind, raw)`` LLM input for the latest 8-K: ``"earnings"`` (Item 2.02
-    with a parseable press release) or ``"event"`` (primary item text, empty
-    when it failed to extract). Blocking (edgartools)."""
-    if overview.get("has_earnings"):
-        return "earnings", {**retriever.get_earnings_data(), "metadata": metadata}
+    """``(kind, raw)`` LLM input for the latest 8-K (kind per ``eightk_kind``;
+    an event's primary item text is empty when it failed to extract).
+    Blocking (edgartools)."""
+    kind = eightk_kind(overview)
+    if kind == "earnings":
+        return kind, {**retriever.get_earnings_data(), "metadata": metadata}
     items = overview.get("items", [])
     primary_item = items[0] if items else None
     item_text = ""
     if primary_item:
         item_result = retriever.get_8k_item(primary_item)
         item_text = item_result.get("text", "") if item_result.get("found") else ""
-    return "event", {
+    return kind, {
         "content_type": overview.get("content_type", "other"),
         "items": items,
         "context": overview.get("context", ""),

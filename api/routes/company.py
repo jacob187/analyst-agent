@@ -25,6 +25,7 @@ from agents.sec_workflow.analysis_cache import (
     FORMS,
     FilingRef,
     eightk_input,
+    eightk_kind,
     get_or_analyze,
     get_retriever,
     latest_filings,
@@ -371,7 +372,7 @@ def _fetch_filing_data(ticker: str, fetch_raw: bool = True) -> dict[str, Any]:
                 ) if eightk_meta else "",
                 "form_type": "8-K",
             }
-            kind = "earnings" if overview.get("has_earnings") else "event"
+            kind = eightk_kind(overview)
             if not fetch_raw:
                 result["eightk"] = {"kind": kind, "raw": {}, "metadata": metadata}
             else:

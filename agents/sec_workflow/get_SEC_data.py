@@ -693,6 +693,15 @@ class SECDataRetrieval:
             result = self.get_section(form, "2")
         return result["text"]
 
+    def balance_sheet_text(
+        self, form: Literal["10-K", "10-Q"] = "10-K"
+    ) -> tuple[str, Optional[FilingMetadata]]:
+        """``(balance sheet as text, metadata of the filing it came from)``,
+        read together so a concurrent refresh can't pair one filing's
+        balance sheet with another's accession."""
+        report, metadata = _load_report(self, form)
+        return report.financials.balance_sheet().to_dataframe().to_string(), metadata
+
     def extract_balance_sheet_as_str(
         self, which: Literal["tenk", "tenq", "both", "10-K", "10-Q"] = "both"
     ) -> dict[str, str]:
@@ -704,16 +713,10 @@ class SECDataRetrieval:
         include_tenq = which in ("tenq", "both", "10-Q")
 
         if include_tenk:
-            tenk = self.get_tenk()
-            out["tenk"] = (
-                tenk.financials.balance_sheet().to_dataframe().to_string()
-            )
+            out["tenk"], _ = self.balance_sheet_text("10-K")
         if include_tenq:
             try:
-                tenq = self.get_tenq()
-                out["tenq"] = (
-                    tenq.financials.balance_sheet().to_dataframe().to_string()
-                )
+                out["tenq"], _ = self.balance_sheet_text("10-Q")
             except Exception as e:
                 out["tenq_error"] = str(e)
         return out
