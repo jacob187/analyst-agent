@@ -3,12 +3,14 @@
 The only fake is the judge LLM at the boundary (`with_structured_output(...).ainvoke`).
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from evals.benchmark.common import BenchmarkError
 from evals.benchmark.judge import JudgeVerdict, a_is_first, judge_runs
 from evals.benchmark.runs import load_run
-from tests.benchmark.helpers import FIXTURE_QUESTIONS, FakeJudge, block, write_run
+from tests.benchmark.helpers import FIXTURE_QUESTIONS, PRICED, FakeJudge, block, write_run
 
 pytestmark = pytest.mark.eval_unit
 
@@ -163,4 +165,71 @@ class TestRobustness:
         judge = FakeJudge()
         with pytest.raises(BenchmarkError, match="different question sets"):
             await judge_runs(load_run(a), load_run(b), judge, "judge-model-x", SEED)
+        assert judge.prompts == []
+
+
+def _fails_on(qid: str):
+    """A verdict function whose reply about `qid` does not parse (a paid call that still errors,
+    like a real wrapped-verdict ValidationError); other calls follow FakeJudge's rules."""
+
+    def decide(text):
+        if f"({qid})" in text:
+            return {"result": {"foo": "bar"}}
+        return FakeJudge().decide([SimpleNamespace(content=text)])
+
+    return decide
+
+
+class TestRejudgeErrors:
+    """A re-run asks the judge again only about the questions whose judge call failed."""
+
+    async def _with_one_error(self, runs, usage=(1000, 100)):
+        judge = FakeJudge(decide=_fails_on("q-8k"), usage=usage)
+        judgement = await judge_runs(*runs, judge, "judge-model-x", SEED, pricing=PRICED, progress=lambda _m: None)
+        assert [q.id for q in judgement.questions if q.status == "error"] == ["q-8k"]
+        return judgement
+
+    async def _rejudge(self, runs, previous, judge=None, seed=999):
+        judge = judge or FakeJudge(usage=(1000, 100))
+        judgement = await judge_runs(
+            *runs, judge, "judge-model-x", seed, pricing=PRICED, progress=lambda _m: None, previous=previous
+        )
+        return judgement, judge
+
+    async def test_only_the_errored_question_is_asked_again_and_the_rest_are_kept(self, runs):
+        previous = await self._with_one_error(runs)
+        judgement, judge = await self._rejudge(runs, previous)
+
+        assert len(judge.prompts) == 1 and "(q-8k)" in judge.prompts[0]
+        assert {q.status for q in judgement.questions} == {"judged"}
+        assert [q.id for q in judgement.questions] == [q.id for q in previous.questions]
+        kept = [q for q in previous.questions if q.id != "q-8k"]
+        assert [q for q in judgement.questions if q.id != "q-8k"] == kept
+        # The recorded seed is kept, so the re-asked question's A/B order is the replayable one.
+        assert judgement.seed == SEED
+        assert next(q for q in judgement.questions if q.id == "q-8k").a_is_first == a_is_first(SEED, "q-8k")
+
+    async def test_the_spend_of_the_earlier_calls_is_kept_in_the_totals(self, runs):
+        previous = await self._with_one_error(runs)
+        judgement, _ = await self._rejudge(runs, previous)
+        assert judgement.judge_input_tokens == previous.judge_input_tokens + 1000
+        assert judgement.judge_output_tokens == previous.judge_output_tokens + 100
+        assert judgement.judge_cost_usd == pytest.approx(previous.judge_cost_usd + (1000 * 2 + 100 * 10) / 1e6)
+
+    async def test_an_unknown_earlier_cost_keeps_the_total_unknown(self, runs):
+        previous = await self._with_one_error(runs, usage=None)
+        assert previous.judge_cost_usd is None
+        judgement, _ = await self._rejudge(runs, previous)
+        assert judgement.judge_cost_usd is None
+
+    @pytest.mark.parametrize("change", ["judge", "runs"])
+    async def test_a_judgement_by_another_judge_or_of_other_runs_is_not_completed(self, runs, change):
+        previous = await self._with_one_error(runs)
+        if change == "judge":
+            previous = previous.model_copy(update={"judge_model": "another-judge"})
+        else:
+            previous = previous.model_copy(update={"a": previous.a.model_copy(update={"run_id": "other-run"})})
+        judge = FakeJudge()
+        with pytest.raises(BenchmarkError, match="Cannot complete the earlier judgement"):
+            await self._rejudge(runs, previous, judge)
         assert judge.prompts == []

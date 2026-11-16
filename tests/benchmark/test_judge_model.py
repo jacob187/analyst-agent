@@ -5,6 +5,8 @@ Nothing here reaches the network: either the real ChatAnthropic is only construc
 `init_chat_model` is replaced at the LLM boundary by a fake chat model.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from agents.llm_factory import ThinkingConfig, create_llm
@@ -139,6 +141,31 @@ class TestJudgeCliWithAnAnthropicModel:
         err = capsys.readouterr().err
         assert "already holds" in err and "--force" in err
         assert (tmp_path / "judged" / "judgement.json").read_text() == written
+
+    def test_a_rerun_judges_only_the_errored_questions_again(self, monkeypatch, tmp_path, capsys):
+        model = ANTHROPIC[0]
+        monkeypatch.setenv(provider_env_var(model), KEY)
+        write_run(tmp_path, "run-a")
+        write_run(tmp_path, "run-b", answers={"q-risk": "GOOD"})
+
+        def flaky(text):
+            if "(q-risk)" in text:
+                raise RuntimeError("provider 529 overloaded")
+            return FakeJudge().decide([SimpleNamespace(content=text)])
+
+        monkeypatch.setattr("langchain.chat_models.init_chat_model", lambda spec, **kw: FakeJudge(decide=flaky))
+        assert self._judge(tmp_path, model) == 0
+        before = {q.id: q for q in load_judgement(tmp_path / "judged").questions}
+        assert before["q-risk"].status == "error"
+
+        again = FakeJudge()
+        monkeypatch.setattr("langchain.chat_models.init_chat_model", lambda spec, **kw: again)
+        assert self._judge(tmp_path, model) == 0  # no --force needed to finish the same judgement
+
+        assert len(again.prompts) == 1 and "(q-risk)" in again.prompts[0]
+        after = {q.id: q for q in load_judgement(tmp_path / "judged").questions}
+        assert after["q-risk"].status == "judged" and after["q-risk"].winner == "b"
+        assert all(after[qid] == before[qid] for qid in before if qid != "q-risk")
 
     def test_force_replaces_an_existing_judgement(self, monkeypatch, tmp_path):
         model = ANTHROPIC[0]
