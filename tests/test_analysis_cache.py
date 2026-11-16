@@ -220,6 +220,25 @@ async def test_newer_8k_is_analysed_and_cited(fresh_db, edgar, llm, monkeypatch)
     assert await _row("8-K", E2, "event") == _stored_part(out)
 
 
+async def test_edgar_outage_after_ttl_serves_the_stored_analyses(fresh_db, edgar, llm, monkeypatch):
+    # The TTL lapsed and EDGAR is down: the stale ref still names the
+    # retriever's filing, so its stored analysis is served (no LLM call).
+    risk = json.loads(await _ask(llm, "get_risk_factors_summary"))
+    eight = json.loads(await _ask(llm, "analyze_latest_8k"))
+    edgar.outage = RuntimeError("EDGAR 429")
+    monkeypatch.setenv("FILING_FRESHNESS_TTL_SECONDS", "0")
+
+    assert json.loads(await _ask(llm, "get_risk_factors_summary")) == risk
+    assert json.loads(await _ask(llm, "analyze_latest_8k")) == eight
+    assert llm.calls == 2
+
+
+async def test_edgar_outage_with_nothing_cached_still_fails(fresh_db, edgar, llm):
+    edgar.outage = RuntimeError("EDGAR 429")
+    out = await _ask(llm, "get_risk_factors_summary")
+    assert out.startswith("Failed to analyze risk factors") and "EDGAR 429" in out
+
+
 async def test_event_8k_without_item_text_is_not_analysed(fresh_db, monkeypatch, llm):
     fake = FakeEdgar()
     fake.publish(eightk(E1, "2026-01-30", earnings=False, item_text=""))
@@ -285,18 +304,19 @@ async def test_latest_filing_lookup_cached_within_ttl(edgar, monkeypatch):
     assert edgar.requests > requests
 
 
-async def test_latest_filing_cached_per_form(edgar):
+async def test_one_lookup_serves_every_form(edgar):
     await latest_filing(TICKER, "10-K")
-    requests = edgar.requests
+    built = edgar.companies
     assert (await latest_filing(TICKER, "10-Q")).accession == Q1
-    assert edgar.requests == requests + 1
+    assert (await latest_filing(TICKER, "8-K")).accession == E1
+    assert edgar.companies == built
 
 
 async def test_concurrent_first_lookups_share_one_sec_request(edgar):
     edgar.latency = 0.05
     refs = await asyncio.gather(*(latest_filing(TICKER, "10-K") for _ in range(5)))
     assert {r.accession for r in refs} == {K1}
-    assert edgar.requests == 1
+    assert edgar.companies == 1
 
 
 async def test_evicted_retriever_does_not_pair_old_ref_with_new_text(fresh_db, edgar, llm, monkeypatch):
@@ -320,7 +340,7 @@ async def test_company_without_the_form_caches_none(monkeypatch):
     fake = FakeEdgar().install(monkeypatch)
     assert await latest_filing(TICKER, "10-K") is None
     assert await latest_filing(TICKER, "10-K") is None
-    assert fake.requests == 1
+    assert fake.companies == 1
 
 
 def test_ttl_defaults_to_four_hours(monkeypatch):
