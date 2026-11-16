@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { TrendingUp, TrendingDown, FileText, BarChart2 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -41,7 +41,9 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
   const [filingsLoaded, setFilingsLoaded] = useState(false);
   const [filingsProgress, setFilingsProgress] = useState<FilingProgressEvent[]>([]);
   const filingsLoadedRef = useRef(false);
-  filingsLoadedRef.current = filingsLoaded;
+  useLayoutEffect(() => {
+    filingsLoadedRef.current = filingsLoaded;
+  });
   const filingsControllerRef = useRef<AbortController | null>(null);
 
   const [activeTab, setActiveTab] = useState("overview");
@@ -51,12 +53,21 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
 
   // keys ref so loadFilings always sends current keys without being a dep
   const keysRef = useRef(keys);
-  keysRef.current = keys;
+  useLayoutEffect(() => {
+    keysRef.current = keys;
+  });
+
+  // Clear the previous ticker's profile during render rather than in the fetch
+  // effect; retries clear it in the onRetry handler.
+  const [profileTicker, setProfileTicker] = useState(ticker);
+  if (profileTicker !== ticker) {
+    setProfileTicker(ticker);
+    setProfileError(null);
+    setProfile(null);
+  }
 
   useEffect(() => {
     let cancelled = false;
-    setProfileError(null);
-    setProfile(null);
 
     const timeout = setTimeout(() => {
       if (!cancelled && profile === null) {
@@ -261,7 +272,11 @@ export function CompanyDashboard({ ticker, initialSessionId }: CompanyDashboardP
             data={profile}
             loading={profile === null && !profileError}
             error={profileError}
-            onRetry={() => setProfileNonce((n) => n + 1)}
+            onRetry={() => {
+              setProfileError(null);
+              setProfile(null);
+              setProfileNonce((n) => n + 1);
+            }}
           />
         </TabsContent>
 
