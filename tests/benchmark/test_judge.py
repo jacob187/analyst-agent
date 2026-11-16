@@ -6,7 +6,7 @@ The only fake is the judge LLM at the boundary (`with_structured_output(...).ain
 import pytest
 
 from evals.benchmark.common import BenchmarkError
-from evals.benchmark.judge import JudgeVerdict, a_is_first, judge_runs, load_judge_prompt
+from evals.benchmark.judge import JudgeVerdict, a_is_first, judge_runs
 from evals.benchmark.runs import load_run
 from tests.benchmark.helpers import FIXTURE_QUESTIONS, FakeJudge, block, write_run
 
@@ -86,10 +86,12 @@ class TestBlindness:
             for secret in ("arch-alpha", "arch-beta", "model-alpha", "model-beta", "run-a", "run-b", "judge-model-x"):
                 assert secret not in prompt
 
-    def test_prompt_lives_in_a_file_with_system_and_user_templates(self):
-        prompts = load_judge_prompt()
-        assert "{first_answer}" in prompts["user"] and "{second_answer}" in prompts["user"]
-        assert prompts["system"].strip()
+    def test_prompts_are_loaded_from_agents_prompts_with_system_and_user_templates(self):
+        from agents import prompts
+
+        user = prompts.BENCHMARK_JUDGE_USER_PROMPT
+        assert "{first_answer}" in user and "{second_answer}" in user
+        assert prompts.BENCHMARK_JUDGE_SYSTEM_PROMPT.strip()
 
 
 class TestRobustness:

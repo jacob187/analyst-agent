@@ -10,9 +10,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from evals.benchmark.pricing import cost_text
 from evals.benchmark.report import (
     _columns,
-    _cost_text,
     _heading,
     _metrics_line,
     _num,
@@ -162,8 +162,8 @@ def render_comparison_report(
             ref_errors if vs is None else f"{vs['unique_factual_errors']} / {vs['reference_unique_factual_errors']}",
             "-" if vs is None else str(vs["judge_errors"]),
             _num(means["llm_calls"], ".1f"), _num(means["total_tokens"], ".0f"),
-            _num(means["latency_s"], ".1f"), _cost_text(means["cost_usd"]),
-            "-" if not m.get("judge") else _cost_text(m["judge"]["cost_usd"]),  # summary.json from before judge cost: absent
+            _num(means["latency_s"], ".1f"), cost_text(means["cost_usd"]),
+            "-" if not m.get("judge") else cost_text(m["judge"]["cost_usd"]),  # summary.json from before judge cost: absent
             m["prices_as_of"] or "unknown",
         ])
     _table(
@@ -177,8 +177,8 @@ def render_comparison_report(
     if costs:
         _paragraph(
             pdf,
-            f"Run cost: {_cost_text(costs['runs_usd'])}. Judge cost: {_cost_text(costs['judge_usd'])}. "
-            f"Total (runs + judging): {_cost_text(costs['total_usd'])}.",
+            f"Run cost: {cost_text(costs['runs_usd'])}. Judge cost: {cost_text(costs['judge_usd'])}. "
+            f"Total (runs + judging): {cost_text(costs['total_usd'])}.",
             style="B",
         )
     pdf.ln(3)
@@ -200,7 +200,7 @@ def render_comparison_report(
                 model_id, cat, str(agg["n"]),
                 "-" if vs is None else f"{vs['wins']}/{vs['ties']}/{vs['losses'] + vs['unanswered_by_model']}",
                 _num(agg["means"]["llm_calls"], ".1f"), _num(agg["means"]["total_tokens"], ".0f"),
-                _num(agg["means"]["latency_s"], ".1f"), _cost_text(agg["means"]["cost_usd"]),
+                _num(agg["means"]["latency_s"], ".1f"), cost_text(agg["means"]["cost_usd"]),
             ])
     _table(
         pdf, ["Model", "Category", "N", "W/T/L", "LLM calls", "Tokens", "Latency s", "Mean cost"],

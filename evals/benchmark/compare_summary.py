@@ -37,10 +37,10 @@ Recommendation rules (also written verbatim into ``summary.json``):
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import math
 from typing import Any
 
-from evals.benchmark.common import BenchmarkError
+from evals.benchmark.common import BenchmarkError, rate, utc_now
 from evals.benchmark.runs import LoadedRun
 from evals.benchmark.schemas import Judgement
 from evals.benchmark.pricing import cost_text
@@ -51,8 +51,15 @@ DEFAULT_CHAT_COST_MULTIPLE = 3.0
 FILING_CATEGORY = "filing_lookup"
 
 
-def _rate(numerator: float, n: int) -> float | None:
-    return None if n == 0 else round(numerator / n, 4)
+def check_cost_multiple(value: object, source: str = "--chat-cost-multiple") -> float:
+    """``value`` when it is a finite number > 0; otherwise a BenchmarkError naming ``source``.
+
+    NaN and infinity are refused: NaN fails every cost comparison (no model would ever
+    fit the cap) and neither can be written to ``summary.json`` as valid JSON.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise BenchmarkError(f"{source} must be a finite number greater than 0 (got {value!r}).")
+    return float(value)
 
 
 def unusable_reason(run: LoadedRun) -> str | None:
@@ -99,9 +106,9 @@ def vs_reference(
         "judge_errors": sum(q.status == "error" for q in entries),
         "unique_factual_errors": counts["unique_factual_errors"],
         "reference_unique_factual_errors": counts["opponent_unique_factual_errors"],
-        "win_rate": _rate(counts["wins"], n),
-        "win_or_tie_rate": _rate(counts["wins"] + counts["ties"], n),
-        "win_score": _rate(counts["wins"] + 0.5 * counts["ties"], n),
+        "win_rate": rate(counts["wins"], n),
+        "win_or_tie_rate": rate(counts["wins"] + counts["ties"], n),
+        "win_score": rate(counts["wins"] + 0.5 * counts["ties"], n),
     }
 
 
@@ -380,7 +387,7 @@ def build_comparison_summary(
     runs_usd = sum_known([m["totals"]["cost_usd"] for m in models.values()])
     judge_usd = sum_known([j.judge_cost_usd for j in judgements.values()])
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": utc_now(),
         "graph": graph,
         "reference": reference.meta.model_id,
         "judge_model": judge_model,
@@ -406,7 +413,6 @@ def build_comparison_summary(
     }
 
 
-_cost = cost_text
 
 
 def _reference_record(standing: dict[str, Any]) -> str:
@@ -430,13 +436,13 @@ def comparison_text(summary: dict[str, Any]) -> str:
         lines.append(
             f"  {model_id}: {record}; mean {m['means']['llm_calls'] or 0:.1f} LLM calls, "
             f"{m['means']['total_tokens'] or 0:.0f} tokens, {m['means']['latency_s'] or 0:.1f}s, "
-            f"{_cost(m['means']['cost_usd'])}/question"
-            + ("" if m["judge"] is None else f"; judging {_cost(m['judge']['cost_usd'])}")
+            f"{cost_text(m['means']['cost_usd'])}/question"
+            + ("" if m["judge"] is None else f"; judging {cost_text(m['judge']['cost_usd'])}")
         )
     costs = summary["costs"]
     lines.append(
-        f"Cost: runs {_cost(costs['runs_usd'])} + judging {_cost(costs['judge_usd'])} "
-        f"= total {_cost(costs['total_usd'])}"
+        f"Cost: runs {cost_text(costs['runs_usd'])} + judging {cost_text(costs['judge_usd'])} "
+        f"= total {cost_text(costs['total_usd'])}"
     )
     lines.append("Recommendations:")
     for key, rec in summary["recommendations"].items():

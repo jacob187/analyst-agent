@@ -117,6 +117,41 @@ class TestJudgeCliWithAnAnthropicModel:
         risk = next(q for q in judgement.questions if q.id == "q-risk")
         assert risk.status == "judged" and risk.winner == "b" and risk.a_unique_factual_error is True
 
+    def _judge(self, tmp_path, model, *extra):
+        return main(["judge", "--a", str(tmp_path / "run-a"), "--b", str(tmp_path / "run-b"),
+                     "--model", model.id, "--seed", "0", "--out", str(tmp_path / "judged"), *extra])
+
+    def test_an_existing_judgement_is_not_overwritten_and_nothing_is_spent(self, monkeypatch, tmp_path, capsys):
+        model = ANTHROPIC[0]
+        monkeypatch.setattr("langchain.chat_models.init_chat_model", lambda spec, **kw: FakeJudge())
+        monkeypatch.setenv(provider_env_var(model), KEY)
+        write_run(tmp_path, "run-a")
+        write_run(tmp_path, "run-b")
+        assert self._judge(tmp_path, model) == 0
+        written = (tmp_path / "judged" / "judgement.json").read_text()
+        capsys.readouterr()
+
+        def must_not_run(*_a, **_k):
+            raise AssertionError("a judge LLM was built for an --out that already holds a judgement")
+
+        monkeypatch.setattr("langchain.chat_models.init_chat_model", must_not_run)
+        assert self._judge(tmp_path, model) == 2
+        err = capsys.readouterr().err
+        assert "already holds" in err and "--force" in err
+        assert (tmp_path / "judged" / "judgement.json").read_text() == written
+
+    def test_force_replaces_an_existing_judgement(self, monkeypatch, tmp_path):
+        model = ANTHROPIC[0]
+        monkeypatch.setattr("langchain.chat_models.init_chat_model", lambda spec, **kw: FakeJudge())
+        monkeypatch.setenv(provider_env_var(model), KEY)
+        write_run(tmp_path, "run-a")
+        write_run(tmp_path, "run-b")
+        assert self._judge(tmp_path, model) == 0
+        first = load_judgement(tmp_path / "judged").date
+        monkeypatch.setattr("evals.benchmark.judge.utc_now", lambda: "2099-01-01T00:00:00+00:00")
+        assert self._judge(tmp_path, model, "--force") == 0
+        assert load_judgement(tmp_path / "judged").date == "2099-01-01T00:00:00+00:00" != first
+
     def test_missing_anthropic_key_is_refused_before_any_llm_is_built(self, monkeypatch, tmp_path, capsys):
         model = ANTHROPIC[0]
         monkeypatch.delenv(provider_env_var(model), raising=False)

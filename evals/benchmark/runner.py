@@ -6,7 +6,6 @@ import asyncio
 import os
 import subprocess
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,9 +16,11 @@ from evals.benchmark.architectures import Builder, get_builder
 from evals.benchmark.common import (
     DEFAULT_TIMEOUT_S,
     BenchmarkError,
+    describe_error,
     provider_api_key,
     resolve_model,
     scrub_secrets,
+    utc_now,
 )
 from evals.benchmark.isolation import DB_ISOLATED, isolated_db
 from evals.benchmark.metrics import ROOT_SPAN_NAME, SPAN_ATTRIBUTE_CAP, SpanMetrics, extract_metrics
@@ -29,7 +30,6 @@ from evals.benchmark.runs import QUESTIONS_DIR, RUN_FILE, write_model
 from evals.benchmark.schemas import QuestionResult, RunMeta
 from agents.model_registry import ModelDef
 
-_ERROR_TEXT_LIMIT = 500
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _RUN_NOTES = [
@@ -44,16 +44,16 @@ _RUN_NOTES = [
 ]
 
 
-def preflight(graph: str, model_id: str | None) -> tuple[Builder, ModelDef]:
-    """Validate flags and credentials before spending anything.
+def preflight(graph: str, model_id: str | None) -> ModelDef:
+    """Validate flags and credentials before spending anything; returns the model.
 
     Raises BenchmarkError for an unknown architecture or model, a registry
     without a free-tier model (when --model is omitted), or a missing key.
     """
-    builder = get_builder(graph)
+    get_builder(graph)
     model = resolve_model(model_id)
     provider_api_key(model)  # raises if the provider key is not in the environment
-    return builder, model
+    return model
 
 
 def _git(*args: str) -> str | None:
@@ -72,10 +72,6 @@ def git_state() -> tuple[str, bool | None]:
     return sha, (None if status is None else bool(status))
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
 async def _collect_answer(agent: Any, question: Question) -> str:
     answer: str | None = None
     async for event in agent.stream({"messages": [HumanMessage(content=question.question)]}):
@@ -85,11 +81,6 @@ async def _collect_answer(agent: Any, question: Question) -> str:
     if not answer or not answer.strip():
         raise RuntimeError("agent stream ended without a response event")
     return answer
-
-
-def _describe(exc: BaseException) -> str:
-    text = str(exc) or "(no message)"
-    return scrub_secrets(f"{type(exc).__name__}: {text}")[:_ERROR_TEXT_LIMIT]
 
 
 async def run_question(builder: Builder, question: Question, model_id: str, timeout_s: float) -> QuestionResult:
@@ -111,7 +102,7 @@ async def run_question(builder: Builder, question: Question, model_id: str, time
         except asyncio.TimeoutError:
             failure = f"TimeoutError: no answer within {timeout_s:g}s"
         except Exception as e:  # one question failing must not abort the run
-            failure = _describe(e)
+            failure = describe_error(e)
         metrics = extract_metrics(captured.spans)
 
     errors = [scrub_secrets(e) for e in metrics.errors]
@@ -173,48 +164,35 @@ async def run_benchmark(
     # Entered before run.json is written: a failure to set up the database must
     # not leave behind a run directory that blocks the re-run.
     async with isolated_db():
-        return await _run_selected(graph, builder, model, questions, selected, out_dir, timeout_s, progress)
-
-
-async def _run_selected(
-    graph: str,
-    builder: Builder,
-    model: ModelDef,
-    questions: list[Question],
-    selected: list[Question],
-    out_dir: Path,
-    timeout_s: float,
-    progress: Callable[[str], None],
-) -> RunMeta:
-    sha, dirty = git_state()
-    meta = RunMeta(
-        run_id=uuid.uuid4().hex,
-        architecture=graph,
-        model_id=model.id,
-        git_sha=sha,
-        git_dirty=dirty,
-        date=_now(),
-        question_set_hash=question_set_hash(questions),
-        question_ids=[q.id for q in selected],
-        tavily_enabled=bool((os.getenv("TAVILY_API_KEY") or "").strip()),
-        pricing=pricing_from_model(model),
-        db=DB_ISOLATED,
-        notes=list(_RUN_NOTES),
-    )
-    write_model(out_dir / RUN_FILE, meta)
-
-    failed = 0
-    for index, question in enumerate(selected, start=1):
-        result = await run_question(builder, question, model.id, timeout_s)
-        write_model(out_dir / QUESTIONS_DIR / f"{question.id}.json", result)
-        failed += result.status == "failed"
-        progress(
-            f"[{index}/{len(selected)}] {question.id}: {result.status} "
-            f"{result.latency_s:.1f}s, {result.llm_calls} LLM calls, {result.total_tokens} tokens"
-            + (f" ({result.errors[0]})" if result.errors else "")
+        sha, dirty = git_state()
+        meta = RunMeta(
+            run_id=uuid.uuid4().hex,
+            architecture=graph,
+            model_id=model.id,
+            git_sha=sha,
+            git_dirty=dirty,
+            date=utc_now(),
+            question_set_hash=question_set_hash(questions),
+            question_ids=[q.id for q in selected],
+            tavily_enabled=bool((os.getenv("TAVILY_API_KEY") or "").strip()),
+            pricing=pricing_from_model(model),
+            db=DB_ISOLATED,
+            notes=list(_RUN_NOTES),
         )
+        write_model(out_dir / RUN_FILE, meta)
 
-    meta.finished_at = _now()
-    write_model(out_dir / RUN_FILE, meta)
+        failed = 0
+        for index, question in enumerate(selected, start=1):
+            result = await run_question(builder, question, model.id, timeout_s)
+            write_model(out_dir / QUESTIONS_DIR / f"{question.id}.json", result)
+            failed += result.status == "failed"
+            progress(
+                f"[{index}/{len(selected)}] {question.id}: {result.status} "
+                f"{result.latency_s:.1f}s, {result.llm_calls} LLM calls, {result.total_tokens} tokens"
+                + (f" ({result.errors[0]})" if result.errors else "")
+            )
+
+        meta.finished_at = utc_now()
+        write_model(out_dir / RUN_FILE, meta)
     progress(f"Done: {len(selected) - failed}/{len(selected)} answered. Wrote {out_dir}")
     return meta

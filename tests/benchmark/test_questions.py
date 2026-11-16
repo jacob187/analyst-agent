@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import agents.model_registry as registry
+import agents.prompts as prompts_pkg
 import evals.benchmark as benchmark_pkg
 from evals.benchmark.common import BenchmarkError, resolve_model
 from evals.benchmark.questions import (
@@ -104,12 +105,13 @@ class TestLoaderRejectsBadFiles:
 class TestNoHardcodedModelIds:
     def test_no_registry_model_id_appears_in_the_package(self):
         package_dir = Path(benchmark_pkg.__file__).parent
+        judge_prompt = Path(prompts_pkg.__file__).parent / "benchmark_judge.yaml"
         files = [
             p for p in package_dir.rglob("*")
             if p.is_file() and "__pycache__" not in p.parts and p.suffix in {".py", ".yaml", ".yml", ".md", ".json"}
-        ]
+        ] + [judge_prompt]
         assert DEFAULT_QUESTIONS_PATH in files
-        assert any(p.name == "judge.yaml" for p in files)
+        assert judge_prompt.is_file()
         model_ids = [m.id for m in registry.get_all_models()]
         assert model_ids
         offenders = [

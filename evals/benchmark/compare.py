@@ -29,7 +29,12 @@ from evals.benchmark.common import (
     resolve_model,
 )
 from evals.benchmark.compare_report import write_comparison_report
-from evals.benchmark.compare_summary import DEFAULT_CHAT_COST_MULTIPLE, build_comparison_summary, unusable_reason
+from evals.benchmark.compare_summary import (
+    DEFAULT_CHAT_COST_MULTIPLE,
+    build_comparison_summary,
+    check_cost_multiple,
+    unusable_reason,
+)
 from evals.benchmark.judge import judge_runs
 from evals.benchmark.pricing import estimate_cost, pricing_from_model
 from evals.benchmark.questions import Question, question_set_hash
@@ -527,7 +532,10 @@ def rebuild_comparison(
         chat_cost_multiple=(
             chat_cost_multiple
             if chat_cost_multiple is not None
-            else recorded.get("chat_cost_multiple", DEFAULT_CHAT_COST_MULTIPLE)
+            else check_cost_multiple(
+                recorded.get("chat_cost_multiple", DEFAULT_CHAT_COST_MULTIPLE),
+                f"chat_cost_multiple recorded in {summary_path} (override it with --chat-cost-multiple)",
+            )
         ),
         excluded=excluded,
     )

@@ -13,8 +13,8 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from evals.benchmark.common import BenchmarkError
-from evals.benchmark.pricing import cost_text
+from evals.benchmark.common import BenchmarkError, rate
+from evals.benchmark.pricing import cost_text, usage_text
 from evals.benchmark.schemas import Judgement, JudgedQuestion
 
 AGREEMENT_THRESHOLD = 0.85
@@ -25,10 +25,6 @@ GUIDANCE = (
 RATIONALE_LIMIT = 200
 _FLAGS = ("a_unique_factual_error", "b_unique_factual_error")
 _WINNERS = ("a", "b", "tie")
-
-
-def _rate(numerator: int, n: int) -> float | None:
-    return None if n == 0 else round(numerator / n, 4)
 
 
 def _clip(text: str | None) -> str:
@@ -81,6 +77,7 @@ def _judge_block(j: Judgement) -> dict[str, Any]:
         "cost_usd": j.judge_cost_usd,
         "input_tokens": j.judge_input_tokens,
         "output_tokens": j.judge_output_tokens,
+        "calls_without_usage": j.judge_calls_without_usage,
         "prices_as_of": j.judge_prices_as_of,
     }
 
@@ -99,12 +96,12 @@ def _stats(pairs: list[tuple[JudgedQuestion, JudgedQuestion]]) -> dict[str, Any]
     stats: dict[str, Any] = {"compared": n}
     agreed = sum(x.winner == y.winner for x, y in pairs)
     stats["winner_agreed"] = agreed
-    stats["winner_agreement"] = _rate(agreed, n)
+    stats["winner_agreement"] = rate(agreed, n)
     for flag in _FLAGS:
         same = sum(bool(getattr(x, flag)) == bool(getattr(y, flag)) for x, y in pairs)
         stats[flag] = {
             "agreed": same,
-            "agreement": _rate(same, n),
+            "agreement": rate(same, n),
             # Agreement is easy when flags are rare; these show how many flags there were to agree on.
             "both_flagged": sum(bool(getattr(x, flag)) and bool(getattr(y, flag)) for x, y in pairs),
             "either_flagged": sum(bool(getattr(x, flag)) or bool(getattr(y, flag)) for x, y in pairs),
@@ -165,11 +162,7 @@ def _pct(value: float | None) -> str:
 
 
 def _judge_line(label: str, judge: dict[str, Any]) -> str:
-    tokens = (
-        "usage not recorded"
-        if judge["input_tokens"] is None
-        else f"{judge['input_tokens']} in / {judge['output_tokens']} out tokens"
-    )
+    tokens = usage_text(judge["input_tokens"], judge["output_tokens"], judge["calls_without_usage"])
     return f"  {label}: {judge['judge_model']}, judge cost {cost_text(judge['cost_usd'])} ({tokens})"
 
 

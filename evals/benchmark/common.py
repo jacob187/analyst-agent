@@ -7,10 +7,13 @@ the registry's free-tier model.
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 
 from agents.model_registry import ModelDef, get_all_models, get_free_tier_model, get_model
 
 DEFAULT_TIMEOUT_S = 600.0
+# Longest error text written into a run or judgement file.
+ERROR_TEXT_LIMIT = 500
 
 # Env vars whose values must never appear in written output.
 _SECRET_ENV_VARS = ("TAVILY_API_KEY",)
@@ -19,6 +22,22 @@ _MIN_SECRET_LEN = 8
 
 class BenchmarkError(Exception):
     """A user-facing benchmark failure (bad flag, missing key, bad input)."""
+
+
+def utc_now() -> str:
+    """The timestamp written into run, judgement and summary files."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def rate(numerator: float, n: int) -> float | None:
+    """``numerator / n`` rounded to 4 places; None for an empty denominator."""
+    return None if n == 0 else round(numerator / n, 4)
+
+
+def describe_error(exc: BaseException) -> str:
+    """``Type: message`` for a run or judgement file: secrets scrubbed, length capped."""
+    text = str(exc) or "(no message)"
+    return scrub_secrets(f"{type(exc).__name__}: {text}")[:ERROR_TEXT_LIMIT]
 
 
 def resolve_model(model_id: str | None) -> ModelDef:

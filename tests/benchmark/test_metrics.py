@@ -4,7 +4,6 @@ Spans are built with the real OpenTelemetry SDK and its in-memory exporter, no m
 """
 
 import time
-from types import SimpleNamespace
 
 import pytest
 from openinference.semconv.trace import SpanAttributes
@@ -13,6 +12,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Status, StatusCode
 
+from agents.model_registry import get_all_models
 from evals.benchmark.metrics import ROOT_SPAN_NAME, extract_metrics
 from evals.benchmark.pricing import estimate_cost, pricing_from_model
 from evals.benchmark.schemas import Pricing
@@ -154,13 +154,10 @@ class TestCost:
         pricing = Pricing(input_price_per_mtok=1.0, output_price_per_mtok=1.0)
         assert estimate_cost(pricing, 5000, 500, llm_calls_without_usage=1) is None
 
-    def test_pricing_is_read_from_model_price_fields_when_present(self):
-        model = SimpleNamespace(
-            input_price_per_mtok=0.5, output_price_per_mtok=1.5, prices_as_of="2026-03-01"
-        )
-        assert pricing_from_model(model) == Pricing(
-            input_price_per_mtok=0.5, output_price_per_mtok=1.5, prices_as_of="2026-03-01"
-        )
-
-    def test_pricing_tolerates_models_without_price_fields(self):
-        assert pricing_from_model(SimpleNamespace(id="x")) == Pricing()
+    def test_pricing_is_read_from_the_registry_models_price_fields(self):
+        for model in get_all_models():
+            assert pricing_from_model(model) == Pricing(
+                input_price_per_mtok=model.input_price_per_mtok,
+                output_price_per_mtok=model.output_price_per_mtok,
+                prices_as_of=model.prices_as_of,
+            )

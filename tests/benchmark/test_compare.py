@@ -497,12 +497,12 @@ class TestGuards:
         assert code == 2
         assert "Unknown architecture 'nope'" in capsys.readouterr().err
 
-    @pytest.mark.parametrize("bad", ["0", "-1"])
-    def test_cost_multiple_must_be_positive(self, monkeypatch, qfile, out, capsys, bad):
+    @pytest.mark.parametrize("bad", ["0", "-1", "nan", "inf", "-inf"])
+    def test_cost_multiple_must_be_finite_and_positive(self, monkeypatch, qfile, out, capsys, bad):
         give_keys(monkeypatch, FREE)
         assert compare(qfile, out, "--models", FREE.id, f"--chat-cost-multiple={bad}") == 2
         assert "--chat-cost-multiple" in capsys.readouterr().err
-        assert not out.exists()
+        assert not out.exists() and BUILDS == []
 
 
 JUDGE_TOKENS_IN, JUDGE_TOKENS_OUT = 2000, 50
@@ -748,3 +748,19 @@ class TestRebuildFromDisk:
         assert _rebuild(out, tmp_path / "b.json", "--chat-cost-multiple", "2") == 0
         assert json.loads((tmp_path / "b.json").read_text())["chat_cost_multiple"] == 2
         assert _rebuild(out, tmp_path / "c.json", "--chat-cost-multiple", "0") == 2
+
+    @pytest.mark.parametrize("bad", ["nan", "inf"])
+    def test_a_non_finite_cost_multiple_override_is_refused(self, monkeypatch, qfile, out, tmp_path, capsys, bad):
+        self._finished(monkeypatch, qfile, out, PAID)
+        assert _rebuild(out, tmp_path / "s.json", f"--chat-cost-multiple={bad}") == 2
+        assert "--chat-cost-multiple" in capsys.readouterr().err
+        assert not (tmp_path / "s.json").exists()
+
+    def test_a_recorded_non_finite_cost_multiple_is_refused(self, monkeypatch, qfile, out, tmp_path, capsys):
+        self._finished(monkeypatch, qfile, out, PAID)
+        recorded = json.loads((out / "summary.json").read_text())
+        recorded["chat_cost_multiple"] = float("nan")
+        (out / "summary.json").write_text(json.dumps(recorded))  # what an older build wrote: a bare NaN
+        assert _rebuild(out, tmp_path / "s.json") == 2
+        assert "chat_cost_multiple" in capsys.readouterr().err
+        assert _rebuild(out, tmp_path / "s.json", "--chat-cost-multiple", "2") == 0  # an override repairs it

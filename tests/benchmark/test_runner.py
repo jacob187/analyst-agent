@@ -223,12 +223,10 @@ class TestPreflight:
         with pytest.raises(BenchmarkError, match=f"{env_var} is not set"):
             preflight("fake", None)
 
-    def test_with_key_returns_builder_and_default_model(self, monkeypatch):
+    def test_with_key_returns_the_default_model(self, monkeypatch):
         monkeypatch.setitem(ARCHITECTURES, "fake", _build)
         monkeypatch.setenv(provider_env_var(resolve_model(None)), SECRET)
-        builder, model = preflight("fake", None)
-        assert builder is _build
-        assert model == resolve_model(None)
+        assert preflight("fake", None) == resolve_model(None)
 
     def test_current_is_registered(self):
         assert get_builder("current") is architectures.build_current
