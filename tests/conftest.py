@@ -293,7 +293,7 @@ def tools(llm):
     from agents.tools.stock_tools import create_stock_tools
     from agents.tools.market_tools import create_market_tools
 
-    tool_list, _ = create_sec_tools(DEFAULT_TICKER, llm)
+    tool_list = create_sec_tools(DEFAULT_TICKER, llm)
     tool_list.extend(create_stock_tools(DEFAULT_TICKER))
     tool_list.extend(create_market_tools())
     return tool_list

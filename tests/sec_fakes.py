@@ -5,7 +5,8 @@ counts calls at the LLM boundary.
 ``FakeEdgar.install(monkeypatch)`` swaps edgartools' ``Company`` inside
 ``agents.sec_workflow.get_SEC_data``, so the real ``SECDataRetrieval`` runs
 against these objects with no network. ``FakeEdgar.requests`` counts filing
-index lookups (each one an EDGAR submissions request in production).
+index lookups; ``FakeEdgar.companies`` counts ``Company`` builds (each one an
+EDGAR submissions request in production).
 """
 
 from __future__ import annotations
@@ -211,6 +212,20 @@ def eightk(accession: str, filed: str, *, earnings: bool = True, item_text: str 
     return FakeFiling("8-K", accession, date.fromisoformat(filed), FakeEightK(items, earnings, filed))
 
 
+class FakeTwentyF:
+    """edgartools ``TwentyF``: named section accessors, no ``Item X`` keys."""
+
+    def __init__(self, risk: str, mda: str, business: str):
+        self.risk_factors = risk
+        self.management_discussion = mda
+        self.business = business
+
+
+def twentyf(accession: str, filed: str, risk: str, mda: str = "20-F MD&A text") -> FakeFiling:
+    report = FakeTwentyF(risk, mda, "20-F business text")
+    return FakeFiling("20-F", accession, date.fromisoformat(filed), report)
+
+
 class _Filings:
     def __init__(self, filings: list[FakeFiling]):
         self._filings = filings
@@ -226,11 +241,18 @@ class FakeEdgar:
     filings: dict[str, list[FakeFiling]] = field(default_factory=dict)
     requests: int = 0
     latency: float = 0.0  # seconds each filing-index lookup blocks for
+    # ``Company(ticker)`` builds: each one downloads the submissions JSON.
+    companies: int = 0
+    # When set, ``Company(ticker)`` raises it (EDGAR 429 / 5xx / outage).
+    outage: Exception | None = None
 
     def publish(self, filing: FakeFiling) -> None:
         self.filings.setdefault(filing.form, []).insert(0, filing)
 
     def company(self, ticker: str) -> "_FakeCompany":
+        if self.outage is not None:
+            raise self.outage
+        self.companies += 1
         return _FakeCompany(self, ticker)
 
     def install(self, monkeypatch) -> "FakeEdgar":

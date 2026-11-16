@@ -175,6 +175,18 @@ class FilingMetadata:
         self.period_of_report = period_of_report
         self.company_name = company_name
 
+    @classmethod
+    def from_filing(cls, filing) -> "FilingMetadata":
+        """Metadata of an edgartools ``EntityFiling``."""
+        return cls(
+            form=filing.form,
+            cik=str(filing.cik),
+            accession=filing.accession_number,
+            filing_date=str(filing.filing_date),
+            period_of_report=str(filing.period_of_report),
+            company_name=filing.company,
+        )
+
     def to_dict(self) -> Dict[str, str]:
         return {
             "form": self.form,
@@ -192,6 +204,13 @@ class FilingMetadata:
             return f"Form {self.form} filed {self.filing_date}, Period: Quarter ended {self.period_of_report}"
         else:
             return f"Form {self.form} filed {self.filing_date}, Period: {self.period_of_report}"
+
+
+def _latest(company, form: str):
+    """The company's latest ``form`` filing (None if it has none)."""
+    if form == "8-K":
+        return company.get_filings(form="8-K").latest(1)
+    return company.latest(form=form)
 
 
 class SECDataRetrieval:
@@ -331,112 +350,65 @@ class SECDataRetrieval:
             return self._twentyf_obj
 
     # Private fetchers
-    def _fetch_company_tenk_filing(self):
-        filing = self.company.latest(form="10-K")
+    def _fetch_latest(self, form: str):
+        filing = _latest(self.company, form)
         if filing is None:
-            print(f"No 10-K filing found for {self.company.name}")
+            print(f"No {form} filing found for {self.company.name}")
             return None
-        print("10-K filing found")
-
-        # Extract metadata from the filing (EntityFiling object)
-        self._tenk_metadata = FilingMetadata(
-            form=filing.form,
-            cik=str(filing.cik),
-            accession=filing.accession_number,
-            filing_date=str(filing.filing_date),
-            period_of_report=str(filing.period_of_report),
-            company_name=filing.company,
-        )
+        print(f"{form} filing found")
+        setattr(self, f"_{_FORM_SLOTS[form]}_metadata", FilingMetadata.from_filing(filing))
         return filing
+
+    def _fetch_company_tenk_filing(self):
+        return self._fetch_latest("10-K")
 
     def _fetch_company_tenq_filing(self):
-        filing = self.company.latest(form="10-Q")
-        if filing is None:
-            print(f"No 10-Q filing found for {self.company.name}")
-            return None
-        print("10-Q filing found")
-
-        # Extract metadata from the filing (EntityFiling object)
-        self._tenq_metadata = FilingMetadata(
-            form=filing.form,
-            cik=str(filing.cik),
-            accession=filing.accession_number,
-            filing_date=str(filing.filing_date),
-            period_of_report=str(filing.period_of_report),
-            company_name=filing.company,
-        )
-        return filing
+        return self._fetch_latest("10-Q")
 
     def _fetch_company_twentyf_filing(self):
-        filing = self.company.latest(form="20-F")
-        if filing is None:
-            print(f"No 20-F filing found for {self.company.name}")
-            return None
-        print("20-F filing found")
-
-        self._twentyf_metadata = FilingMetadata(
-            form=filing.form,
-            cik=str(filing.cik),
-            accession=filing.accession_number,
-            filing_date=str(filing.filing_date),
-            period_of_report=str(filing.period_of_report),
-            company_name=filing.company,
-        )
-        return filing
+        return self._fetch_latest("20-F")
 
     def _fetch_latest_eightk_filing(self):
-        filing = self.company.get_filings(form="8-K").latest(1)
-        if filing is None:
-            print(f"No 8-K filing found for {self.company.name}")
-            return None
-        print("8-K filing found")
-
-        self._eightk_metadata = FilingMetadata(
-            form=filing.form,
-            cik=str(filing.cik),
-            accession=filing.accession_number,
-            filing_date=str(filing.filing_date),
-            period_of_report=str(filing.period_of_report),
-            company_name=filing.company,
-        )
-        return filing
+        return self._fetch_latest("8-K")
 
     def refresh_latest_filing(self, form: Literal["10-K", "10-Q", "8-K", "20-F"]) -> Optional[FilingMetadata]:
-        """Re-read the company's filing index from EDGAR and return the latest
-        ``form`` filing's metadata (None if the company has none).
+        """``refresh_latest_filings`` for one form."""
+        return self.refresh_latest_filings((form,))[form]
+
+    def refresh_latest_filings(
+        self, forms, reuse_company: bool = False,
+    ) -> Dict[str, Optional[FilingMetadata]]:
+        """Re-read the company's filing index from EDGAR and return each
+        form's latest filing metadata (None where the company has none).
 
         edgartools' ``Company`` loads its submissions once and caches them, so a
-        long-lived retriever never sees a newly published filing. This builds a
-        fresh ``Company`` (one submissions request) and, when the latest
-        accession differs from the cached one, swaps in the new filing and drops
-        that form's parsed object and memoized extractions so section getters
-        read the new filing.
+        long-lived retriever never sees a newly published filing. This builds
+        one fresh ``Company`` (one submissions request, whatever the number of
+        forms) and, for each form whose latest accession differs from the
+        cached one, swaps in the new filing and drops that form's parsed
+        object and memoized extractions so section getters read the new filing.
+        ``reuse_company`` skips the rebuild for a retriever whose ``Company``
+        was built just now (it has not loaded its submissions yet).
         """
-        slot = _FORM_SLOTS[form]
-        company = Company(self.ticker)
-        if form == "8-K":
-            filing = company.get_filings(form="8-K").latest(1)
-        else:
-            filing = company.latest(form=form)
+        company = self.company if reuse_company else Company(self.ticker)
+        latest = {form: _latest(company, form) for form in forms}
         self.company = company
-        if filing is None:
-            return None
-        meta = FilingMetadata(
-            form=filing.form,
-            cik=str(filing.cik),
-            accession=filing.accession_number,
-            filing_date=str(filing.filing_date),
-            period_of_report=str(filing.period_of_report),
-            company_name=filing.company,
-        )
-        with _form_lock(self, slot):
-            current = getattr(self, f"_{slot}_metadata")
-            if current is None or current.accession != meta.accession:
-                setattr(self, f"_{slot}_filing", filing)
-                setattr(self, f"_{slot}_obj", None)
-                setattr(self, f"_{slot}_metadata", meta)
-                _forget_form(self, form)
-            return getattr(self, f"_{slot}_metadata")
+        metas: Dict[str, Optional[FilingMetadata]] = {}
+        for form, filing in latest.items():
+            if filing is None:
+                metas[form] = None
+                continue
+            slot = _FORM_SLOTS[form]
+            meta = FilingMetadata.from_filing(filing)
+            with _form_lock(self, slot):
+                current = getattr(self, f"_{slot}_metadata")
+                if current is None or current.accession != meta.accession:
+                    setattr(self, f"_{slot}_filing", filing)
+                    setattr(self, f"_{slot}_obj", None)
+                    setattr(self, f"_{slot}_metadata", meta)
+                    _forget_form(self, form)
+                metas[form] = getattr(self, f"_{slot}_metadata")
+        return metas
 
     # ── 8-K public methods ────────────────────────────────────────────────
 
@@ -721,6 +693,15 @@ class SECDataRetrieval:
             result = self.get_section(form, "2")
         return result["text"]
 
+    def balance_sheet_text(
+        self, form: Literal["10-K", "10-Q"] = "10-K"
+    ) -> tuple[str, Optional[FilingMetadata]]:
+        """``(balance sheet as text, metadata of the filing it came from)``,
+        read together so a concurrent refresh can't pair one filing's
+        balance sheet with another's accession."""
+        report, metadata = _load_report(self, form)
+        return report.financials.balance_sheet().to_dataframe().to_string(), metadata
+
     def extract_balance_sheet_as_str(
         self, which: Literal["tenk", "tenq", "both", "10-K", "10-Q"] = "both"
     ) -> dict[str, str]:
@@ -732,16 +713,10 @@ class SECDataRetrieval:
         include_tenq = which in ("tenq", "both", "10-Q")
 
         if include_tenk:
-            tenk = self.get_tenk()
-            out["tenk"] = (
-                tenk.financials.balance_sheet().to_dataframe().to_string()
-            )
+            out["tenk"], _ = self.balance_sheet_text("10-K")
         if include_tenq:
             try:
-                tenq = self.get_tenq()
-                out["tenq"] = (
-                    tenq.financials.balance_sheet().to_dataframe().to_string()
-                )
+                out["tenq"], _ = self.balance_sheet_text("10-Q")
             except Exception as e:
                 out["tenq_error"] = str(e)
         return out

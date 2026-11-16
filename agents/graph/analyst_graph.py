@@ -234,7 +234,7 @@ def _create_tools(
     from agents.tools.stock_tools import create_stock_tools
     from agents.tools.market_tools import create_market_tools
 
-    tools, _ = create_sec_tools(ticker, llm)
+    tools = create_sec_tools(ticker, llm)
     tools.extend(create_stock_tools(ticker))
     tools.extend(create_market_tools())
 
@@ -389,11 +389,10 @@ def create_worker_node(tools_dict: Dict[str, Any]):
     which `merge_step_results` unions into the parent state.
 
     Async dispatch: the worker is `async def` and calls `tool.ainvoke(...)`.
-    LangChain `Tool` auto-bridges sync `func=` callables to a thread pool, so
-    purely-sync tools (SEC, stock, market, briefing) keep working unchanged.
-    Tools that register an async `coroutine=` — `deep_research`, and every
-    research tool in free-trial mode (to await the search meter) — run on the
-    event loop.
+    Every tool is a `StructuredTool`. The SEC, research and briefing tools
+    are async-only (`coroutine=`, no sync `func`) and run on the event loop;
+    the sync stock and market tools (`func=`) are bridged to a thread pool by
+    `ainvoke`.
 
     Tracing context (LangChain run ids) is propagated automatically by
     LangGraph's runtime across Send invocations — no manual `contextvars`

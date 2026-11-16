@@ -2,10 +2,11 @@
 (``api/routes/company.py``) and the chat SEC tools (``agents/tools/sec_tools.py``).
 
 - ``get_retriever(ticker)`` — the process-wide per-ticker ``SECDataRetrieval``.
-- ``latest_filing(ticker, form)`` — the latest filing per (ticker, form), asked
-  of SEC EDGAR at most once per ``FILING_FRESHNESS_TTL_SECONDS`` (default 4h).
-  A lookup that finds a newer filing also points the shared retriever at it,
-  so section text extracted afterwards comes from the filing the ref names.
+- ``latest_filing(ticker, form)`` / ``latest_filings(ticker, forms)`` — the
+  latest filing per (ticker, form), asked of SEC EDGAR at most once per
+  ``FILING_FRESHNESS_TTL_SECONDS`` (default 4h); one lookup refreshes every
+  form. A lookup that finds a newer filing also points the shared retriever
+  at it, so section text extracted afterwards comes from that filing.
 - ``get_or_analyze(ticker, filing, analysis_type, generate)`` — read-through
   cache over the ``filing_analyses`` table keyed (ticker, form, accession,
   analysis_type): a hit costs no LLM call; concurrent identical misses
@@ -135,11 +136,12 @@ def _lock_for(store: TTLCache, key: tuple) -> asyncio.Lock:
     return lock
 
 
-def _fresh_ref(key: tuple[str, str]) -> Any:
-    """The cached ref, or _MISS once it is older than the TTL — or was looked
-    up through a retriever that has since been evicted: its replacement loads
-    whatever is latest *now*, so an older ref would key that filing's
-    analysis under the wrong accession."""
+def _cached_ref(key: tuple[str, str], max_age: float | None) -> Any:
+    """The cached ref for ``key``, or _MISS when there is none, it is older
+    than ``max_age`` seconds (None: any age), or it was looked up through a
+    retriever that has since been evicted: its replacement loads whatever is
+    latest *now*, so an older ref would key that filing's analysis under the
+    wrong accession."""
     with _lock:
         entry = _latest_filings.get(key)
         current = _shared_retrievers.get(key[0])
@@ -148,38 +150,77 @@ def _fresh_ref(key: tuple[str, str]) -> Any:
     ref, looked_up_at, looked_up_with = entry
     if looked_up_with() is not current or current is None:
         return _MISS
-    if _clock() - looked_up_at >= freshness_ttl_seconds():
+    if max_age is not None and _clock() - looked_up_at >= max_age:
         return _MISS
     return ref
 
 
-def _refresh(ticker: str, form: str):
+def _fresh_ref(key: tuple[str, str]) -> Any:
+    """The cached ref while it is younger than the freshness TTL, else _MISS."""
+    return _cached_ref(key, freshness_ttl_seconds())
+
+
+def _refresh(ticker: str):
+    """Point the shared retriever at EDGAR's latest filing of every form —
+    one submissions request for all of them. A retriever built just now
+    already holds a fresh ``Company``, so it is reused."""
+    with _lock:
+        existed = ticker in _shared_retrievers
     retriever = get_retriever(ticker)
-    return retriever, retriever.refresh_latest_filing(form)
+    return retriever, retriever.refresh_latest_filings(FORMS, reuse_company=not existed)
+
+
+async def latest_filings(ticker: str, forms) -> dict[str, FilingRef | None]:
+    """Latest filing of each form in ``forms`` for ``ticker`` (None where it
+    has none).
+
+    Asks SEC EDGAR only when an entry is older than the freshness TTL, and
+    then refreshes every form in one submissions request; concurrent callers
+    for a ticker share that lookup. When the lookup fails, a form whose
+    expired ref is still backed by the current retriever is served stale
+    (logged) — its stored analyses stay reachable through an EDGAR outage.
+    Otherwise the failure raises and is not cached.
+    """
+    for form in forms:
+        if form not in FORMS:
+            raise ValueError(f"Unsupported form: {form}")
+    key = ticker.upper()
+    refs = {form: _fresh_ref((key, form)) for form in forms}
+    if any(ref is _MISS for ref in refs.values()):
+        async with _lock_for(_latest_locks, (key,)):
+            refs = {form: _fresh_ref((key, form)) for form in forms}
+            if any(ref is _MISS for ref in refs.values()):
+                refs = await _lookup(key, forms)
+    return refs
+
+
+async def _lookup(key: str, forms) -> dict[str, FilingRef | None]:
+    try:
+        retriever, metas = await asyncio.to_thread(_refresh, key)
+    except Exception as e:
+        stale = {form: _cached_ref((key, form), None) for form in forms}
+        if any(ref is _MISS for ref in stale.values()):
+            raise
+        logger.warning(
+            "[%s] latest-filing lookup failed (%s); serving the cached %s refs",
+            key, e, "/".join(forms),
+        )
+        return stale
+    now = _clock()
+    looked_up_with = weakref.ref(retriever)
+    refs: dict[str, FilingRef | None] = {}
+    with _lock:
+        for form in FORMS:
+            meta = metas[form]
+            ref = None if meta is None else FilingRef(form, meta.accession, meta.filing_date)
+            _latest_filings[(key, form)] = (ref, now, looked_up_with)
+            refs[form] = ref
+    return {form: refs[form] for form in forms}
 
 
 async def latest_filing(ticker: str, form: str) -> FilingRef | None:
-    """Latest ``form`` filing for ``ticker`` (None if it has none).
-
-    Asks SEC EDGAR only when the (ticker, form) entry is older than the
-    freshness TTL; concurrent callers share one lookup. Lookup failures raise
-    and are not cached.
-    """
-    if form not in FORMS:
-        raise ValueError(f"Unsupported form: {form}")
-    key = (ticker.upper(), form)
-    ref = _fresh_ref(key)
-    if ref is not _MISS:
-        return ref
-    async with _lock_for(_latest_locks, key):
-        ref = _fresh_ref(key)
-        if ref is not _MISS:
-            return ref
-        retriever, meta = await asyncio.to_thread(_refresh, key[0], form)
-        ref = None if meta is None else FilingRef(form, meta.accession, meta.filing_date)
-        with _lock:
-            _latest_filings[key] = (ref, _clock(), weakref.ref(retriever))
-        return ref
+    """``latest_filings`` for one form."""
+    return (await latest_filings(ticker, (form,)))[form]
 
 
 def _iso_utc(created_at: str | None) -> str:
@@ -267,19 +308,26 @@ async def run_analysis(
     return result.model_dump()
 
 
+def eightk_kind(overview: dict[str, Any]) -> str:
+    """The 8-K's analysis type: ``"earnings"`` (Item 2.02 with a parseable
+    press release) or ``"event"`` (everything else)."""
+    return "earnings" if overview.get("has_earnings") else "event"
+
+
 def eightk_input(retriever, overview: dict[str, Any], metadata: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """``(kind, raw)`` LLM input for the latest 8-K: ``"earnings"`` (Item 2.02
-    with a parseable press release) or ``"event"`` (primary item text, empty
-    when it failed to extract). Blocking (edgartools)."""
-    if overview.get("has_earnings"):
-        return "earnings", {**retriever.get_earnings_data(), "metadata": metadata}
+    """``(kind, raw)`` LLM input for the latest 8-K (kind per ``eightk_kind``;
+    an event's primary item text is empty when it failed to extract).
+    Blocking (edgartools)."""
+    kind = eightk_kind(overview)
+    if kind == "earnings":
+        return kind, {**retriever.get_earnings_data(), "metadata": metadata}
     items = overview.get("items", [])
     primary_item = items[0] if items else None
     item_text = ""
     if primary_item:
         item_result = retriever.get_8k_item(primary_item)
         item_text = item_result.get("text", "") if item_result.get("found") else ""
-    return "event", {
+    return kind, {
         "content_type": overview.get("content_type", "other"),
         "items": items,
         "context": overview.get("context", ""),

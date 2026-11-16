@@ -22,11 +22,13 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from agents.sec_workflow.analysis_cache import (
+    FORMS,
     FilingRef,
     eightk_input,
+    eightk_kind,
     get_or_analyze,
     get_retriever,
-    latest_filing,
+    latest_filings,
     run_analysis,
 )
 from api.dependencies import ApiKeys, get_api_keys, resolve_model
@@ -370,7 +372,7 @@ def _fetch_filing_data(ticker: str, fetch_raw: bool = True) -> dict[str, Any]:
                 ) if eightk_meta else "",
                 "form_type": "8-K",
             }
-            kind = "earnings" if overview.get("has_earnings") else "event"
+            kind = eightk_kind(overview)
             if not fetch_raw:
                 result["eightk"] = {"kind": kind, "raw": {}, "metadata": metadata}
             else:
@@ -387,22 +389,15 @@ def _fetch_filing_data(ticker: str, fetch_raw: bool = True) -> dict[str, Any]:
 
 
 async def _load_filing_data(ticker: str, fetch_raw: bool) -> dict[str, Any]:
-    """Point the shared retriever at EDGAR's latest 10-K/20-F, 10-Q and 8-K
+    """Point the shared retriever at EDGAR's latest 10-K, 20-F, 10-Q and 8-K
     (the freshness check chat uses too — TTL-cached, so usually no SEC
-    request), then run ``_fetch_filing_data`` off the event loop."""
-    forms = ("10-K", "10-Q", "8-K")
-    refs = await asyncio.gather(
-        *(latest_filing(ticker, form) for form in forms), return_exceptions=True,
-    )
-    for form, ref in zip(forms, refs):
-        if isinstance(ref, Exception):
-            logger.warning("[%s] latest %s lookup failed: %s", ticker, form, ref)
-    if refs[0] is None:
-        # No 10-K: foreign private issuers file a 20-F instead.
-        try:
-            await latest_filing(ticker, "20-F")
-        except Exception as e:
-            logger.warning("[%s] latest 20-F lookup failed: %s", ticker, e)
+    request, and one submissions request for all forms when it does ask),
+    then run ``_fetch_filing_data`` off the event loop. A failed lookup is
+    logged and the retriever's current filings are served."""
+    try:
+        await latest_filings(ticker, FORMS)
+    except Exception as e:
+        logger.warning("[%s] latest-filing lookup failed: %s", ticker, e)
     return await asyncio.to_thread(_fetch_filing_data, ticker, fetch_raw)
 
 

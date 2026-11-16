@@ -81,3 +81,12 @@ class EightKItemArgs(ToolArgs):
         default=DEFAULT_8K_ITEM,
         description="8-K item number, e.g. '2.02' (earnings) or '5.02' (leadership changes).",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_query_alias(cls, data: Any) -> Any:
+        # A model that sends the item as a search-style ``query`` must not
+        # silently get the default item.
+        if isinstance(data, dict) and "item" not in data and "query" in data:
+            return {**data, "item": data["query"]}
+        return data
