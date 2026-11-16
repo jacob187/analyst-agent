@@ -11,6 +11,9 @@ fetch — with "cannot commit transaction - SQL statements in progress".
 import asyncio
 import gc
 import logging
+import sqlite3
+import time
+from contextlib import closing
 
 import pytest
 
@@ -182,3 +185,96 @@ class TestSpawnWrite:
         await asyncio.sleep(0)
         assert caplog.records == []
         assert len(await db_module.get_session_messages(session_id)) == 1
+
+
+def _stored_messages(db_path, session_id: str) -> list[tuple[str]]:
+    """Read straight from the file, so the check can't reopen api.db's connection."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        return conn.execute(
+            "SELECT content FROM messages WHERE session_id = ?", (session_id,)
+        ).fetchall()
+
+
+@pytest.mark.eval_unit
+class TestCloseDbDrainsBackgroundWrites:
+    async def test_pending_write_lands_before_close(self, fresh_db):
+        session_id = await db_module.create_session("AAPL", USER)
+        task = db_module.spawn_write(
+            db_module.save_message(session_id, "assistant", "last words"),
+            op="save_message", session_id=session_id,
+        )
+
+        await db_module.close_db()
+
+        assert task.done() and not task.cancelled()
+        assert db_module._db is None
+        assert _stored_messages(fresh_db, session_id) == [("last words",)]
+
+    async def test_write_past_timeout_does_not_block_close_and_is_logged(
+        self, fresh_db, monkeypatch, caplog
+    ):
+        monkeypatch.setenv("DB_CLOSE_DRAIN_TIMEOUT_SECONDS", "0.2")
+        session_id = await db_module.create_session("AAPL", USER)
+
+        async def stalled_write() -> None:
+            # Holds the connection lock, as a write stuck mid-operation would.
+            async with db_module._conn() as db:
+                await asyncio.sleep(30)
+                await db.execute(
+                    "INSERT INTO messages (id, session_id, role, content) VALUES (?, ?, ?, ?)",
+                    ("m-stalled", session_id, "assistant", "never"),
+                )
+                await db.commit()
+
+        task = db_module.spawn_write(stalled_write(), op="stalled_write", session_id=session_id)
+        await asyncio.sleep(0)  # let it take the lock
+        caplog.set_level(logging.WARNING, logger="api.db")
+
+        start = time.monotonic()
+        await asyncio.wait_for(db_module.close_db(), timeout=5)
+
+        assert time.monotonic() - start < 2
+        assert task.cancelled()
+        assert db_module._db is None
+        assert db_module._background_writes == set()
+        unfinished = [r.getMessage() for r in caplog.records if r.name == "api.db"]
+        assert any("stalled_write" in m and session_id in m for m in unfinished), unfinished
+        assert _stored_messages(fresh_db, session_id) == []
+
+    @pytest.mark.parametrize("raw", ["soon", "-1"])
+    def test_invalid_drain_timeout_falls_back_to_default(self, monkeypatch, caplog, raw):
+        monkeypatch.setenv("DB_CLOSE_DRAIN_TIMEOUT_SECONDS", raw)
+        caplog.set_level(logging.WARNING, logger="api.db")
+        assert db_module._drain_timeout_seconds() == db_module.DEFAULT_DRAIN_TIMEOUT_SECONDS
+        assert any("DB_CLOSE_DRAIN_TIMEOUT_SECONDS" in r.getMessage() for r in caplog.records)
+
+    def test_write_bound_to_another_loop_is_skipped(self, tmp_path, monkeypatch):
+        """conftest closes the DB from a fresh loop after TestClient requests ran
+        on others; their leftover writes must not be awaited from the wrong loop."""
+        monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "other_loop.db")
+        monkeypatch.setattr(db_module, "_db", None)
+        # Long enough that waiting on the foreign task would trip wait_for below.
+        monkeypatch.setenv("DB_CLOSE_DRAIN_TIMEOUT_SECONDS", "30")
+
+        other = asyncio.new_event_loop()
+
+        async def spawn_on_other() -> asyncio.Task:
+            return db_module.spawn_write(
+                asyncio.sleep(3600), op="other_loop_write", session_id="s-other"
+            )
+
+        task = other.run_until_complete(spawn_on_other())
+        try:
+            async def init_and_close() -> None:
+                await db_module.init_db()
+                await asyncio.wait_for(db_module.close_db(), timeout=5)
+
+            asyncio.run(init_and_close())
+
+            assert db_module._db is None
+            assert task not in db_module._background_writes
+            assert not task.done()
+        finally:
+            task.cancel()
+            other.run_until_complete(asyncio.gather(task, return_exceptions=True))
+            other.close()
