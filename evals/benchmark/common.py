@@ -91,14 +91,17 @@ def has_provider_key(model: ModelDef) -> bool:
 def prepare_environment() -> None:
     """What ``api/main.py`` does at startup that a bare CLI process lacks.
 
-    Loads the project ``.env`` into the process environment (as the app does)
-    and sets the SEC EDGAR identity edgartools requires.
+    Loads the project ``.env`` into the process environment (as the app does) and
+    sets the SEC EDGAR identity edgartools requires through the app's own
+    ``set_sec_identity`` (same ``SEC_HEADER`` fallback). Importing ``api.main`` also
+    applies the app's logging setup (``LOG_LEVEL``, default INFO) to the CLI.
     """
     from dotenv import load_dotenv
-    from edgar import set_identity
 
     load_dotenv()
-    set_identity((os.getenv("SEC_HEADER") or "").strip() or "Analyst Agent dev@localhost")
+    from api.main import set_sec_identity  # after .env is loaded: the import reads LOG_LEVEL
+
+    set_sec_identity()
 
 
 def scrub_secrets(text: str) -> str:

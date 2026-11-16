@@ -12,7 +12,7 @@ import pytest
 from evals.benchmark import architectures
 from evals.benchmark.architectures import ARCHITECTURES, get_builder
 from evals.benchmark.cli import main
-from evals.benchmark.common import BenchmarkError, provider_env_var, resolve_model
+from evals.benchmark.common import BenchmarkError, prepare_environment, provider_env_var, resolve_model
 from evals.benchmark.pricing import pricing_from_model
 from evals.benchmark.questions import Question, question_set_hash
 from evals.benchmark.runner import preflight, run_benchmark
@@ -46,8 +46,9 @@ class _HangingAgent:
 
 
 class _ThreadPoolAgent:
-    """Calls its LLM from a plain executor thread, which does not copy contextvars,
-    like sec_tools._tool_all_summaries: the LLM span lands in a separate trace."""
+    """Calls its LLM from a bare executor thread, which does not copy contextvars, so the
+    LLM span lands in a separate trace (no agent tool does this today; the metric guards
+    against one that does)."""
 
     async def stream(self, inputs):
         import asyncio
@@ -230,6 +231,17 @@ class TestPreflight:
 
     def test_current_is_registered(self):
         assert get_builder("current") is architectures.build_current
+
+
+class TestPrepareEnvironment:
+    def test_the_sec_identity_is_set_by_the_apps_own_startup_function(self, monkeypatch):
+        import api.main
+
+        calls = []
+        monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: False)  # no .env reload
+        monkeypatch.setattr(api.main, "set_sec_identity", lambda: calls.append("set"))
+        prepare_environment()
+        assert calls == ["set"]
 
 
 class TestCliErrors:

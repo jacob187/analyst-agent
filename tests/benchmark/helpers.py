@@ -191,11 +191,12 @@ class _FakeStructured:
 
 
 class _UsageChatModel(BaseChatModel):
-    """A real chat model whose reply is the fake judge's verdict as a forced tool call.
+    """A real chat model whose reply carries the fake judge's verdict as a tool call.
 
-    `with_structured_output` is the genuine langchain pipeline (bind_tools | tool-call parser), so
-    the OpenInference instrumentation emits a real LLM span carrying the reply's `usage_metadata`,
-    exactly as it does for a provider chat model.
+    `with_structured_output` is langchain's default pipeline for a generic chat model (bind_tools |
+    tool-call parser; real provider judges use their own structured-output mode via
+    `structured_llm`), so the OpenInference instrumentation emits a real LLM span carrying the
+    reply's `usage_metadata`, exactly as it does for a provider chat model.
     """
 
     judge: Any

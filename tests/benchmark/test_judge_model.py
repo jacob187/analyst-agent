@@ -1,5 +1,6 @@
 """AC4: an Anthropic registry model works as `judge --model`: the judge LLM builds through
-`create_llm`, structured output is forced tool use (no extended thinking), and the verdict parses.
+`create_llm` with thinking off, the verdict is requested the way `judge_runs` requests it
+(`structured_llm`: native JSON-schema output, no forced tool use), and the verdict parses.
 
 Nothing here reaches the network: either the real ChatAnthropic is only constructed (no call), or
 `init_chat_model` is replaced at the LLM boundary by a fake chat model.
@@ -9,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agents.llm_factory import ThinkingConfig, create_llm
+from agents.llm_factory import ThinkingConfig, create_llm, structured_llm
 from agents.model_registry import get_all_models
 from evals.benchmark.cli import main
 from evals.benchmark.common import provider_env_var
@@ -28,9 +29,9 @@ def _no_env_reload(monkeypatch):
     monkeypatch.setattr("evals.benchmark.cli.prepare_environment", lambda: None)  # no .env reload
 
 
-def _forced_tool_choice(structured) -> dict | None:
-    """The `tool_choice` langchain-anthropic bound onto the request for `with_structured_output`."""
-    return structured.first.kwargs.get("tool_choice")
+def _bound_request_kwargs(structured) -> dict:
+    """The request kwargs langchain-anthropic bound for the structured verdict."""
+    return structured.first.kwargs
 
 
 def test_the_registry_has_an_anthropic_model():
@@ -39,21 +40,21 @@ def test_the_registry_has_an_anthropic_model():
 
 @pytest.mark.parametrize("model", ANTHROPIC, ids=lambda m: m.id)
 class TestAnthropicJudgeLlm:
-    def test_the_judge_is_a_non_thinking_chat_model_and_structured_output_forces_the_verdict_tool(
-        self, model, monkeypatch
-    ):
+    def test_the_judge_is_a_non_thinking_chat_model_asked_for_a_json_schema_verdict(self, model, monkeypatch):
         monkeypatch.setenv(provider_env_var(model), KEY)
         llm = build_judge_llm(model)
 
         assert type(llm).__name__ == "ChatAnthropic"
         assert llm.thinking is None
-        structured = llm.with_structured_output(JudgeVerdict)
-        assert _forced_tool_choice(structured) == {"type": "tool", "name": "JudgeVerdict"}
+        # What judge_runs sends: structured_llm's native JSON-schema output, not forced tool use.
+        request = _bound_request_kwargs(structured_llm(llm, JudgeVerdict))
+        assert "output_config" in request
+        assert request.get("tool_choice") is None
 
     def test_control_the_same_model_with_thinking_enabled_is_a_different_request_shape(self, model, monkeypatch):
-        """Why `build_judge_llm` passes ThinkingConfig(enabled=False) rather than relying on the default:
-        `create_llm(..., thinking=enabled)` turns extended thinking on for these models, and forced
-        tool use (what structured output needs) is not allowed together with it."""
+        """`build_judge_llm` passes ThinkingConfig(enabled=False) rather than relying on the default:
+        `create_llm(..., thinking=enabled)` turns extended thinking on for these models, which the
+        verdict does not need (its reasoning goes in the rationale) and would make judging cost more."""
         monkeypatch.setenv(provider_env_var(model), KEY)
         thinking_llm = create_llm(model.id, KEY, thinking=ThinkingConfig(enabled=True, level="medium"))
         assert thinking_llm.thinking is not None
