@@ -7,10 +7,13 @@ the registry's free-tier model.
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 
 from agents.model_registry import ModelDef, get_all_models, get_free_tier_model, get_model
 
 DEFAULT_TIMEOUT_S = 600.0
+# Longest error text written into a run or judgement file.
+ERROR_TEXT_LIMIT = 500
 
 # Env vars whose values must never appear in written output.
 _SECRET_ENV_VARS = ("TAVILY_API_KEY",)
@@ -19,6 +22,22 @@ _MIN_SECRET_LEN = 8
 
 class BenchmarkError(Exception):
     """A user-facing benchmark failure (bad flag, missing key, bad input)."""
+
+
+def utc_now() -> str:
+    """The timestamp written into run, judgement and summary files."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def rate(numerator: float, n: int) -> float | None:
+    """``numerator / n`` rounded to 4 places; None for an empty denominator."""
+    return None if n == 0 else round(numerator / n, 4)
+
+
+def describe_error(exc: BaseException) -> str:
+    """``Type: message`` for a run or judgement file: secrets scrubbed, length capped."""
+    text = str(exc) or "(no message)"
+    return scrub_secrets(f"{type(exc).__name__}: {text}")[:ERROR_TEXT_LIMIT]
 
 
 def resolve_model(model_id: str | None) -> ModelDef:
@@ -72,14 +91,17 @@ def has_provider_key(model: ModelDef) -> bool:
 def prepare_environment() -> None:
     """What ``api/main.py`` does at startup that a bare CLI process lacks.
 
-    Loads the project ``.env`` into the process environment (as the app does)
-    and sets the SEC EDGAR identity edgartools requires.
+    Loads the project ``.env`` into the process environment (as the app does) and
+    sets the SEC EDGAR identity edgartools requires through the app's own
+    ``set_sec_identity`` (same ``SEC_HEADER`` fallback). Importing ``api.main`` also
+    applies the app's logging setup (``LOG_LEVEL``, default INFO) to the CLI.
     """
     from dotenv import load_dotenv
-    from edgar import set_identity
 
     load_dotenv()
-    set_identity((os.getenv("SEC_HEADER") or "").strip() or "Analyst Agent dev@localhost")
+    from api.main import set_sec_identity  # after .env is loaded: the import reads LOG_LEVEL
+
+    set_sec_identity()
 
 
 def scrub_secrets(text: str) -> str:

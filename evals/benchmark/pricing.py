@@ -6,24 +6,18 @@ A missing price (or token counts we could not observe) means cost is unknown
 
 from __future__ import annotations
 
-from typing import Any
-
+from agents.model_registry import ModelDef
 from evals.benchmark.schemas import Pricing
 
 _MTOK = 1_000_000
 
 
-def pricing_from_model(model: Any) -> Pricing:
-    """Snapshot a registry ``ModelDef``'s price fields.
-
-    Read with ``getattr`` so this works before and after the price fields exist
-    on ``ModelDef``.
-    """
-    as_of = getattr(model, "prices_as_of", None)
+def pricing_from_model(model: ModelDef) -> Pricing:
+    """Snapshot a registry model's price fields."""
     return Pricing(
-        input_price_per_mtok=getattr(model, "input_price_per_mtok", None),
-        output_price_per_mtok=getattr(model, "output_price_per_mtok", None),
-        prices_as_of=None if as_of is None else str(as_of),
+        input_price_per_mtok=model.input_price_per_mtok,
+        output_price_per_mtok=model.output_price_per_mtok,
+        prices_as_of=model.prices_as_of,
     )
 
 
@@ -49,3 +43,11 @@ def estimate_cost(
 def cost_text(value: float | None) -> str:
     """A USD amount for display; None is "unknown", never $0."""
     return "unknown" if value is None else f"${value:.4f}"
+
+
+def usage_text(input_tokens: int | None, output_tokens: int | None, calls_without_usage: int | None) -> str:
+    """Judge token usage for display; flags totals that are only a lower bound."""
+    if input_tokens is None:
+        return "usage not recorded"
+    caveat = " (some calls reported no usage)" if calls_without_usage else ""
+    return f"{input_tokens} in / {output_tokens} out tokens{caveat}"

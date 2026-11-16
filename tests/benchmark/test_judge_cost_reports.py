@@ -161,12 +161,27 @@ class TestComparisonSummaryAndPdf:
         text = pdf_text_blob(render_comparison_report(summary, runs, judgements))
         assert "Judge cost: unknown. Total (runs + judging): unknown." in text
 
-    async def test_a_summary_json_from_before_judge_costs_still_renders(self, tmp_path):
-        summary, runs, judgements = await _comparison(tmp_path)
-        old = json.loads(json.dumps(summary))
-        del old["costs"]
-        for block in old["models"].values():
-            del block["judge"]
-        pdf = render_comparison_report(old, runs, judgements)
-        assert pdf.startswith(b"%PDF-")
-        assert "Judge cost" not in pdf_text_blob(pdf)
+
+
+def _partial_usage(prompt: str):
+    """Usage on every judge call except the one about q-risk (that call reports none)."""
+    return None if "(q-risk)" in prompt else (3000, 100)
+
+
+class TestPartialJudgeUsage:
+    """Token totals that miss some calls are a lower bound, and every report says so."""
+
+    CAVEAT = "12000 in / 400 out tokens (some calls reported no usage)"
+
+    async def test_summary_digest_and_pdf_flag_a_lower_bound(self, tmp_path):
+        a, b, judgement = await _judged(tmp_path, usage=_partial_usage)
+        assert judgement.judge_calls_without_usage == 1
+        summary = build_summary([a, b], judgement)
+        assert self.CAVEAT in summary_text(summary)
+        assert self.CAVEAT in pdf_text_blob(render_report([a, b], judgement, summary))
+
+    async def test_the_agreement_digest_flags_a_lower_bound(self, tmp_path):
+        from evals.benchmark.agreement import agreement_text, compare_judgements
+
+        _, _, first = await _judged(tmp_path, usage=_partial_usage)
+        assert self.CAVEAT in agreement_text(compare_judgements(first, first))

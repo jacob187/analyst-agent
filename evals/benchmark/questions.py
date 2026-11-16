@@ -11,6 +11,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ValidationError, field_validator
 
+from api.validators import TICKER_RE
 from evals.benchmark.common import BenchmarkError
 
 DEFAULT_QUESTIONS_PATH = Path(__file__).parent / "questions.yaml"
@@ -18,9 +19,10 @@ DEFAULT_QUESTIONS_PATH = Path(__file__).parent / "questions.yaml"
 Category = Literal["filing_lookup", "multi_step", "material_events", "technicals", "market_news"]
 CATEGORIES: tuple[str, ...] = Category.__args__  # type: ignore[attr-defined]
 
-# Ids become file names (questions/<id>.json), so keep them path-safe.
-_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-_TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+# Ids become file names (questions/<id>.json), so keep them path-safe (matched with
+# fullmatch: ``$`` would also accept a trailing newline). They must also be unique
+# ignoring case, since macOS and Windows file names are case-insensitive.
+_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 
 class Question(BaseModel):
@@ -32,7 +34,7 @@ class Question(BaseModel):
     @field_validator("id")
     @classmethod
     def _id_is_path_safe(cls, v: str) -> str:
-        if not _ID_RE.match(v):
+        if not _ID_RE.fullmatch(v):
             raise ValueError(f"id {v!r} must match {_ID_RE.pattern}")
         return v
 
@@ -40,7 +42,7 @@ class Question(BaseModel):
     @classmethod
     def _ticker_shape(cls, v: str) -> str:
         v = v.strip().upper()
-        if not _TICKER_RE.match(v):
+        if not TICKER_RE.fullmatch(v):
             raise ValueError(f"invalid ticker {v!r}")
         return v
 
@@ -73,11 +75,13 @@ def load_questions(path: Path | str = DEFAULT_QUESTIONS_PATH) -> list[Question]:
     except ValidationError as e:
         raise BenchmarkError(f"Invalid question in {path}: {e}") from e
 
-    seen: set[str] = set()
+    seen: dict[str, str] = {}
     for q in questions:
-        if q.id in seen:
-            raise BenchmarkError(f"Duplicate question id {q.id!r} in {path}.")
-        seen.add(q.id)
+        key = q.id.casefold()
+        if key in seen:
+            same = "" if seen[key] == q.id else f" (same file name as {seen[key]!r}: ids must differ in more than case)"
+            raise BenchmarkError(f"Duplicate question id {q.id!r} in {path}{same}.")
+        seen[key] = q.id
     return questions
 
 

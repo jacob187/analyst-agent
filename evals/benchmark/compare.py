@@ -7,9 +7,16 @@ Layout of ``--out``::
     summary.json                          per-model metrics and recommendations
     report.pdf                            for the human owner
 
-Nothing is ever overwritten: an existing run or judgement is reused only if it
-matches this invocation (same architecture, model, question set), otherwise the
-command refuses and says what to delete.
+Runs and judgements are never replaced: an existing one is reused only if it
+matches this invocation (same architecture, model, question set, judge model),
+otherwise the command refuses and says what to delete. The one in-place update is
+a judgement with judge errors, whose errored questions are judged again (by the
+same judge model) on a re-run. ``summary.json`` and ``report.pdf`` are derived
+outputs: every invocation rewrites them (``compare-report`` keeps the previous
+``summary.json`` as ``summary.prev.json`` when the content changes).
+
+The reference run is checked before any other model runs: a reference that
+answered nothing stops the command, and the message names the run to delete.
 """
 
 from __future__ import annotations
@@ -29,8 +36,13 @@ from evals.benchmark.common import (
     resolve_model,
 )
 from evals.benchmark.compare_report import write_comparison_report
-from evals.benchmark.compare_summary import DEFAULT_CHAT_COST_MULTIPLE, build_comparison_summary, unusable_reason
-from evals.benchmark.judge import judge_runs
+from evals.benchmark.compare_summary import (
+    DEFAULT_CHAT_COST_MULTIPLE,
+    build_comparison_summary,
+    check_cost_multiple,
+    unusable_reason,
+)
+from evals.benchmark.judge import errored_ids, judge_runs
 from evals.benchmark.pricing import estimate_cost, pricing_from_model
 from evals.benchmark.questions import Question, question_set_hash
 from evals.benchmark.runner import preflight, run_benchmark
@@ -49,6 +61,7 @@ from evals.benchmark.schemas import Judgement
 RUNS_DIR = "runs"
 JUDGEMENTS_DIR = "judgements"
 SUMMARY_FILE = "summary.json"
+PREVIOUS_SUMMARY_SUFFIX = ".prev"
 REPORT_FILE = "report.pdf"
 
 # Used only when there is no earlier run to take token counts from. A rough guess:
@@ -61,15 +74,31 @@ ASSUMED_JUDGE_INPUT_TOKENS_PER_PAIR = 20_000
 ASSUMED_JUDGE_OUTPUT_TOKENS_PER_PAIR = 300
 
 
-def make_judge_llm(model: ModelDef) -> Any:
-    """The judge chat model (the compare command's seam for tests; see ``judge.build_judge_llm``)."""
-    from evals.benchmark.judge import build_judge_llm
-
-    return build_judge_llm(model)
-
-
 def judgement_dirname(model_id: str, reference_id: str) -> str:
     return f"{model_id}-vs-{reference_id}"
+
+
+def _run_dir(out: Path, model_id: str) -> Path:
+    return out / RUNS_DIR / model_id
+
+
+def _judgement_file(out: Path, model_id: str, reference_id: str) -> Path:
+    return out / JUDGEMENTS_DIR / judgement_dirname(model_id, reference_id) / JUDGEMENT_FILE
+
+
+def _relative_run_dirs(model_ids) -> dict[str, str]:
+    """``runs/<id>`` per model, as recorded in summary.json (relative to the output directory)."""
+    return {m: str(Path(RUNS_DIR) / m) for m in model_ids}
+
+
+def _require_usable_reference(run: LoadedRun) -> None:
+    """Refuse a reference run that answered nothing, naming the directory to delete."""
+    if (reason := unusable_reason(run)) is not None:
+        raise BenchmarkError(
+            f"The reference run {run.meta.model_id} cannot anchor a comparison: {reason}. "
+            f"No other model was run or judged against it; delete {run.dir} and re-run once the "
+            "reference model works."
+        )
 
 
 def select_models(
@@ -108,7 +137,7 @@ def plan_run(model: ModelDef, out: Path, graph: str, questions: list[Question], 
     incomplete run (cannot be resumed mid-way) or a complete run of different
     work (other architecture, model or question set).
     """
-    run_dir = out / RUNS_DIR / model.id
+    run_dir = _run_dir(out, model.id)
     if not (run_dir / RUN_FILE).exists():
         if run_dir.exists() and any(run_dir.iterdir()):
             raise BenchmarkError(f"{run_dir} exists but holds no {RUN_FILE}; remove it or choose a new --out.")
@@ -264,10 +293,6 @@ class Estimate:
         """Anything pending beyond the free-tier model must be confirmed (also when its price is unknown)."""
         return any(line.pending and line.model_id != self.free_tier_id for line in self.lines)
 
-    @property
-    def has_pending(self) -> bool:
-        return any(line.pending for line in self.lines)
-
 
 def build_estimate(
     run_plans: list[RunPlan],
@@ -276,7 +301,9 @@ def build_estimate(
     n_questions: int,
     baseline: Baseline,
     judge_baseline: JudgeBaseline,
+    rejudge_questions: int = 0,
 ) -> Estimate:
+    """``rejudge_questions``: errored questions of existing judgements that will be judged again."""
     lines: list[CostLine] = []
     for plan in run_plans:
         pricing = pricing_from_model(plan.model)
@@ -284,17 +311,20 @@ def build_estimate(
             pricing, round(baseline.input_tokens * n_questions), round(baseline.output_tokens * n_questions)
         )
         lines.append(CostLine(f"run {plan.model.id}", plan.model.id, usd, not plan.complete, pricing.prices_as_of))
-    if judges_pending:
+    if judges_pending or rejudge_questions:
         pricing = pricing_from_model(judge_model)
-        pairs = n_questions * judges_pending
+        pairs = n_questions * judges_pending + rejudge_questions
         usd = estimate_cost(
             pricing,
             round(judge_baseline.input_tokens * pairs),
             round(judge_baseline.output_tokens * pairs),
         )
+        work = [f"x{judges_pending}"] if judges_pending else []
+        if rejudge_questions:
+            work.append(f"{rejudge_questions} errored question(s) to re-judge")
         lines.append(
             CostLine(
-                f"judge x{judges_pending} ({judge_baseline.label})",
+                f"judge {' + '.join(work)} ({judge_baseline.label})",
                 judge_model.id, usd, True, pricing.prices_as_of,
             )
         )
@@ -347,6 +377,8 @@ class Plan:
     selected_ids: list[str]
     only: list[str] | None
     judges_pending: list[ModelDef] = field(default_factory=list)
+    # model id -> number of errored questions in its existing judgement to judge again
+    rejudge: dict[str, int] = field(default_factory=dict)
 
 
 def build_plan(
@@ -357,8 +389,13 @@ def build_plan(
     questions: list[Question],
     only: list[str] | None,
     out: Path,
+    allow_mixed_judges: bool = False,
 ) -> Plan:
-    """Validate everything that can be validated without spending: flags, keys, existing output."""
+    """Validate everything that can be validated without spending: flags, keys, existing output.
+
+    Refuses a complete reference run that answered nothing, and an existing judgement made
+    by another judge model than ``judge_model_id`` unless ``allow_mixed_judges``.
+    """
     for model in models:
         preflight(graph, model.id)  # unknown architecture, or the model's provider key is missing
     judge_model = resolve_model(judge_model_id)
@@ -373,8 +410,11 @@ def build_plan(
 
     run_plans = [plan_run(m, out, graph, questions, selected_ids) for m in models]
     by_id = {p.model.id: p for p in run_plans}
+    if by_id[reference.id].complete:
+        _require_usable_reference(load_run(by_id[reference.id].dir))
+    rejudge: dict[str, int] = {}
     for model in models:
-        path = _judgement_file(out, model, reference)
+        path = _judgement_file(out, model.id, reference.id)
         if model.id == reference.id or not path.exists():
             continue
         # An existing judgement is reusable only if it judged exactly the runs that will be summarised.
@@ -383,15 +423,22 @@ def build_plan(
                 f"{path.parent} holds a judgement but a run it needs is missing. "
                 f"Delete {path.parent} (or restore the runs) and re-run."
             )
-        _check_judgement(load_judgement(path.parent), load_run(by_id[model.id].dir), load_run(by_id[reference.id].dir), path)
-    pending = [m for m in models if m.id != reference.id and not _judgement_file(out, m, reference).exists()]
-    if pending:
+        judgement = load_judgement(path.parent)
+        _check_judgement(judgement, load_run(by_id[model.id].dir), load_run(by_id[reference.id].dir), path)
+        if judgement.judge_model != judge_model.id:
+            if not allow_mixed_judges:
+                raise BenchmarkError(
+                    f"{path.parent} was judged by {judgement.judge_model}, but this invocation's judge is "
+                    f"{judge_model.id}: one comparison must not silently mix judges. Re-run with --judge-model "
+                    f"{judgement.judge_model}, delete {path.parent} to re-judge it with {judge_model.id}, or pass "
+                    "--allow-mixed-judges (the report then names the judge of every model)."
+                )
+        elif errors := errored_ids(judgement):
+            rejudge[model.id] = len(errors)
+    pending = [m for m in models if m.id != reference.id and not _judgement_file(out, m.id, reference.id).exists()]
+    if pending or rejudge:
         provider_api_key(judge_model)
-    return Plan(graph, reference, run_plans, judge_model, out, questions, selected_ids, only, pending)
-
-
-def _judgement_file(out: Path, model: ModelDef, reference: ModelDef) -> Path:
-    return out / JUDGEMENTS_DIR / judgement_dirname(model.id, reference.id) / JUDGEMENT_FILE
+    return Plan(graph, reference, run_plans, judge_model, out, questions, selected_ids, only, pending, rejudge)
 
 
 def estimate_plan(plan: Plan, estimate_from: Path | None, estimate_judge_from: Path | None = None) -> Estimate:
@@ -399,7 +446,8 @@ def estimate_plan(plan: Plan, estimate_from: Path | None, estimate_judge_from: P
     baseline = baseline_tokens(estimate_from, reference_plan)
     judge_baseline = baseline_judge_tokens(plan.out, estimate_judge_from)
     return build_estimate(
-        plan.run_plans, len(plan.judges_pending), plan.judge_model, len(plan.selected_ids), baseline, judge_baseline
+        plan.run_plans, len(plan.judges_pending), plan.judge_model, len(plan.selected_ids), baseline, judge_baseline,
+        rejudge_questions=sum(plan.rejudge.values()),
     )
 
 
@@ -419,16 +467,23 @@ async def execute(
     chat_cost_multiple: float = DEFAULT_CHAT_COST_MULTIPLE,
     progress: Callable[[str], None] = print,
 ) -> dict[str, Any]:
-    """Run what is missing, judge what is missing, write ``summary.json`` and ``report.pdf``."""
-    for run_plan in plan.run_plans:
+    """Run what is missing, judge what is missing, write ``summary.json`` and ``report.pdf``.
+
+    The reference runs first and is checked before any other model runs, so a reference
+    that answered nothing costs no challenger run.
+    """
+    reference_plan = next(p for p in plan.run_plans if p.model.id == plan.reference.id)
+    for run_plan in [reference_plan, *(p for p in plan.run_plans if p is not reference_plan)]:
         if run_plan.complete:
             progress(f"{run_plan.model.id}: complete run found at {run_plan.dir}; skipping")
-            continue
-        progress(f"Running {plan.graph} with model {run_plan.model.id}")
-        await run_benchmark(
-            plan.graph, run_plan.model, plan.questions, run_plan.dir,
-            only=plan.only, timeout_s=timeout_s, progress=progress,
-        )
+        else:
+            progress(f"Running {plan.graph} with model {run_plan.model.id}")
+            await run_benchmark(
+                plan.graph, run_plan.model, plan.questions, run_plan.dir,
+                only=plan.only, timeout_s=timeout_s, progress=progress,
+            )
+        if run_plan is reference_plan:
+            _require_usable_reference(load_run(run_plan.dir))
 
     runs, excluded = load_runs({p.model.id: p.dir for p in plan.run_plans})
     reference_run = _reference_run(runs, excluded, plan.reference.id)
@@ -438,24 +493,31 @@ async def execute(
         if model_id == plan.reference.id:
             continue
         if (reason := unusable_reason(model_run)) is not None:
-            progress(f"{model_id}: excluded from the comparison ({reason}); not judged")
+            progress(
+                f"{model_id}: excluded from the comparison ({reason}); not judged. "
+                f"To run it again, delete {model_run.dir} and re-run."
+            )
             continue
-        model = next(p.model for p in plan.run_plans if p.model.id == model_id)
-        path = _judgement_file(plan.out, model, plan.reference)
-        if path.exists():
-            judgement = load_judgement(path.parent)  # already checked against these runs by build_plan
+        path = _judgement_file(plan.out, model_id, plan.reference.id)
+        previous = load_judgement(path.parent) if path.exists() else None  # checked against these runs by build_plan
+        if previous is not None and model_id not in plan.rejudge:
+            judgement = previous
             progress(f"{model_id}: judgement found at {path.parent}; skipping")
         else:
             judge_llm = judge_llm or judge_llm_factory()
             progress(f"Judging {model_id} against {plan.reference.id}")
             judgement = await judge_runs(
                 model_run, reference_run, judge_llm, plan.judge_model.id, secrets.randbits(32),
-                pricing=pricing_from_model(plan.judge_model), progress=progress,
+                pricing=pricing_from_model(plan.judge_model), progress=progress, previous=previous,
             )
             write_model(path, judgement)
-            errors = sum(q.status == "error" for q in judgement.questions)
-            if errors:
-                progress(f"{model_id}: {errors} judge error(s); delete {path.parent} to re-judge")
+        if errors := errored_ids(judgement):
+            how = (
+                "re-run to judge them again"
+                if judgement.judge_model == plan.judge_model.id
+                else f"re-run with --judge-model {judgement.judge_model} to judge them again"
+            )
+            progress(f"{model_id}: {len(errors)} judge error(s) in {path.parent}; {how}")
         judgements[model_id] = judgement
 
     others = [r for model_id, r in runs.items() if model_id != plan.reference.id]
@@ -465,7 +527,7 @@ async def execute(
         reference_run, others, judgements,
         graph=plan.graph,
         judge_model=plan.judge_model.id,
-        run_dirs={model_id: str(Path(RUNS_DIR) / model_id) for model_id in [*runs, *excluded]},
+        run_dirs=_relative_run_dirs([*runs, *excluded]),
         chat_cost_multiple=chat_cost_multiple,
         excluded=excluded,
     )
@@ -475,14 +537,27 @@ async def execute(
 
 
 def load_runs(dirs: dict[str, Path]) -> tuple[dict[str, LoadedRun], dict[str, str]]:
-    """Load each model's run; a missing, empty or unreadable directory becomes an exclusion reason."""
+    """Load each model's run; a missing, empty or unreadable directory becomes an exclusion reason.
+
+    A directory holding another model's run (a copy such as ``runs/<id>.bak``) is an error:
+    summaries key every model by ``run.meta.model_id``, so it would silently replace or
+    demote the real model's block.
+    """
     runs: dict[str, LoadedRun] = {}
     excluded: dict[str, str] = {}
     for model_id, path in dirs.items():
         try:
-            runs[model_id] = load_run(path)
+            run = load_run(path)
         except BenchmarkError as e:
             excluded[model_id] = f"run directory missing, empty or unreadable: {e}"
+            continue
+        if run.meta.model_id != model_id:
+            raise BenchmarkError(
+                f"{path} holds a run of model_id {run.meta.model_id!r}, but its directory name says "
+                f"{model_id!r}. Each {RUNS_DIR}/<model-id> directory must hold that model's run: move "
+                f"{path} out of {path.parent} and re-run."
+            )
+        runs[model_id] = run
     return runs, excluded
 
 
@@ -490,9 +565,33 @@ def _reference_run(runs: dict[str, LoadedRun], excluded: dict[str, str], referen
     """The reference's run, or a BenchmarkError when it cannot anchor the comparison (checked before judging)."""
     if reference_id not in runs:
         raise BenchmarkError(f"The reference run {reference_id} cannot be loaded: {excluded[reference_id]}")
-    if (reason := unusable_reason(runs[reference_id])) is not None:
-        raise BenchmarkError(f"The reference run {reference_id} cannot anchor a comparison: {reason}")
+    _require_usable_reference(runs[reference_id])
     return runs[reference_id]
+
+
+def _comparable(summary: dict[str, Any]) -> dict[str, Any]:
+    """A summary without its generation timestamp (what a rebuild may change without changing content)."""
+    return {k: v for k, v in summary.items() if k != "generated_at"}
+
+
+def write_summary_keeping_previous(path: Path, summary: dict[str, Any]) -> Path | None:
+    """Write ``summary`` to ``path``; an existing file with other content is first kept as ``<name>.prev.json``.
+
+    Returns the path of the kept previous summary, or None when nothing was kept (no file, or
+    the same content apart from ``generated_at``). Only one previous summary is kept.
+    """
+    kept = None
+    if path.exists():
+        try:
+            old = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            old = None
+        same = isinstance(old, dict) and _comparable(old) == _comparable(json.loads(json.dumps(summary)))
+        if not same:
+            kept = path.with_name(f"{path.stem}{PREVIOUS_SUMMARY_SUFFIX}{path.suffix}")
+            path.replace(kept)
+    write_json(path, summary)
+    return kept
 
 
 def rebuild_comparison(
@@ -501,9 +600,10 @@ def rebuild_comparison(
     """Recompute the summary of a finished comparison directory from the runs and judgements on disk.
 
     Calls no model: it reads ``runs/`` and ``judgements/`` and re-applies the current rules.
-    The recorded ``summary.json`` supplies only the reference, graph and judge model (and the
-    cost multiple unless overridden). Every directory under ``runs/`` takes part, listed in
-    the old summary or not, so a model the old summary dropped is neither lost nor hidden.
+    The recorded ``summary.json`` supplies only the reference and graph (and the cost multiple
+    unless overridden); the judge of each model is read from its judgement. Every directory
+    under ``runs/`` takes part, listed in the old summary or not, so a model the old summary
+    dropped is neither lost nor hidden; one that holds another model's run is refused.
     """
     summary_path = out / SUMMARY_FILE
     try:
@@ -515,11 +615,11 @@ def rebuild_comparison(
     on_disk = sorted(p.name for p in (out / RUNS_DIR).iterdir() if p.is_dir()) if (out / RUNS_DIR).is_dir() else []
     model_ids = list(dict.fromkeys([reference_id, *listed, *on_disk]))
 
-    runs, excluded = load_runs({m: out / RUNS_DIR / m for m in model_ids})
+    runs, excluded = load_runs({m: _run_dir(out, m) for m in model_ids})
     reference_run = _reference_run(runs, excluded, reference_id)
     judgements: dict[str, Judgement] = {}
     for model_id, run in runs.items():
-        path = out / JUDGEMENTS_DIR / judgement_dirname(model_id, reference_id) / JUDGEMENT_FILE
+        path = _judgement_file(out, model_id, reference_id)
         if model_id != reference_id and path.exists():
             judgement = load_judgement(path.parent)
             _check_judgement(judgement, run, reference_run, path)
@@ -529,12 +629,15 @@ def rebuild_comparison(
         [r for m, r in runs.items() if m != reference_id],
         judgements,
         graph=recorded.get("graph", reference_run.meta.architecture),
-        judge_model=recorded.get("judge_model", "unknown"),
-        run_dirs={m: str(Path(RUNS_DIR) / m) for m in model_ids},
+        judge_model=recorded.get("judge_model") or "unknown",  # used only when nothing was judged
+        run_dirs=_relative_run_dirs(model_ids),
         chat_cost_multiple=(
             chat_cost_multiple
             if chat_cost_multiple is not None
-            else recorded.get("chat_cost_multiple", DEFAULT_CHAT_COST_MULTIPLE)
+            else check_cost_multiple(
+                recorded.get("chat_cost_multiple", DEFAULT_CHAT_COST_MULTIPLE),
+                f"chat_cost_multiple recorded in {summary_path} (override it with --chat-cost-multiple)",
+            )
         ),
         excluded=excluded,
     )

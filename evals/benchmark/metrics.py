@@ -15,6 +15,7 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.trace import StatusCode
 from pydantic import BaseModel, Field
 
+from evals.benchmark.common import ERROR_TEXT_LIMIT
 from evals.benchmark.schemas import ToolCall, ToolEvidence
 
 ROOT_SPAN_NAME = "benchmark.question"
@@ -22,7 +23,6 @@ ROOT_SPAN_NAME = "benchmark.question"
 _KIND = SpanAttributes.OPENINFERENCE_SPAN_KIND
 _LLM = OpenInferenceSpanKindValues.LLM.value
 _TOOL = OpenInferenceSpanKindValues.TOOL.value
-_ERROR_TEXT_LIMIT = 500
 
 # Evidence capture. The app caps span string attributes at 8192 characters, which
 # cuts SEC tables mid-row; benchmark runs capture with this larger cap instead
@@ -74,7 +74,7 @@ def _error_text(span: ReadableSpan) -> str:
                 text = f"{attrs.get('exception.type', '')}: {attrs.get('exception.message', '')}".strip(": ")
                 break
     text = f"{span.name}: {text or 'error'}"
-    return text[:_ERROR_TEXT_LIMIT]
+    return text[:ERROR_TEXT_LIMIT]
 
 
 def _partial_json_string(body: str) -> str:
@@ -107,7 +107,9 @@ def tool_output_text(raw: str) -> tuple[str, bool]:
             except json.JSONDecodeError:
                 return _partial_json_string(body), True
         return raw, cut
-    content = data.get("data", {}).get("content") if isinstance(data, dict) else None
+    # A raw tool return (planner path) can be any JSON; only a ToolMessage has a dict ``data``.
+    inner = data.get("data") if isinstance(data, dict) else None
+    content = inner.get("content") if isinstance(inner, dict) else None
     if isinstance(content, str):
         return content, cut
     if isinstance(content, list):  # provider content blocks
@@ -137,7 +139,10 @@ def _tool_name(span: ReadableSpan) -> str:
 def extract_evidence(
     tool_spans: list[ReadableSpan], all_spans: list[ReadableSpan]
 ) -> tuple[list[ToolEvidence], bool]:
-    """Bounded tool inputs/outputs for the judge, in call order.
+    """Bounded tool inputs/outputs for the judge, in the order of ``tool_spans``.
+
+    ``tool_spans`` must already be in call order (``extract_metrics`` sorts them once
+    for both the evidence and ``tool_calls``).
 
     * A TOOL span nested inside another TOOL span (``web_search`` ->
       ``tavily_search``) is skipped: the outermost span's output is the evidence.
@@ -150,7 +155,7 @@ def extract_evidence(
     remaining = EVIDENCE_TOTAL_CAP
     any_cut = False
     items: list[ToolEvidence] = []
-    for span in sorted(tool_spans, key=lambda s: s.start_time or 0):
+    for span in tool_spans:
         name = _tool_name(span)
         if _is_nested_tool(span, by_id):
             continue

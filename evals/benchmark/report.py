@@ -13,7 +13,7 @@ from typing import Any
 
 from fpdf import FPDF
 
-from evals.benchmark.pricing import estimate_cost
+from evals.benchmark.pricing import cost_text, estimate_cost, usage_text
 from evals.benchmark.runs import LoadedRun
 from evals.benchmark.schemas import Judgement, JudgedQuestion, QuestionResult
 
@@ -64,10 +64,6 @@ def flatten_markdown(text: str) -> str:
 
 def _clean(text: str) -> str:
     return pdf_text(flatten_markdown(text))
-
-
-def _cost_text(value: float | None) -> str:
-    return "unknown" if value is None else f"${value:.4f}"
 
 
 def _num(value: float | None, fmt: str) -> str:
@@ -192,7 +188,7 @@ def _metrics_line(run: LoadedRun, r: QuestionResult | None) -> str:
         tools = tools[:297] + "..."
     line = (
         f"{run.label}: {r.status}, {r.llm_calls} LLM calls, {r.input_tokens} in / {r.output_tokens} out tokens, "
-        f"{r.latency_s:.1f}s, cost {_cost_text(cost)}; tools: {tools}"
+        f"{r.latency_s:.1f}s, cost {cost_text(cost)}; tools: {tools}"
     )
     if r.errors:
         line += f"; errors: {' | '.join(r.errors)[:300]}"
@@ -225,7 +221,7 @@ def render_report(
             run["label"], run["architecture"], run["model_id"],
             f"{q['answered']}/{q['selected']}",
             _num(m["llm_calls"], ".1f"), _num(m["input_tokens"], ".0f"), _num(m["output_tokens"], ".0f"),
-            _num(m["latency_s"], ".1f"), _cost_text(t["cost_usd"]),
+            _num(m["latency_s"], ".1f"), cost_text(t["cost_usd"]),
             "-" if j is None else f"{j['wins']}/{j['ties']}/{j['losses']}",
             "-" if j is None else f"{j['unique_factual_errors']} / {j['opponent_unique_factual_errors']}",
         ])
@@ -238,7 +234,7 @@ def render_report(
     )
     pdf.ln(3)
 
-    deltas = summary.get("deltas")  # absent in summary dicts built before the deltas existed
+    deltas = summary["deltas"]  # None unless exactly two runs
     if deltas is not None:
         _heading(pdf, f"Change {deltas['old']} -> {deltas['new']} (means per question)", 12)
         delta_rows = []
@@ -258,8 +254,8 @@ def render_report(
 
     _heading(pdf, "Failed questions", 12)
     for run in summary["runs"]:
-        failed = ", ".join(run.get("failed_ids", [])) or "none"
-        errored = ", ".join(run.get("error_ids", [])) or "none"
+        failed = ", ".join(run["failed_ids"]) or "none"
+        errored = ", ".join(run["error_ids"]) or "none"
         _paragraph(pdf, f"{run['label']}: no answer - {failed}; error recorded - {errored}")
     pdf.ln(3)
 
@@ -271,7 +267,7 @@ def render_report(
             cat_rows.append([
                 run["label"], cat, str(agg["n"]), _num(m["llm_calls"], ".1f"),
                 _num(m["total_tokens"], ".0f"), _num(m["latency_s"], ".1f"),
-                _cost_text(m["cost_usd"]),
+                cost_text(m["cost_usd"]),
             ])
     _table(
         pdf, ["Run", "Category", "N", "LLM calls", "Tokens", "Latency s", "Mean cost"],
@@ -291,15 +287,11 @@ def render_report(
             f"{jb['a_counts']['ties']} ties, {jb['a_counts']['skipped_or_errored']} not judged.",
         )
         usage, costs = jb["judge_usage"], summary["costs"]
-        tokens = (
-            "usage not recorded"
-            if usage["input_tokens"] is None
-            else f"{usage['input_tokens']} in / {usage['output_tokens']} out tokens"
-        )
-        _paragraph(pdf, f"Judge cost: {_cost_text(usage['cost_usd'])} ({tokens}).", style="B")
+        tokens = usage_text(usage["input_tokens"], usage["output_tokens"], usage["calls_without_usage"])
+        _paragraph(pdf, f"Judge cost: {cost_text(usage['cost_usd'])} ({tokens}).", style="B")
         _paragraph(
             pdf,
-            f"Run cost: {_cost_text(costs['runs_usd'])}. Runs + judging total: {_cost_text(costs['total_usd'])}.",
+            f"Run cost: {cost_text(costs['runs_usd'])}. Runs + judging total: {cost_text(costs['total_usd'])}.",
         )
 
     pdf.ln(3)

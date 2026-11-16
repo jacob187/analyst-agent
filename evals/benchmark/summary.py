@@ -8,10 +8,10 @@ usage; it is never reported as 0.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timezone
 from typing import Any
 
-from evals.benchmark.pricing import cost_text, estimate_cost
+from evals.benchmark.common import utc_now
+from evals.benchmark.pricing import cost_text, estimate_cost, usage_text
 from evals.benchmark.runs import LoadedRun
 from evals.benchmark.schemas import Judgement, Pricing, QuestionResult
 
@@ -205,7 +205,7 @@ def build_summary(runs: list[LoadedRun], judgement: Judgement | None = None) -> 
     runs_usd = sum_known([b["totals"]["cost_usd"] for b in run_blocks])
     judge_usd = None if judgement is None else judgement.judge_cost_usd
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": utc_now(),
         "prices_as_of": sorted(prices_as_of),
         "warnings": warnings,
         "runs": run_blocks,
@@ -223,7 +223,6 @@ def build_summary(runs: list[LoadedRun], judgement: Judgement | None = None) -> 
     }
 
 
-_cost_text = cost_text
 
 
 def _signed(change: dict[str, float | None], fmt: str, unit: str = "", prefix: str = "") -> str | None:
@@ -260,7 +259,7 @@ def summary_text(summary: dict[str, Any]) -> str:
             f"{run['label']} [{run['architecture']} / {run['model_id']}]: "
             f"{run['questions']['answered']}/{run['questions']['selected']} answered, "
             f"mean {m['llm_calls'] or 0:.1f} LLM calls, {m['total_tokens'] or 0:.0f} tokens, "
-            f"{m['latency_s'] or 0:.1f}s; total cost {_cost_text(t['cost_usd'])}"
+            f"{m['latency_s'] or 0:.1f}s; total cost {cost_text(t['cost_usd'])}"
         )
     if summary["deltas"] is not None:
         lines.append(delta_text(summary["deltas"]))
@@ -271,14 +270,10 @@ def summary_text(summary: dict[str, Any]) -> str:
         )
     if summary["judgement"] is not None:
         usage = summary["judgement"]["judge_usage"]
-        tokens = (
-            "usage not recorded"
-            if usage["input_tokens"] is None
-            else f"{usage['input_tokens']} in / {usage['output_tokens']} out tokens"
-        )
+        tokens = usage_text(usage["input_tokens"], usage["output_tokens"], usage["calls_without_usage"])
         lines.append(
-            f"judging [{usage['judge_model']}]: cost {_cost_text(usage['cost_usd'])} ({tokens}); "
-            f"runs + judging total {_cost_text(summary['costs']['total_usd'])}"
+            f"judging [{usage['judge_model']}]: cost {cost_text(usage['cost_usd'])} ({tokens}); "
+            f"runs + judging total {cost_text(summary['costs']['total_usd'])}"
         )
     as_of = summary["prices_as_of"]
     lines.append("prices_as_of: " + (", ".join(as_of) if as_of else "unknown (no price data)"))

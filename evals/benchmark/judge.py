@@ -5,31 +5,30 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from pathlib import Path
 from typing import Any, Callable, Literal
 
-import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from agents.llm_factory import structured_llm
 from agents.model_registry import ModelDef
+from agents.prompts import BENCHMARK_JUDGE_SYSTEM_PROMPT, BENCHMARK_JUDGE_USER_PROMPT
 from api.tracing import capture_spans
-from evals.benchmark.common import BenchmarkError, provider_api_key, scrub_secrets
+from evals.benchmark.common import BenchmarkError, describe_error, provider_api_key, utc_now
 from evals.benchmark.isolation import quiet_attribute_truncation
 from evals.benchmark.metrics import extract_metrics
 from evals.benchmark.pricing import estimate_cost
 from evals.benchmark.runs import LoadedRun
 from evals.benchmark.schemas import Judgement, JudgedQuestion, Pricing, RunRef, ToolEvidence
 
-PROMPT_PATH = Path(__file__).parent / "prompts" / "judge.yaml"
-_ERROR_TEXT_LIMIT = 500
-
-# Evidence shown to the judge, per side (characters of rendered tool calls, before
-# the small per-call headers and separators). A side over budget is trimmed
-# deterministically: every call keeps an equal share of the budget, calls shorter
-# than their share keep all of their text and hand the surplus to longer ones, and
-# each over-share call keeps its head. A call is never trimmed below MIN_ITEM_CHARS;
+# Evidence shown to the judge, per side, in characters of rendered tool calls: each
+# call's ``[i] tool:`` / ``input:`` / ``output:`` header lines count against the
+# budget; only the blank-line separators and the closing omitted-calls line come on
+# top. A side over budget is trimmed deterministically: every call keeps an equal
+# share of the budget, calls shorter than their share keep all of their text and
+# hand the surplus to longer ones, and each over-share call keeps its head plus a
+# cut marker. A call is never rendered shorter than MIN_ITEM_CHARS (headers and the
+# cut marker included, so a call with a long input can show little or no output);
 # when there are too many calls for that, the earliest ones are kept and the rest
 # are counted in a closing line. At 40k characters (~10k tokens) per side a judge
 # prompt stays well inside any registry model's context window.
@@ -61,26 +60,17 @@ class JudgeVerdict(BaseModel):
     rationale: str = Field(description="Short justification: two or three sentences.")
 
 
-def load_judge_prompt(path: Path = PROMPT_PATH) -> dict[str, str]:
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or not {"system", "user"} <= data.keys():
-        raise BenchmarkError(f"{path} must define 'system' and 'user' prompt templates.")
-    return {"system": data["system"], "user": data["user"]}
-
-
 def build_judge_llm(model: ModelDef) -> Any:
     """The judge chat model for ``model`` (the one place a real judge LLM is built).
 
     Thinking is switched off explicitly. The verdict comes back through
-    ``with_structured_output``, which for Anthropic models is forced tool use
-    (``tool_choice`` = the verdict tool). Anthropic does not allow forced tool use
-    together with extended thinking: for the budget-thinking model
-    langchain-anthropic drops the forced ``tool_choice`` (the verdict can come back
-    as prose and fail to parse), and for the adaptive-thinking models it still sends
-    it, which the API rejects. A non-thinking judge forces the verdict tool; the
-    evidence-based reasoning goes in the ``rationale``/``evidence_issues`` fields.
+    ``agents.llm_factory.structured_llm``: for Anthropic models that is native
+    JSON-schema output (``output_config``, no forced ``tool_choice``), for the other
+    providers their default structured output. Thinking is not needed for a verdict
+    whose reasoning goes in the ``rationale``/``evidence_issues`` fields, and leaving
+    it off keeps judging cheap and the request shape the same across judge models.
     ``create_llm`` already defaults to no thinking; passing it explicitly keeps the
-    judge safe if that default ever changes. Other providers are unaffected.
+    judge that way if that default ever changes.
     """
     from agents.llm_factory import ThinkingConfig, create_llm
 
@@ -244,6 +234,45 @@ async def _ask_judge(structured: Any, messages: list[Any]) -> tuple[JudgeVerdict
     return verdict, error, judge_usage(captured.spans)
 
 
+def errored_ids(judgement: Judgement) -> list[str]:
+    """Questions whose judge call failed (the only ones a re-judge asks again)."""
+    return [q.id for q in judgement.questions if q.status == "error"]
+
+
+def rejudge_refusal(previous: Judgement, run_a: LoadedRun, run_b: LoadedRun, judge_model_id: str) -> str | None:
+    """Why ``previous`` cannot be completed by re-judging its errors; None when it can.
+
+    Only a judgement of these exact two runs by the same judge model is completed, so
+    one judgement file never mixes judges or runs.
+    """
+    if (previous.a.run_id, previous.b.run_id) != (run_a.meta.run_id, run_b.meta.run_id):
+        return "it judged other runs"
+    if previous.judge_model != judge_model_id:
+        return f"it was judged by {previous.judge_model}, not {judge_model_id}"
+    return None
+
+
+def _merge_spend(previous: Judgement | None, new_in: int | None, new_out: int | None, new_cost: float | None, new_without: int) -> dict[str, Any]:
+    """The judgement's spend totals: this call's, plus ``previous``'s when it was completed.
+
+    A completed judgement keeps the spend of its earlier calls, failed ones included:
+    they were paid for. A part that is unknown makes the cost unknown, never 0.
+    """
+    if previous is None:
+        return dict(judge_input_tokens=new_in, judge_output_tokens=new_out, judge_cost_usd=new_cost,
+                    judge_calls_without_usage=new_without)
+
+    def add(old: float | None, new: float | None) -> float | None:
+        return None if old is None and new is None else (old or 0) + (new or 0)
+
+    return dict(
+        judge_input_tokens=add(previous.judge_input_tokens, new_in),
+        judge_output_tokens=add(previous.judge_output_tokens, new_out),
+        judge_cost_usd=None if previous.judge_cost_usd is None or new_cost is None else previous.judge_cost_usd + new_cost,
+        judge_calls_without_usage=(previous.judge_calls_without_usage or 0) + new_without,
+    )
+
+
 async def judge_runs(
     run_a: LoadedRun,
     run_b: LoadedRun,
@@ -253,6 +282,7 @@ async def judge_runs(
     *,
     pricing: Pricing | None = None,
     progress: Callable[[str], None] = print,
+    previous: Judgement | None = None,
 ) -> Judgement:
     """Judge every question both runs have an answer for.
 
@@ -266,9 +296,20 @@ async def judge_runs(
     The judge's own token usage is measured per question from the spans of its
     call and priced with ``pricing`` (the judge model's price snapshot); without
     prices, or without usage on a call, the cost is None (unknown), never 0.
+
+    With ``previous`` (an earlier judgement of these runs by this judge model; see
+    ``rejudge_refusal``) only its ``error`` questions are asked again. Every other
+    entry is kept as it is, ``seed`` is replaced by the earlier seed (so the A/B order
+    stays the recorded one) and the spend totals are the earlier totals plus this call's.
     """
     check_comparable(run_a, run_b)
-    prompts = load_judge_prompt()
+    kept: dict[str, JudgedQuestion] = {}
+    if previous is not None:
+        if (why := rejudge_refusal(previous, run_a, run_b, judge_model_id)) is not None:
+            raise BenchmarkError(f"Cannot complete the earlier judgement: {why}.")
+        seed = previous.seed
+        kept = {q.id: q for q in previous.questions if q.status != "error"}
+        progress(f"Re-judging {len(errored_ids(previous))} errored question(s); keeping {len(kept)} earlier verdict(s)")
     today = as_of_date(run_a, run_b).isoformat()
     structured = structured_llm(judge_llm, JudgeVerdict)
 
@@ -277,6 +318,9 @@ async def judge_runs(
     judge_calls = measured_calls = 0
     shared_ids = [qid for qid in run_a.meta.question_ids if qid in set(run_b.meta.question_ids)]
     for index, qid in enumerate(shared_ids, start=1):
+        if qid in kept:
+            judged.append(kept[qid])
+            continue
         qa, qb = run_a.questions.get(qid), run_b.questions.get(qid)
         base = {"id": qid, "category": "", "ticker": ""}
         ref = qa or qb
@@ -301,9 +345,9 @@ async def judge_runs(
         first, second = (qa, qb) if first_is_a else (qb, qa)
         first_ev, second_ev = render_evidence(first.evidence), render_evidence(second.evidence)
         messages = [
-            SystemMessage(content=prompts["system"]),
+            SystemMessage(content=BENCHMARK_JUDGE_SYSTEM_PROMPT),
             HumanMessage(
-                content=prompts["user"].format(
+                content=BENCHMARK_JUDGE_USER_PROMPT.format(
                     ticker=qa.ticker,
                     category=qa.category,
                     question=qa.question,
@@ -331,7 +375,7 @@ async def judge_runs(
             ),
         )
         if error is not None:
-            reason = scrub_secrets(f"{type(error).__name__}: {error}")[:_ERROR_TEXT_LIMIT]
+            reason = describe_error(error)
             judged.append(JudgedQuestion(**base, status="error", reason=reason, a_is_first=first_is_a, **spent))
             progress(f"[{index}/{len(shared_ids)}] {qid}: error ({reason})")
             continue
@@ -366,17 +410,20 @@ async def judge_runs(
     return Judgement(
         judge_model=judge_model_id,
         seed=seed,
-        date=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        date=utc_now(),
         question_set_hash=run_a.meta.question_set_hash,
         a=ref_of(run_a),
         b=ref_of(run_b),
         questions=judged,
         as_of_date=today,
         evidence_budget_chars=EVIDENCE_BUDGET_CHARS,
-        # No call reported usage at all: the totals are unknown, not 0 (a partial set is a lower bound).
-        judge_input_tokens=None if judge_calls and not measured_calls else total_in,
-        judge_output_tokens=None if judge_calls and not measured_calls else total_out,
-        judge_cost_usd=estimate_cost(pricing, total_in, total_out, calls_without_usage),
-        judge_calls_without_usage=calls_without_usage,
+        **_merge_spend(
+            previous,
+            # No call reported usage at all: the totals are unknown, not 0 (a partial set is a lower bound).
+            None if judge_calls and not measured_calls else total_in,
+            None if judge_calls and not measured_calls else total_out,
+            estimate_cost(pricing, total_in, total_out, calls_without_usage),
+            calls_without_usage,
+        ),
         judge_prices_as_of=None if pricing is None else pricing.prices_as_of,
     )

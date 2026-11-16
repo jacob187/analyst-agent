@@ -14,7 +14,6 @@ from evals.benchmark.judge import (
     MIN_ITEM_CHARS,
     RenderedEvidence,
     judge_runs,
-    load_judge_prompt,
     render_evidence,
 )
 from evals.benchmark.runs import load_judgement, load_run
@@ -86,7 +85,8 @@ class TestPromptDateAndEvidence:
             assert "FIRST'S EVIDENCE" in prompt and "SECOND'S EVIDENCE" in prompt
 
     def test_factual_error_is_defined_against_the_evidence(self):
-        system = load_judge_prompt()["system"]
+        from agents.prompts import BENCHMARK_JUDGE_SYSTEM_PROMPT as system
+
         assert "contradicts" in system and "no provided evidence supports" in system
 
     async def test_runs_without_recorded_evidence_are_marked_and_still_judged(self, tmp_path):
@@ -144,7 +144,8 @@ class TestEvidenceTrimming:
     def test_over_budget_evidence_is_cut_to_the_budget_and_flagged(self):
         rendered = render_evidence([_item(1, 100_000), _item(2, 100_000)])
         assert rendered.trimmed is True and rendered.calls == 2
-        assert len(rendered.text) <= EVIDENCE_BUDGET_CHARS + 500  # budget + per-call headers and separators
+        # Headers count against the budget; only the blank-line separators come on top.
+        assert len(rendered.text) <= EVIDENCE_BUDGET_CHARS + 2 * (rendered.calls - 1)
         assert "tool_1" in rendered.text and "tool_2" in rendered.text  # every call stays represented
         assert rendered.text.count("cut by the judge's evidence budget") == 2
 

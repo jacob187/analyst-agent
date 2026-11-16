@@ -9,13 +9,14 @@ the judge is the `FakeJudge`; no test can reach a real LLM or the network. The `
 import asyncio
 import io
 import json
+import shutil
 import sys
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
 from agents.model_registry import get_all_models
-from api.dependencies import PROVIDER_ENV_VARS
 from evals.benchmark.architectures import ARCHITECTURES
 from evals.benchmark.cli import main
 from evals.benchmark.common import BenchmarkError, provider_env_var
@@ -32,7 +33,7 @@ from evals.benchmark.compare import (
 from evals.benchmark.judge import judge_runs
 from evals.benchmark.runs import load_judgement, load_run, write_model
 from tests.benchmark.helpers import FakeAgent, FakeJudge, pdf_text_blob, write_run
-from tests.conftest import flagged_free_tier_model
+from tests.conftest import clear_operator_keys, flagged_free_tier_model, set_operator_key
 
 pytestmark = pytest.mark.eval_unit
 
@@ -63,6 +64,8 @@ BUILDS: list[str] = []
 JUDGE_LLMS: list[object] = []
 # {"tokens": (in, out)} makes the fake judge report that usage per call (absent: no usage reported).
 JUDGE_USAGE: dict[str, tuple[int, int]] = {}
+# {"fn": decide} replaces the fake judge's verdict rule (see FakeJudge).
+JUDGE_DECIDE: dict[str, object] = {}
 
 
 FAILING: set[str] = set()  # models whose agent cannot be built (like an exhausted provider quota)
@@ -88,8 +91,7 @@ class _UnreadableStdin:
 @pytest.fixture(autouse=True)
 def env(monkeypatch):
     monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
-    for var in PROVIDER_ENV_VARS.values():
-        monkeypatch.delenv(var, raising=False)
+    clear_operator_keys(monkeypatch)
     monkeypatch.setattr("evals.benchmark.cli.prepare_environment", lambda: None)  # no .env reload
     monkeypatch.setitem(ARCHITECTURES, "fake", _build)
     monkeypatch.setattr(sys, "stdin", _UnreadableStdin())
@@ -98,18 +100,19 @@ def env(monkeypatch):
     BUILDS.clear()
     JUDGE_LLMS.clear()
     JUDGE_USAGE.clear()
+    JUDGE_DECIDE.clear()
 
     def judge_factory(model):
-        judge = FakeJudge(usage=JUDGE_USAGE.get("tokens"))
+        judge = FakeJudge(decide=JUDGE_DECIDE.get("fn"), usage=JUDGE_USAGE.get("tokens"))
         JUDGE_LLMS.append(judge)
         return judge
 
-    monkeypatch.setattr("evals.benchmark.compare.make_judge_llm", judge_factory)
+    monkeypatch.setattr("evals.benchmark.judge.build_judge_llm", judge_factory)
 
 
 def give_keys(monkeypatch, *models):
     for model in models:
-        monkeypatch.setenv(provider_env_var(model), "fake-key-value-0123")
+        set_operator_key(monkeypatch, model)
 
 
 @pytest.fixture
@@ -444,6 +447,63 @@ class TestResume:
         assert "holds a judgement but a run it needs is missing" in capsys.readouterr().err
         assert BUILDS == []
 
+    def test_resuming_with_another_judge_model_is_refused_before_anything_runs(self, monkeypatch, qfile, out, capsys):
+        give_keys(monkeypatch, FREE)
+        assert compare(qfile, out, "--models", PAID.id, "--yes") == 0  # judged by the free-tier default
+        BUILDS.clear()
+        JUDGE_LLMS.clear()
+        capsys.readouterr()
+
+        assert compare(qfile, out, "--models", f"{PAID.id},{PAID2.id}", "--judge-model", PAID2.id, "--yes") == 2
+        err = capsys.readouterr().err
+        assert f"judged by {FREE.id}" in err and PAID2.id in err and "--allow-mixed-judges" in err
+        assert BUILDS == [] and JUDGE_LLMS == []
+
+    def test_mixed_judges_when_allowed_are_named_per_model_and_warned_about(self, monkeypatch, qfile, out, capsys):
+        give_keys(monkeypatch, FREE)
+        assert compare(qfile, out, "--models", PAID.id, "--yes") == 0
+        capsys.readouterr()
+        assert compare(
+            qfile, out, "--models", f"{PAID.id},{PAID2.id}", "--judge-model", PAID2.id, "--allow-mixed-judges", "--yes"
+        ) == 0
+
+        summary = json.loads((out / "summary.json").read_text())
+        assert summary["judge_model"] is None
+        assert summary["judge_models"] == {PAID.id: FREE.id, PAID2.id: PAID2.id}
+        assert any("different judge models" in w for w in summary["warnings"])
+        printed = capsys.readouterr().out
+        assert f"judges: {PAID.id} by {FREE.id}, {PAID2.id} by {PAID2.id}" in printed
+        assert f"{PAID.id} by {FREE.id}, {PAID2.id} by {PAID2.id}" in pdf_text_blob((out / "report.pdf").read_bytes())
+
+    def test_a_rerun_judges_only_the_errored_questions_again(self, monkeypatch, qfile, out, capsys):
+        give_keys(monkeypatch, FREE)
+        plain = FakeJudge()
+
+        def flaky(text):
+            if "Question q3?" in text:
+                return {"result": "not a verdict"}  # a paid call that fails to parse
+            return plain.decide([SimpleNamespace(content=text)])
+
+        JUDGE_DECIDE["fn"] = flaky
+        assert compare(qfile, out, "--models", PAID.id, "--yes") == 0
+        judgement_dir = out / "judgements" / f"{PAID.id}-vs-{FREE.id}"
+        before = {q.id: q for q in load_judgement(judgement_dir).questions}
+        assert before["q3"].status == "error"
+        assert "1 judge error(s)" in capsys.readouterr().out
+
+        JUDGE_DECIDE.clear()
+        JUDGE_LLMS.clear()
+        assert compare(qfile, out, "--models", PAID.id, "--dry-run") == 0
+        assert "1 errored question(s) to re-judge" in capsys.readouterr().out
+        assert compare(qfile, out, "--models", PAID.id, "--yes") == 0
+
+        (judge,) = JUDGE_LLMS
+        assert len(judge.prompts) == 1 and "Question q3?" in judge.prompts[0]
+        after = {q.id: q for q in load_judgement(judgement_dir).questions}
+        assert after["q3"].status == "judged"
+        assert all(after[qid] == before[qid] for qid in before if qid != "q3")
+        assert json.loads((out / "summary.json").read_text())["models"][PAID.id]["vs_reference"]["judge_errors"] == 0
+
     def test_a_judgement_with_other_run_ids_is_refused(self, monkeypatch, qfile, out, capsys):
         give_keys(monkeypatch, FREE)
         assert compare(qfile, out, "--models", PAID.id, "--yes") == 0
@@ -499,12 +559,12 @@ class TestGuards:
         assert code == 2
         assert "Unknown architecture 'nope'" in capsys.readouterr().err
 
-    @pytest.mark.parametrize("bad", ["0", "-1"])
-    def test_cost_multiple_must_be_positive(self, monkeypatch, qfile, out, capsys, bad):
+    @pytest.mark.parametrize("bad", ["0", "-1", "nan", "inf", "-inf"])
+    def test_cost_multiple_must_be_finite_and_positive(self, monkeypatch, qfile, out, capsys, bad):
         give_keys(monkeypatch, FREE)
         assert compare(qfile, out, "--models", FREE.id, f"--chat-cost-multiple={bad}") == 2
         assert "--chat-cost-multiple" in capsys.readouterr().err
-        assert not out.exists()
+        assert not out.exists() and BUILDS == []
 
 
 JUDGE_TOKENS_IN, JUDGE_TOKENS_OUT = 2000, 50
@@ -651,12 +711,35 @@ class TestExcludedModels:
         text = pdf_text_blob((out / "report.pdf").read_bytes())
         assert PAID.id in text and "Excluded models" in text
 
-    def test_a_reference_that_answered_nothing_stops_before_any_judging(self, monkeypatch, qfile, out, capsys):
+    def test_a_reference_that_answered_nothing_stops_before_any_challenger_runs(self, monkeypatch, qfile, out, capsys):
         give_keys(monkeypatch, FREE)
         FAILING.add(FREE.id)
         assert compare(qfile, out, "--models", PAID.id, "--yes") == 2
-        assert f"The reference run {FREE.id} cannot anchor a comparison" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert f"The reference run {FREE.id} cannot anchor a comparison" in err
+        assert f"delete {out / 'runs' / FREE.id}" in err
+        assert PAID.id not in BUILDS  # no challenger was paid for
+        assert not (out / "runs" / PAID.id).exists()
         assert JUDGE_LLMS == []
+
+    def test_a_failed_reference_run_on_disk_is_refused_before_anything_runs(self, monkeypatch, qfile, out, capsys):
+        give_keys(monkeypatch, FREE)
+        FAILING.add(FREE.id)
+        assert compare(qfile, out, "--models", PAID.id, "--yes") == 2
+        FAILING.clear()  # e.g. the quota is back
+        BUILDS.clear()
+        capsys.readouterr()
+
+        assert compare(qfile, out, "--models", PAID.id, "--yes") == 2
+        err = capsys.readouterr().err
+        assert f"delete {out / 'runs' / FREE.id}" in err
+        assert BUILDS == [] and JUDGE_LLMS == []
+
+    def test_an_excluded_challenger_says_which_directory_to_delete(self, monkeypatch, qfile, out, capsys):
+        give_keys(monkeypatch, FREE)
+        FAILING.add(PAID.id)
+        assert compare(qfile, out, "--models", PAID.id, "--yes") == 0
+        assert f"delete {out / 'runs' / PAID.id}" in capsys.readouterr().out
 
 
 def _rebuild(out, summary_out, *extra, pdf=None):
@@ -739,6 +822,31 @@ class TestRebuildFromDisk:
         assert _rebuild(out, tmp_path / "s.json") == 2
         assert "judges different runs" in capsys.readouterr().err
 
+    @pytest.mark.parametrize("copied", ["reference", "challenger"])
+    def test_a_run_directory_not_named_after_its_model_is_refused(
+        self, monkeypatch, qfile, out, tmp_path, capsys, copied
+    ):
+        self._finished(monkeypatch, qfile, out, PAID)
+        model_id = FREE.id if copied == "reference" else PAID.id
+        shutil.copytree(out / "runs" / model_id, out / "runs" / f"{model_id}.bak")
+        assert _rebuild(out, tmp_path / "s.json") == 2
+        err = capsys.readouterr().err
+        assert f"{model_id}.bak" in err and f"model_id {model_id!r}" in err
+        assert not (tmp_path / "s.json").exists()
+
+    def test_compare_report_keeps_the_previous_summary_when_the_content_changes(self, monkeypatch, qfile, out):
+        self._finished(monkeypatch, qfile, out, PAID)
+        recorded = (out / "summary.json").read_text()
+
+        assert main(["compare-report", "--dir", str(out)]) == 0  # same inputs, same rules: nothing to keep
+        assert not (out / "summary.prev.json").exists()
+        same = (out / "summary.json").read_text()
+
+        assert main(["compare-report", "--dir", str(out), "--chat-cost-multiple", "7"]) == 0
+        assert (out / "summary.prev.json").read_text() == same
+        assert json.loads((out / "summary.json").read_text())["chat_cost_multiple"] == 7
+        assert json.loads(recorded)["chat_cost_multiple"] != 7
+
     def test_the_cost_multiple_defaults_to_the_recorded_one_and_can_be_overridden(
         self, monkeypatch, qfile, out, tmp_path
     ):
@@ -750,3 +858,19 @@ class TestRebuildFromDisk:
         assert _rebuild(out, tmp_path / "b.json", "--chat-cost-multiple", "2") == 0
         assert json.loads((tmp_path / "b.json").read_text())["chat_cost_multiple"] == 2
         assert _rebuild(out, tmp_path / "c.json", "--chat-cost-multiple", "0") == 2
+
+    @pytest.mark.parametrize("bad", ["nan", "inf"])
+    def test_a_non_finite_cost_multiple_override_is_refused(self, monkeypatch, qfile, out, tmp_path, capsys, bad):
+        self._finished(monkeypatch, qfile, out, PAID)
+        assert _rebuild(out, tmp_path / "s.json", f"--chat-cost-multiple={bad}") == 2
+        assert "--chat-cost-multiple" in capsys.readouterr().err
+        assert not (tmp_path / "s.json").exists()
+
+    def test_a_recorded_non_finite_cost_multiple_is_refused(self, monkeypatch, qfile, out, tmp_path, capsys):
+        self._finished(monkeypatch, qfile, out, PAID)
+        recorded = json.loads((out / "summary.json").read_text())
+        recorded["chat_cost_multiple"] = float("nan")
+        (out / "summary.json").write_text(json.dumps(recorded))  # what an older build wrote: a bare NaN
+        assert _rebuild(out, tmp_path / "s.json") == 2
+        assert "chat_cost_multiple" in capsys.readouterr().err
+        assert _rebuild(out, tmp_path / "s.json", "--chat-cost-multiple", "2") == 0  # an override repairs it
