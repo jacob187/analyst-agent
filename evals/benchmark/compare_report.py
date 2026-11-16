@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from evals.benchmark.compare_summary import judge_label
 from evals.benchmark.pricing import cost_text
 from evals.benchmark.report import (
     _columns,
@@ -120,9 +121,11 @@ def render_comparison_report(
     ids = list(models)
     _heading(pdf, "Analyst Agent model comparison", 18)
     as_of = summary["prices_as_of"]
+    judges = judge_label(summary)
     _paragraph(
         pdf,
-        f"Generated {summary['generated_at']}. Architecture: {summary['graph']}. Judge model: {summary['judge_model']}. "
+        f"Generated {summary['generated_at']}. Architecture: {summary['graph']}. "
+        f"{judges[0].upper()}{judges[1:]}. "
         "Prices as of: " + (", ".join(as_of) if as_of else "unknown (no price data; costs shown as unknown)"),
     )
     _paragraph(pdf, "Models: " + "; ".join(m + (" (reference)" if m == reference else "") for m in ids))
@@ -137,22 +140,24 @@ def render_comparison_report(
         _paragraph(pdf, f"WARNING: {warning}", style="B")
     pdf.ln(2)
 
-    excluded = summary.get("excluded_models", [])  # summary.json from before exclusions: absent
+    excluded = summary["excluded_models"]
     if excluded:
         _heading(pdf, "Excluded models (no usable run)", 12)
         for entry in excluded:
-            _paragraph(pdf, f"{entry['model_id']}: {entry['reason']}")
+            spent = "" if entry["cost_usd"] is None else f" (run cost {cost_text(entry['cost_usd'])}, counted below)"
+            _paragraph(pdf, f"{entry['model_id']}: {entry['reason']}{spent}")
         pdf.ln(2)
 
     _heading(pdf, "Per-model summary (means per question)", 12)
     rows = []
     for model_id, m in models.items():
         vs, means, q = m["vs_reference"], m["means"], m["questions"]
-        standing = m.get("reference_standing")  # absent in summary.json from before the derived standing
+        standing = m.get("reference_standing")  # only the reference's block has one
         ref_errors = (
             "-" if standing is None
-            else "unknown" if standing["unique_factual_errors"] is None
-            else f"{standing['unique_factual_errors']} (worst pairing)"
+            else f"unknown ({standing['answers_judged']}/{standing['answers']} judged)"
+            if standing["unique_factual_errors"] is None
+            else f"{standing['unique_factual_errors']} (distinct)"
         )
         rows.append([
             model_id + (" (ref)" if m["is_reference"] else ""),
@@ -163,7 +168,7 @@ def render_comparison_report(
             "-" if vs is None else str(vs["judge_errors"]),
             _num(means["llm_calls"], ".1f"), _num(means["total_tokens"], ".0f"),
             _num(means["latency_s"], ".1f"), cost_text(means["cost_usd"]),
-            "-" if not m.get("judge") else cost_text(m["judge"]["cost_usd"]),  # summary.json from before judge cost: absent
+            "-" if m["judge"] is None else cost_text(m["judge"]["cost_usd"]),
             m["prices_as_of"] or "unknown",
         ])
     _table(
@@ -173,14 +178,16 @@ def render_comparison_report(
         rows,
         [44, 17, 17, 15, 26, 15, 15, 17, 17, 20, 20, 21],
     )
-    costs = summary.get("costs")
-    if costs:
-        _paragraph(
-            pdf,
-            f"Run cost: {cost_text(costs['runs_usd'])}. Judge cost: {cost_text(costs['judge_usd'])}. "
-            f"Total (runs + judging): {cost_text(costs['total_usd'])}.",
-            style="B",
-        )
+    costs = summary["costs"]
+    excluded_usd = costs["excluded_runs_usd"]
+    _paragraph(
+        pdf,
+        f"Run cost: {cost_text(costs['runs_usd'])}"
+        + ("" if excluded_usd == 0 else f" (incl. {cost_text(excluded_usd)} for excluded runs)")
+        + f". Judge cost: {cost_text(costs['judge_usd'])}. "
+        f"Total (runs + judging): {cost_text(costs['total_usd'])}.",
+        style="B",
+    )
     pdf.ln(3)
 
     _heading(pdf, "Recommendations", 12)

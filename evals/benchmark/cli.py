@@ -81,6 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--yes", action="store_true", help="skip the cost confirmation prompt")
     compare.add_argument("--judge-model", help="judge model id (default: the free-tier model)")
     compare.add_argument(
+        "--allow-mixed-judges", action="store_true",
+        help="reuse judgements in --out made by another judge model than --judge-model "
+        "(refused by default; the summary then names the judge of each model and warns)",
+    )
+    compare.add_argument(
         "--chat-cost-multiple", type=float, default=DEFAULT_CHAT_COST_MULTIPLE,
         help="chat_default / filing_analysis may cost up to this multiple of the reference's cost per question",
     )
@@ -103,7 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compare_report.add_argument("--dir", type=Path, required=True, help="the compare-models --out directory")
     compare_report.add_argument("--out", type=Path, help="PDF file (default: <dir>/report.pdf)")
-    compare_report.add_argument("--summary-out", type=Path, help="summary JSON file (default: <dir>/summary.json)")
+    compare_report.add_argument(
+        "--summary-out", type=Path,
+        help="summary JSON file (default: <dir>/summary.json). An existing file whose content differs "
+        "(ignoring generated_at) is kept as <name>.prev.json first",
+    )
     compare_report.add_argument(
         "--chat-cost-multiple", type=float,
         help="override the cost multiple recorded in the directory's summary.json",
@@ -222,7 +231,10 @@ def _cmd_compare_models(args: argparse.Namespace) -> int:
     reference, models = compare.select_models(args.models, args.reference)
     questions = load_questions(args.questions)
     out = args.out or compare.default_out_dir(DEFAULT_REPORT_DIR, args.graph)
-    plan = compare.build_plan(args.graph, models, reference, args.judge_model, questions, args.only, out)
+    plan = compare.build_plan(
+        args.graph, models, reference, args.judge_model, questions, args.only, out,
+        allow_mixed_judges=args.allow_mixed_judges,
+    )
     estimate = compare.estimate_plan(plan, args.estimate_from, args.estimate_judge_from)
 
     print(f"Models: {', '.join(m.id + (' (reference)' if m.id == reference.id else '') for m in models)}")
@@ -252,7 +264,6 @@ def _cmd_compare_models(args: argparse.Namespace) -> int:
 def _cmd_compare_report(args: argparse.Namespace) -> int:
     from evals.benchmark import compare
     from evals.benchmark.compare_report import write_comparison_report
-    from evals.benchmark.runs import write_json
 
     if args.chat_cost_multiple is not None:
         check_cost_multiple(args.chat_cost_multiple)
@@ -260,10 +271,10 @@ def _cmd_compare_report(args: argparse.Namespace) -> int:
     summary, runs, judgements = compare.rebuild_comparison(args.dir, args.chat_cost_multiple)
     out = args.out or args.dir / compare.REPORT_FILE
     summary_out = args.summary_out or args.dir / compare.SUMMARY_FILE
-    write_json(summary_out, summary)
+    kept = compare.write_summary_keeping_previous(summary_out, summary)
     write_comparison_report(out, summary, runs, judgements)
     print(comparison_text(summary))
-    print(f"Wrote {summary_out} and {out}")
+    print(f"Wrote {summary_out} and {out}" + (f"; the previous summary is kept as {kept}" if kept else ""))
     return 0
 
 

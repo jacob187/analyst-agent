@@ -16,10 +16,10 @@ from evals.benchmark.compare_summary import (
     comparison_text,
     vs_reference,
 )
-from evals.benchmark.judge import judge_runs
+from evals.benchmark.judge import JudgeVerdict, judge_runs
 from evals.benchmark.runs import load_run
 from evals.benchmark.schemas import Pricing
-from tests.benchmark.helpers import FIXTURE_QUESTIONS, PRICED, UNPRICED, FakeJudge, pdf_text_blob, write_run
+from tests.benchmark.helpers import FIXTURE_QUESTIONS, PRICED, UNPRICED, FakeJudge, block, pdf_text_blob, write_run
 
 pytestmark = pytest.mark.eval_unit
 
@@ -39,6 +39,21 @@ def good(*qids: str) -> dict[str, str]:
 
 def _raise(_text):
     raise RuntimeError("judge exploded")
+
+
+def _relative_errors(text):
+    """Like FakeJudge, but an answer's WRONG counts as a unique error only if the other answer
+    does not repeat it (as the real judge's 'an error the other does not make')."""
+    first, second = block(text, "FIRST"), block(text, "SECOND")
+    winner = "first" if "GOOD" in first and "GOOD" not in second else (
+        "second" if "GOOD" in second and "GOOD" not in first else "tie"
+    )
+    return JudgeVerdict(
+        winner=winner,
+        first_has_unique_factual_error="WRONG" in first and first != second,
+        second_has_unique_factual_error="WRONG" in second and first != second,
+        rationale=f"picked {winner}",
+    )
 
 
 async def build(tmp_path, challengers, *, reference=None, decide=None, multiple=3.0):
@@ -290,8 +305,81 @@ class TestReferenceStanding:
         )
         standing = summary["models"]["ref-m"]["reference_standing"]
         assert standing["pairings_used"] == 3
-        assert standing["unique_factual_errors"] == 1  # the worst pairing, not 1 + 1 + 1
+        assert standing["unique_factual_errors"] == 1  # one distinct flawed answer, not 1 + 1 + 1
+        assert standing["flagged_ids"] == ["q-risk"]
         assert [p["unique_factual_errors"] for p in standing["pairings"]] == [1, 1, 1]
+
+    async def test_different_flawed_answers_flagged_by_different_pairings_are_all_counted(self, tmp_path):
+        # Each challenger repeats one of the reference's two mistakes, so the (relative) judge
+        # flags a different reference answer in each pairing: 1 per pairing, 2 distinct.
+        summary, _, _ = await build(
+            tmp_path,
+            {
+                "x-m": dict(pricing=CHEAP, answers={"q-news": "WRONG number"}),
+                "y-m": dict(pricing=CHEAP, answers={"q-risk": "WRONG claim"}),
+            },
+            reference={"answers": {"q-risk": "WRONG claim", "q-news": "WRONG number"}},
+            decide=_relative_errors,
+        )
+        standing = summary["models"]["ref-m"]["reference_standing"]
+        assert [p["unique_factual_errors"] for p in standing["pairings"]] == [1, 1]
+        assert standing["unique_factual_errors"] == 2
+        assert standing["flagged_ids"] == ["q-news", "q-risk"]
+        assert "2 unique factual errors" in summary["recommendations"]["free_trial"]["rationale"]
+
+    async def test_a_reference_judged_on_only_some_answers_is_not_shown_clean(self, tmp_path):
+        # The only challenger answered one question, so four reference answers were never judged.
+        summary, _, _ = await build(
+            tmp_path,
+            {"thin-m": dict(pricing=CHEAP, answers={qid: None for qid in IDS if qid != "q-risk"})},
+            reference={"pricing": CHEAPEST},
+        )
+        standing = summary["models"]["ref-m"]["reference_standing"]
+        assert standing["pairings_used"] == 1 and standing["pairings"][0]["judge_errors"] == 0
+        assert (standing["answers_judged"], standing["answers"]) == (1, len(IDS))
+        assert standing["unique_factual_errors"] is None
+        rec = summary["recommendations"]["free_trial"]
+        assert rec["model_id"] is None
+        assert f"only 1 of its {len(IDS)} answers" in rec["rationale"]
+
+    async def test_answers_judged_across_pairings_together_cover_the_reference(self, tmp_path):
+        first, rest = IDS[:2], IDS[2:]
+        summary, _, _ = await build(
+            tmp_path,
+            {
+                "x-m": dict(pricing=CHEAP, answers={qid: None for qid in rest}),
+                "y-m": dict(pricing=CHEAP, answers={qid: None for qid in first}),
+            },
+            reference={"pricing": CHEAPEST},
+        )
+        standing = summary["models"]["ref-m"]["reference_standing"]
+        assert standing["answers_judged"] == standing["answers"] == len(IDS)
+        assert standing["unique_factual_errors"] == 0
+
+    async def test_a_flaw_found_in_a_pairing_with_judge_errors_still_counts(self, tmp_path):
+        def errors_on_tech(text):
+            if "(q-tech)" in text:
+                raise RuntimeError("judge exploded")
+            return _relative_errors(text)
+
+        summary, _, _ = await build(
+            tmp_path, {"cheap-m": dict(pricing=CHEAP)},
+            reference={"answers": {"q-risk": "WRONG claim"}}, decide=errors_on_tech,
+        )
+        standing = summary["models"]["ref-m"]["reference_standing"]
+        assert standing["pairings"][0]["judge_errors"] == 1
+        assert standing["unique_factual_errors"] == 1  # a known flaw stays known
+
+    async def test_a_judge_error_on_an_unflagged_answer_leaves_the_count_unknown(self, tmp_path):
+        def errors_on_tech(text):
+            if "(q-tech)" in text:
+                raise RuntimeError("judge exploded")
+            return _relative_errors(text)
+
+        summary, _, _ = await build(tmp_path, {"cheap-m": dict(pricing=CHEAP)}, decide=errors_on_tech)
+        standing = summary["models"]["ref-m"]["reference_standing"]
+        assert (standing["answers_judged"], standing["answers"]) == (len(IDS) - 1, len(IDS))
+        assert standing["unique_factual_errors"] is None
 
     async def test_the_reverse_record_is_each_candidates_record_seen_from_the_reference(self, tmp_path):
         summary, _, _ = await build(
@@ -354,7 +442,9 @@ class TestReferenceStanding:
         summary, _, _ = await build(
             tmp_path, {"cheap-m": dict(pricing=CHEAP)}, reference={"answers": {"q-risk": "WRONG claim"}}
         )
-        assert "reference (unique errors 1, worst of 1 pairing)" in comparison_text(summary)
+        assert f"reference (unique errors 1 across 1 pairing; {len(IDS)}/{len(IDS)} answers judged)" in comparison_text(
+            summary
+        )
 
 
 class TestUnjudgedModel:
@@ -400,8 +490,22 @@ class TestExcludedModels:
             excluded={"gone-m": "run directory missing or unreadable"},
         )
         (entry,) = summary["excluded_models"]
-        assert entry == {"model_id": "gone-m", "run_dir": None, "reason": "run directory missing or unreadable"}
+        assert entry == {
+            "model_id": "gone-m", "run_dir": None, "reason": "run directory missing or unreadable", "cost_usd": None,
+        }
         assert any("gone-m" in w for w in summary["warnings"])
+        # Nothing on disk to price: the run's spend (if any) cannot be counted.
+        assert summary["costs"]["excluded_runs_usd"] == 0
+
+    async def test_an_excluded_runs_spend_is_counted_in_the_comparison_cost(self, tmp_path):
+        # Every failed question still recorded 1000 in / 200 out tokens: 5 x $0.004 at PRICED.
+        summary, _, _ = await build(tmp_path, {"dead-m": dict(pricing=PRICED, answers={qid: None for qid in IDS})})
+        (entry,) = summary["excluded_models"]
+        assert entry["cost_usd"] == pytest.approx(0.02)
+        assert summary["costs"]["excluded_runs_usd"] == pytest.approx(0.02)
+        assert summary["costs"]["runs_usd"] == pytest.approx(0.02 + 0.02)  # the reference + the excluded run
+        assert summary["costs"]["total_usd"] == pytest.approx(0.04)
+        assert "runs $0.0400 (incl. $0.0200 for excluded runs)" in comparison_text(summary)
 
     async def test_a_reference_that_answered_nothing_cannot_anchor_a_comparison(self, tmp_path):
         ref = load_run(write_run(tmp_path, "ref", model_id="ref-m", answers={qid: None for qid in IDS}))
