@@ -334,74 +334,6 @@ class SECDocumentProcessor:
             format_instructions=self.balance_sheet_parser.get_format_instructions(),
         )
 
-    def analyze_balance_sheet(
-        self, ticker: str, tenk: dict, tenq: dict
-    ) -> BalanceSheetAnalysis:
-        prompt = self.generate_balance_sheet_prompt(ticker, tenk, tenq)
-        try:
-            # Use the Langchain chain approach
-            chain = prompt | self.llm | self.balance_sheet_parser
-            return chain.invoke({})
-        except Exception as e:
-            print(f"Error processing balance sheet: {e}")
-            # Return fallback values
-            return BalanceSheetAnalysis(
-                ticker=ticker,
-                summary="Error analyzing balance sheet section.",
-                key_metrics=["Unable to extract key metrics."],
-                liquidity_analysis="Analysis unavailable due to processing error.",
-                solvency_analysis="Analysis unavailable due to processing error.",
-                growth_trends="Analysis unavailable due to processing error.",
-                financial_highlights=["Unable to extract financial highlights."],
-                red_flags=["Data processing error."],
-                comparison=None,
-            )
-
-    def analyze_mda(self, ticker: str, mda_data: Dict[str, Any]) -> MDnAAnalysis:
-        """Analyze the Management Discussion section from specified form."""
-        prompt = self.generate_mda_prompt(ticker, mda_data)
-        try:
-            # Use the Langchain chain approach
-            chain = prompt | self.llm | self.mda_parser
-            return chain.invoke({})
-        except Exception as e:
-            print(f"Error processing MD&A: {e}")
-            # Return fallback values
-            return MDnAAnalysis(
-                summary="Error analyzing MD&A section.",
-                key_points=["Unable to extract key points."],
-                financial_highlights=["Unable to extract financial highlights."],
-                future_outlook="Analysis unavailable due to processing error.",
-                sentiment_score=0.0,
-                sentiment_analysis="Analysis unavailable due to processing error.",
-                form_type=mda_data.get("metadata", {}).get("form", "Unknown"),
-                filing_metadata=mda_data.get("metadata", {}),
-                comparison=None,
-            )
-
-    def analyze_risk_factors(
-        self, ticker: str, risk_data: Dict[str, Any]
-    ) -> RiskFactorAnalysis:
-        """Analyze the Risk Factors section from specified form."""
-        prompt = self.generate_risk_factors_prompt(ticker, risk_data)
-        try:
-            # Use the Langchain chain approach
-            chain = prompt | self.llm | self.risk_parser
-            return chain.invoke({})
-        except Exception as e:
-            print(f"Error processing Risk Factors: {e}")
-            # Return fallback values
-            return RiskFactorAnalysis(
-                summary="Error analyzing Risk Factors section.",
-                key_risks=["Unable to extract key risks."],
-                risk_categories={"Processing Error": ["Unable to categorize risks."]},
-                sentiment_score=0.0,
-                sentiment_analysis="Analysis unavailable due to processing error.",
-                form_type=risk_data.get("metadata", {}).get("form", "Unknown"),
-                filing_metadata=risk_data.get("metadata", {}),
-                comparison=None,
-            )
-
     # ── 8-K analysis methods ──────────────────────────────────────────────
 
     def generate_earnings_prompt(
@@ -458,46 +390,6 @@ class SECDocumentProcessor:
             format_instructions=self.material_event_parser.get_format_instructions(),
         )
 
-    def analyze_earnings(
-        self, ticker: str, earnings_data: Dict[str, Any]
-    ) -> EarningsAnalysis:
-        """Analyze 8-K earnings release with structured financial data."""
-        prompt = self.generate_earnings_prompt(ticker, earnings_data)
-        try:
-            chain = prompt | self.llm | self.earnings_parser
-            return chain.invoke({})
-        except Exception as e:
-            print(f"Error processing earnings: {e}")
-            return EarningsAnalysis(
-                summary="Error analyzing earnings release.",
-                key_metrics=["Unable to extract key metrics."],
-                beats_misses=["Unable to determine beats or misses."],
-                guidance=None,
-                sentiment_score=0.0,
-                sentiment_analysis="Analysis unavailable due to processing error.",
-                filing_metadata=earnings_data.get("metadata", {}),
-            )
-
-    def analyze_material_event(
-        self, ticker: str, event_data: Dict[str, Any]
-    ) -> MaterialEventAnalysis:
-        """Analyze non-earnings 8-K material event."""
-        prompt = self.generate_material_event_prompt(ticker, event_data)
-        try:
-            chain = prompt | self.llm | self.material_event_parser
-            return chain.invoke({})
-        except Exception as e:
-            print(f"Error processing material event: {e}")
-            return MaterialEventAnalysis(
-                summary="Error analyzing material event.",
-                event_type=event_data.get("content_type", "unknown"),
-                key_points=["Unable to extract key points."],
-                impact_assessment="Analysis unavailable due to processing error.",
-                sentiment_score=0.0,
-                sentiment_analysis="Analysis unavailable due to processing error.",
-                filing_metadata=event_data.get("metadata", {}),
-            )
-
     # ── New section analysis methods ──────────────────────────────────────────
 
     def _text_section_prompt(
@@ -524,94 +416,6 @@ class SECDocumentProcessor:
             content_text=data.get("text", ""),
             format_instructions=parser.get_format_instructions(),
         )
-
-    def analyze_business_overview(
-        self, ticker: str, data: Dict[str, Any]
-    ) -> BusinessOverviewAnalysis:
-        """Analyze 10-K Item 1 — Business Overview."""
-        prompt = self._text_section_prompt(
-            BUSINESS_OVERVIEW_SYSTEM_PROMPT, BUSINESS_OVERVIEW_USER_TEMPLATE,
-            self.business_overview_parser, ticker, data,
-        )
-        try:
-            return (prompt | self.llm | self.business_overview_parser).invoke({})
-        except Exception as e:
-            print(f"Error processing Business Overview: {e}")
-            return BusinessOverviewAnalysis(
-                summary="Error analyzing Business Overview section.",
-                business_segments=["Unable to extract segments."],
-                key_products_services=["Unable to extract products/services."],
-                competitive_position="Analysis unavailable due to processing error.",
-                sentiment_score=0.0,
-                sentiment_analysis="Analysis unavailable due to processing error.",
-                filing_metadata=data.get("metadata", {}),
-            )
-
-    def analyze_cybersecurity(
-        self, ticker: str, data: Dict[str, Any]
-    ) -> CybersecurityAnalysis:
-        """Analyze 10-K Item 1C — Cybersecurity Risk Management."""
-        prompt = self._text_section_prompt(
-            CYBERSECURITY_SYSTEM_PROMPT, CYBERSECURITY_USER_TEMPLATE,
-            self.cybersecurity_parser, ticker, data,
-        )
-        try:
-            return (prompt | self.llm | self.cybersecurity_parser).invoke({})
-        except Exception as e:
-            print(f"Error processing Cybersecurity: {e}")
-            return CybersecurityAnalysis(
-                summary="Error analyzing Cybersecurity section.",
-                governance_overview="Analysis unavailable due to processing error.",
-                key_disclosures=["Unable to extract disclosures."],
-                red_flags=[],
-                sentiment_score=0.0,
-                sentiment_analysis="Analysis unavailable due to processing error.",
-                filing_metadata=data.get("metadata", {}),
-            )
-
-    def analyze_legal_proceedings(
-        self, ticker: str, data: Dict[str, Any]
-    ) -> LegalProceedingsAnalysis:
-        """Analyze 10-K Item 3 — Legal Proceedings."""
-        prompt = self._text_section_prompt(
-            LEGAL_PROCEEDINGS_SYSTEM_PROMPT, LEGAL_PROCEEDINGS_USER_TEMPLATE,
-            self.legal_proceedings_parser, ticker, data,
-        )
-        try:
-            return (prompt | self.llm | self.legal_proceedings_parser).invoke({})
-        except Exception as e:
-            print(f"Error processing Legal Proceedings: {e}")
-            return LegalProceedingsAnalysis(
-                summary="Error analyzing Legal Proceedings section.",
-                key_cases=["Unable to extract cases."],
-                red_flags=[],
-                overall_risk="Analysis unavailable due to processing error.",
-                sentiment_score=0.0,
-                sentiment_analysis="Analysis unavailable due to processing error.",
-                filing_metadata=data.get("metadata", {}),
-            )
-
-    def analyze_market_risk(
-        self, ticker: str, data: Dict[str, Any]
-    ) -> MarketRiskAnalysis:
-        """Analyze 10-K Item 7A — Market Risk."""
-        prompt = self._text_section_prompt(
-            MARKET_RISK_SYSTEM_PROMPT, MARKET_RISK_USER_TEMPLATE,
-            self.market_risk_parser, ticker, data,
-        )
-        try:
-            return (prompt | self.llm | self.market_risk_parser).invoke({})
-        except Exception as e:
-            print(f"Error processing Market Risk: {e}")
-            return MarketRiskAnalysis(
-                summary="Error analyzing Market Risk section.",
-                key_exposures=["Unable to extract exposures."],
-                risk_assessment="Analysis unavailable due to processing error.",
-                red_flags=[],
-                sentiment_score=0.0,
-                sentiment_analysis="Analysis unavailable due to processing error.",
-                filing_metadata=data.get("metadata", {}),
-            )
 
     # ── Async entry point (shared filing-analysis cache) ──────────────────────
 
@@ -660,9 +464,9 @@ class SECDocumentProcessor:
         'event', 'business', 'cybersecurity', 'legal', 'market_risk',
         'income_stmt', 'cashflow'.
 
-        Unlike the sync ``analyze_*`` methods, a failed LLM call or parse
-        raises instead of returning an "Error analyzing…" model, so a
-        transient failure is never persisted as the filing's analysis.
+        A failed LLM call or parse raises (never a placeholder "Error
+        analyzing…" model), so a transient failure is never persisted as the
+        filing's analysis.
         """
         prompt, parser = self._prompt_and_parser(analysis_type, ticker, raw_data)
         return await (prompt | self.llm | parser).ainvoke({})
@@ -693,49 +497,3 @@ class SECDocumentProcessor:
             tenq_data=str(raw_data.get("tenq") or "Not available"),
             format_instructions=parser.get_format_instructions(),
         )
-
-    def analyze_income_statement(
-        self, ticker: str, raw_data: Dict[str, Any]
-    ) -> IncomeStatementAnalysis:
-        """Analyze income statement XBRL data from 10-K (and optionally 10-Q)."""
-        prompt = self._financial_statement_prompt(
-            INCOME_STATEMENT_SYSTEM_PROMPT, INCOME_STATEMENT_USER_TEMPLATE,
-            self.income_statement_parser, ticker, raw_data,
-        )
-        try:
-            return (prompt | self.llm | self.income_statement_parser).invoke({})
-        except Exception as e:
-            print(f"Error processing Income Statement: {e}")
-            return IncomeStatementAnalysis(
-                summary="Error analyzing income statement.",
-                key_metrics=["Unable to extract key metrics."],
-                revenue_analysis="Analysis unavailable due to processing error.",
-                profitability_analysis="Analysis unavailable due to processing error.",
-                red_flags=[],
-                outlook="Analysis unavailable due to processing error.",
-                sentiment_score=0.0,
-                sentiment_analysis="Analysis unavailable due to processing error.",
-            )
-
-    def analyze_cashflow(
-        self, ticker: str, raw_data: Dict[str, Any]
-    ) -> CashFlowAnalysis:
-        """Analyze cash flow statement XBRL data from 10-K (and optionally 10-Q)."""
-        prompt = self._financial_statement_prompt(
-            CASH_FLOW_SYSTEM_PROMPT, CASH_FLOW_USER_TEMPLATE,
-            self.cash_flow_parser, ticker, raw_data,
-        )
-        try:
-            return (prompt | self.llm | self.cash_flow_parser).invoke({})
-        except Exception as e:
-            print(f"Error processing Cash Flow: {e}")
-            return CashFlowAnalysis(
-                summary="Error analyzing cash flow statement.",
-                key_metrics=["Unable to extract key metrics."],
-                operating_cash_flow_analysis="Analysis unavailable due to processing error.",
-                free_cash_flow_analysis="Analysis unavailable due to processing error.",
-                red_flags=[],
-                outlook="Analysis unavailable due to processing error.",
-                sentiment_score=0.0,
-                sentiment_analysis="Analysis unavailable due to processing error.",
-            )
