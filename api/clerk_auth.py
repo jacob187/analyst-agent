@@ -18,6 +18,7 @@ Configure via env:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -26,6 +27,7 @@ from typing import Any
 import httpx
 import jwt
 from jwt import PyJWKClient
+from jwt.exceptions import PyJWKClientConnectionError
 
 logger = logging.getLogger(__name__)
 
@@ -75,10 +77,21 @@ def _reset_cache_for_tests() -> None:
     _jwks_cache.clear()
 
 
+class ClerkVerifierUnavailable(RuntimeError):
+    """The token can't be checked at all: verification is misconfigured or
+    Clerk's JWKS is unreachable. Distinct from an invalid/expired token."""
+
+
 def verify_clerk_token(token: str) -> str | None:
     """Verify a Clerk session JWT and return the `sub` claim, or None on failure.
 
-    Never logs the token itself. Logs reasons for failure at WARN level.
+    Returns None for a token that fails verification (expired, bad signature,
+    wrong issuer, unknown key). Raises `ClerkVerifierUnavailable` when the
+    verifier itself can't run (CLERK_ISSUER_URL unset, JWKS fetch failed), so
+    callers don't mistake an outage for a signed-out user.
+
+    Never logs the token itself. Logs token failures at WARN level and
+    verifier faults at ERROR.
     """
     if not token or not isinstance(token, str):
         return None
@@ -86,8 +99,8 @@ def verify_clerk_token(token: str) -> str | None:
     issuer = _issuer()
     jwks_url = _jwks_url()
     if not issuer or not jwks_url:
-        logger.warning("Clerk verification requested but CLERK_ISSUER_URL is not set")
-        return None
+        logger.error("Clerk verification requested but CLERK_ISSUER_URL is not set")
+        raise ClerkVerifierUnavailable("CLERK_ISSUER_URL is not set")
 
     try:
         client = _get_jwk_client(jwks_url)
@@ -108,11 +121,13 @@ def verify_clerk_token(token: str) -> str | None:
     except jwt.InvalidSignatureError:
         logger.warning("Clerk token verification failed: bad signature")
         return None
+    except (PyJWKClientConnectionError, httpx.HTTPError, json.JSONDecodeError) as e:
+        # JSONDecodeError: the JWKS URL answered with something other than
+        # JSON (PyJWKClient doesn't wrap it), e.g. a wrong CLERK_JWKS_URL.
+        logger.error("Clerk JWKS fetch failed: %s", type(e).__name__)
+        raise ClerkVerifierUnavailable("Clerk JWKS fetch failed") from e
     except jwt.PyJWTError as e:
         logger.warning("Clerk token verification failed: %s", type(e).__name__)
-        return None
-    except httpx.HTTPError as e:
-        logger.warning("Clerk JWKS fetch failed: %s", type(e).__name__)
         return None
 
     sub = payload.get("sub")

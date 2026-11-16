@@ -43,6 +43,13 @@ def _disable_clerk_by_default(monkeypatch):
     monkeypatch.delenv("DISABLE_AUTH", raising=False)
     from api import dependencies
     dependencies._clerk_unconfigured_warned = False
+    monkeypatch.setattr(dependencies, "_ignored_token_warned", False, raising=False)
+
+
+def _ws_keys(auth: dict):
+    """resolve_ws_keys the way the chat route calls it: identity first."""
+    user_id, _reason = resolve_ws_identity(auth)
+    return resolve_ws_keys(auth, user_id=user_id)
 
 
 class TestGetApiKeys:
@@ -99,7 +106,7 @@ class TestResolveWsKeys:
             "tavily_api_key": "tav",
             "model_id": requested,
         }
-        result = resolve_ws_keys(auth)
+        result = _ws_keys(auth)
         assert result.google_api_key == "g"
         assert result.openai_api_key == "o"
         assert result.anthropic_api_key == "a"
@@ -109,13 +116,13 @@ class TestResolveWsKeys:
     @pytest.mark.eval_unit
     @patch.dict("os.environ", {"GOOGLE_API_KEY": "env-g"})
     def test_falls_back_to_env(self):
-        result = resolve_ws_keys({})
+        result = _ws_keys({})
         assert result.google_api_key == "env-g"
 
     @pytest.mark.eval_unit
     @patch.dict("os.environ", {"GOOGLE_API_KEY": "env-g"})
     def test_auth_takes_priority_over_env(self):
-        result = resolve_ws_keys({"google_api_key": "auth-g"})
+        result = _ws_keys({"google_api_key": "auth-g"})
         assert result.google_api_key == "auth-g"
 
 
@@ -208,12 +215,12 @@ class TestUserIdInGetApiKeys:
 class TestUserIdInWsKeys:
     @pytest.mark.eval_unit
     def test_resolves_user_id_from_auth(self):
-        result = resolve_ws_keys({"user_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"})
+        result = _ws_keys({"user_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"})
         assert result.user_id == "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
     @pytest.mark.eval_unit
     def test_invalid_user_id_in_auth(self):
-        result = resolve_ws_keys({"user_id": "garbage"})
+        result = _ws_keys({"user_id": "garbage"})
         assert result.user_id is None
 
 
@@ -682,7 +689,7 @@ class TestEnvKeyGate:
     @pytest.mark.eval_unit
     def test_ws_anon_does_not_inherit_env_key(self, clerk_env, monkeypatch):
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
-        result = resolve_ws_keys({})
+        result = _ws_keys({})
         assert result.google_api_key is None
 
     @pytest.mark.eval_unit
@@ -799,7 +806,7 @@ class TestClerkWsVerification:
         # resolve_ws_keys mirrors REST: a legacy UUID is unverifiable under
         # Clerk, so it resolves to anonymous.
         anon = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-        result = resolve_ws_keys({"user_id": anon})
+        result = _ws_keys({"user_id": anon})
         assert result.user_id is None
 
     @pytest.mark.eval_unit
@@ -815,10 +822,11 @@ class TestClerkWsVerification:
         assert result.is_operator_paid("google_genai") is True
 
     @pytest.mark.eval_unit
-    def test_ws_keys_token_only_resolves_identity_itself(self, clerk_env, rsa_keypair):
+    def test_ws_keys_takes_the_identity_it_is_given(self, clerk_env, rsa_keypair):
+        # No second verification path: the id comes only from the caller.
         priv, _ = rsa_keypair
-        result = resolve_ws_keys({"clerk_session_token": _make_token(priv)})
-        assert result.user_id == TEST_SUB
+        result = resolve_ws_keys({"clerk_session_token": _make_token(priv)}, user_id=None)
+        assert result.user_id is None
 
 
 class TestUserIdRegexClerkFormat:
@@ -895,19 +903,19 @@ class TestIsOperatorPaid:
     @pytest.mark.eval_unit
     def test_ws_auth_message_keys_are_user_provenance(self, monkeypatch):
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
-        keys = resolve_ws_keys({"google_api_key": "ws-user-key"})
+        keys = _ws_keys({"google_api_key": "ws-user-key"})
         assert keys.is_operator_paid("google_genai") is False
 
     @pytest.mark.eval_unit
     def test_ws_env_fallback_is_operator_paid(self, monkeypatch):
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
-        keys = resolve_ws_keys({})
+        keys = _ws_keys({})
         assert keys.is_operator_paid("google_genai") is True
 
     @pytest.mark.eval_unit
     def test_unknown_provider_returns_false(self, monkeypatch):
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
-        keys = resolve_ws_keys({})
+        keys = _ws_keys({})
         assert keys.is_operator_paid("not_a_real_provider") is False
 
 
@@ -1014,7 +1022,7 @@ class TestKeyForModel:
         set_operator_key(monkeypatch, lendable, "env-key")
         set_operator_key(monkeypatch, non_lendable, "env-key")
         priv, _ = rsa_keypair
-        keys = resolve_ws_keys({"clerk_session_token": _make_token(priv)})
+        keys = _ws_keys({"clerk_session_token": _make_token(priv)})
         assert keys.user_id == TEST_SUB
         assert keys.key_for_model(lendable) == "env-key"
         assert keys.key_for_model(non_lendable) is None
@@ -1026,7 +1034,7 @@ class TestKeyForModel:
     ):
         set_operator_key(monkeypatch, non_lendable, "env-key")
         priv, _ = rsa_keypair
-        keys = resolve_ws_keys({
+        keys = _ws_keys({
             "clerk_session_token": _make_token(priv),
             **byok_auth_field(non_lendable.provider, "user-key"),
         })
@@ -1038,7 +1046,7 @@ class TestKeyForModel:
         # Clerk unconfigured (conftest default): the env keys are the
         # operator's own, so the allowlist doesn't apply.
         set_operator_key(monkeypatch, non_lendable, "env-key")
-        keys = resolve_ws_keys({})
+        keys = _ws_keys({})
         assert keys.key_for_model(non_lendable) == "env-key"
 
     @pytest.mark.eval_unit
@@ -1047,7 +1055,7 @@ class TestKeyForModel:
         monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
         monkeypatch.setenv("DISABLE_AUTH", "true")
         set_operator_key(monkeypatch, non_lendable, "env-key")
-        keys = resolve_ws_keys({})
+        keys = _ws_keys({})
         assert keys.key_for_model(non_lendable) == "env-key"
 
 
@@ -1120,3 +1128,110 @@ class TestFreeTrial:
         )
         body = await env_keys(keys)
         assert body["free_trial_model_id"] is None
+
+
+class TestClerkMisconfiguration:
+    """A verifier that can't run (no issuer, JWKS unreachable) is an outage,
+    not an invalid token: it must surface instead of silently downgrading
+    every signed-in user to anonymous."""
+
+    @pytest.fixture
+    def no_issuer(self, clerk_env, monkeypatch):
+        monkeypatch.delenv("CLERK_ISSUER_URL", raising=False)
+        monkeypatch.delenv("CLERK_JWKS_URL", raising=False)
+
+    @pytest.fixture
+    def jwks_down(self, clerk_env, monkeypatch):
+        from jwt.exceptions import PyJWKClientConnectionError
+
+        def _unreachable(self, token):
+            raise PyJWKClientConnectionError("Fail to fetch data from the url")
+
+        monkeypatch.setattr("jwt.PyJWKClient.get_signing_key_from_jwt", _unreachable)
+
+    @pytest.fixture
+    def jwks_not_json(self, clerk_env, monkeypatch):
+        # What PyJWKClient.fetch_data lets escape when the URL serves HTML.
+        import json
+
+        def _html(self, token):
+            return json.loads("<!doctype html>")
+
+        monkeypatch.setattr("jwt.PyJWKClient.get_signing_key_from_jwt", _html)
+
+    @pytest.mark.eval_unit
+    @pytest.mark.parametrize("fault", ["no_issuer", "jwks_down", "jwks_not_json"])
+    async def test_rest_token_gets_503_and_an_error_log(
+        self, fault, request, rsa_keypair, caplog
+    ):
+        request.getfixturevalue(fault)
+        priv, _ = rsa_keypair
+        with caplog.at_level("ERROR"):
+            with pytest.raises(HTTPException) as exc:
+                await get_api_keys(x_user_id=None, x_clerk_session_token=_make_token(priv))
+        assert exc.value.status_code == 503
+        assert any(r.levelname == "ERROR" for r in caplog.records)
+
+    @pytest.mark.eval_unit
+    @pytest.mark.parametrize("fault", ["no_issuer", "jwks_down"])
+    def test_ws_token_gets_an_error_reason(self, fault, request, rsa_keypair):
+        request.getfixturevalue(fault)
+        priv, _ = rsa_keypair
+        user_id, reason = resolve_ws_identity({"clerk_session_token": _make_token(priv)})
+        assert user_id is None
+        assert "unavailable" in (reason or "").lower()
+
+    @pytest.mark.eval_unit
+    async def test_no_token_is_unaffected_by_a_broken_verifier(self, no_issuer):
+        keys = await get_api_keys(x_user_id=None, x_clerk_session_token=None)
+        assert keys.user_id is None
+
+    @pytest.mark.eval_unit
+    def test_endpoint_returns_503(self, no_issuer, rsa_keypair):
+        from fastapi.testclient import TestClient
+
+        from api.main import app
+
+        priv, _ = rsa_keypair
+        # The dependency refuses before the handler runs, so no DB is needed.
+        resp = TestClient(app).get(
+            "/env-keys", headers={"X-Clerk-Session-Token": _make_token(priv)}
+        )
+        assert resp.status_code == 503
+        assert "unavailable" in resp.json()["detail"].lower()
+
+
+class TestClerkTokenWithoutBackendClerk:
+    """Frontend signed in with Clerk, backend without CLERK_SECRET_KEY: the
+    token is ignored and the user is anonymous. Say so, once."""
+
+    def _token_warnings(self, caplog):
+        return [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and "Clerk session token" in r.getMessage()
+        ]
+
+    @pytest.mark.eval_unit
+    async def test_token_warns_once_naming_the_missing_setting(self, no_clerk_env, caplog):
+        with caplog.at_level("WARNING", logger="api.dependencies"):
+            for _ in range(2):
+                keys = await get_api_keys(x_user_id=None, x_clerk_session_token="some.jwt.token")
+                assert keys.user_id is None
+            resolve_ws_identity({"clerk_session_token": "some.jwt.token"})
+        warnings = self._token_warnings(caplog)
+        assert len(warnings) == 1
+        assert "CLERK_SECRET_KEY" in warnings[0].getMessage()
+        assert "some.jwt.token" not in warnings[0].getMessage()
+
+    @pytest.mark.eval_unit
+    async def test_no_token_no_warning(self, no_clerk_env, caplog):
+        with caplog.at_level("WARNING", logger="api.dependencies"):
+            await get_api_keys(x_user_id=None, x_clerk_session_token=None)
+        assert self._token_warnings(caplog) == []
+
+    @pytest.mark.eval_unit
+    async def test_auth_disabled_token_no_warning(self, no_clerk_env, monkeypatch, caplog):
+        monkeypatch.setenv("DISABLE_AUTH", "true")
+        with caplog.at_level("WARNING", logger="api.dependencies"):
+            await get_api_keys(x_user_id=None, x_clerk_session_token="some.jwt.token")
+        assert self._token_warnings(caplog) == []
