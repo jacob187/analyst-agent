@@ -2,9 +2,11 @@
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import os
+import secrets
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from langchain_core.messages import HumanMessage, AIMessage
@@ -63,12 +65,36 @@ FREE_TRIAL_AT_CAPACITY = (
     "Sign in or add your own API key in Settings to continue."
 )
 
+BUDGET_REACHED = (
+    "Daily LLM budget reached. Try again tomorrow or add your own API key in Settings."
+)
+
+
+_trace_hash_key: bytes | None = None
+
+
+def _user_hash_key() -> bytes:
+    """`TRACE_HASH_SECRET`, read once; else a random per-process key."""
+    global _trace_hash_key
+    if _trace_hash_key is None:
+        configured = os.getenv("TRACE_HASH_SECRET")
+        if configured:
+            _trace_hash_key = configured.encode()
+        else:
+            _trace_hash_key = secrets.token_bytes(32)
+            logger.info(
+                "TRACE_HASH_SECRET not set: trace user_hash tags use a per-process "
+                "key and won't correlate a user's runs across restarts"
+            )
+    return _trace_hash_key
+
 
 def _user_hash(user_id: str | None) -> str | None:
-    """Stable non-reversible tag for correlating a user's runs without exposing the id."""
+    """Stable non-reversible tag for correlating a user's runs without exposing
+    the id. Keyed (HMAC), so a Clerk id can't be confirmed by hashing it."""
     if not user_id:
         return None
-    return hashlib.sha256(user_id.encode()).hexdigest()[:16]
+    return hmac.new(_user_hash_key(), user_id.encode(), hashlib.sha256).hexdigest()[:16]
 
 
 def _record_span_error(span: Span, exc: Exception) -> None:
@@ -346,15 +372,16 @@ async def chat(websocket: WebSocket, ticker: str):
 
                     # Operator-paid: refuse up front once today's budget is
                     # spent; otherwise each LLM call is charged as it starts
+                    # and the run is stopped once the budget runs out
                     # (LLMCallCharger on the run config, below).
                     charger: LLMCallCharger | None = None
+                    budget_used = 0
                     if operator_paid:
                         try:
-                            await ensure_budget_available(user_id)
+                            budget_used = await ensure_budget_available(user_id)
                         except LLMBudgetExceeded:
                             await _safe_send(websocket, {
-                                "type": "error",
-                                "message": "Daily LLM budget reached. Try again tomorrow or add your own API key in Settings.",
+                                "type": "error", "message": BUDGET_REACHED,
                             })
                             continue
                     elif free_trial:
@@ -394,7 +421,7 @@ async def chat(websocket: WebSocket, ticker: str):
 
                     run_callbacks: list = []
                     if operator_paid and user_id:
-                        charger = LLMCallCharger(user_id)
+                        charger = LLMCallCharger(user_id, used=budget_used)
                         run_callbacks.append(charger)
                     try:
                         if session_id:
@@ -446,6 +473,13 @@ async def chat(websocket: WebSocket, ticker: str):
                                     "type": "error",
                                     "message": "The model took too long to respond. Please try a simpler query or try again.",
                                 })
+                            except LLMBudgetExceeded as e:
+                                # The budget ran out mid-run (LLMCallCharger).
+                                _record_span_error(span, e)
+                                logger.info("Daily LLM budget spent mid-query for %s", ticker)
+                                await _safe_send(websocket, {
+                                    "type": "error", "message": BUDGET_REACHED,
+                                })
                             except LLMConcurrencyExceeded as e:
                                 _record_span_error(span, e)
                                 logger.warning("LLM dispatch pool saturated for %s", ticker)
@@ -482,12 +516,18 @@ async def chat(websocket: WebSocket, ticker: str):
                                     llm.with_config(callbacks=run_callbacks)
                                     if run_callbacks else llm
                                 )
-                                conversation_history = await compress_history(
-                                    session_id, conversation_history, compress_llm
-                                )
-                                # Compression replaces history with a shorter list.
-                                # Reset the running tally so the next turn re-baselines.
-                                chars_so_far, messages_counted = 0, 0
+                                try:
+                                    conversation_history = await compress_history(
+                                        session_id, conversation_history, compress_llm
+                                    )
+                                except LLMBudgetExceeded:
+                                    # Keep the full history; the next query is
+                                    # refused by the pre-flight anyway.
+                                    logger.info("History summary skipped: daily LLM budget spent")
+                                else:
+                                    # Compression replaces history with a shorter list.
+                                    # Reset the running tally so the next turn re-baselines.
+                                    chars_so_far, messages_counted = 0, 0
                     finally:
                         # Also on a mid-stream disconnect: every call that
                         # started is charged before the handler returns.

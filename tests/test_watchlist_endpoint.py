@@ -443,6 +443,26 @@ class TestBriefingOperatorKeyGuard:
         assert _usage(CLERK_USER) == 1
 
     @pytest.mark.eval_unit
+    def test_generation_failure_detail_is_generic_and_logged(
+        self, budget_env, monkeypatch, lendable, caplog
+    ):
+        from agents.briefing.briefing_service import BriefingService
+
+        def _boom(self, tickers):
+            raise RuntimeError("upstream rejected key tvly-secret-123")
+
+        monkeypatch.setattr(BriefingService, "_gather_news", _boom)
+        with caplog.at_level("ERROR", logger="analyst.watchlist"):
+            resp = client.get(
+                "/watchlist/briefing",
+                headers={**HEADERS, "X-Model-Id": lendable.id, **byok_header(lendable.provider)},
+            )
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "Briefing generation failed"
+        assert "tvly-secret-123" not in resp.text
+        assert any(r.exc_info and "tvly-secret-123" in str(r.exc_info[1]) for r in caplog.records)
+
+    @pytest.mark.eval_unit
     def test_self_host_lends_operator_key_for_any_model(self, budget_env, non_lendable):
         # Clerk unconfigured: the operator is the user, every model is lendable.
         resp = client.get("/watchlist/briefing", headers={**HEADERS, "X-Model-Id": non_lendable.id})

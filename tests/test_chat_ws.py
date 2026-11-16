@@ -48,6 +48,38 @@ def client():
     return TestClient(app)
 
 
+class TestUserHash:
+    """Trace `user_hash` tags are keyed: a known Clerk id can't be confirmed
+    against exported spans by hashing it."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_key(self, monkeypatch):
+        monkeypatch.setattr(chat, "_trace_hash_key", None, raising=False)
+        monkeypatch.delenv("TRACE_HASH_SECRET", raising=False)
+
+    def test_keyed_by_trace_hash_secret(self, monkeypatch):
+        import hashlib
+        import hmac
+
+        monkeypatch.setenv("TRACE_HASH_SECRET", "s3cret")
+        expected = hmac.new(b"s3cret", b"user_abc", hashlib.sha256).hexdigest()[:16]
+        assert chat._user_hash("user_abc") == expected
+        assert chat._user_hash("user_abc") != hashlib.sha256(b"user_abc").hexdigest()[:16]
+
+    def test_without_secret_uses_a_stable_random_key_and_says_so_once(self, caplog):
+        import hashlib
+
+        with caplog.at_level(logging.INFO, logger="api.routes.chat"):
+            first = chat._user_hash("user_abc")
+            assert chat._user_hash("user_abc") == first
+        assert first != hashlib.sha256(b"user_abc").hexdigest()[:16]
+        notes = [r for r in caplog.records if "TRACE_HASH_SECRET" in r.getMessage()]
+        assert len(notes) == 1
+
+    def test_anonymous_has_no_hash(self):
+        assert chat._user_hash(None) is None
+
+
 class TestAuthFrameSizeCap:
     def test_oversized_auth_closed_with_1008(self, client, monkeypatch):
         # Cap at 1 KB so the test payload doesn't have to be huge.
@@ -1216,7 +1248,7 @@ class TestPerCallBudget:
 
         assert _usage(_SIGNED_IN) == 3
 
-    def test_query_admitted_below_budget_may_finish_past_it(self, client, temp_db, monkeypatch):
+    def test_run_stops_once_the_budget_is_spent_mid_query(self, client, temp_db, monkeypatch):
         import api.db as db_module
         from api import llm_concurrency
 
@@ -1229,11 +1261,40 @@ class TestPerCallBudget:
         with client.websocket_connect("/ws/chat/AAPL") as ws:
             ws.send_text(json.dumps({"type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE}))
             _drain_until(ws, "auth_success")
-            ws.send_text(json.dumps({"type": "query", "message": "what is 2 + 3?"}))
-            _drain_until(ws, "response")
+            # Admitted at 2 of 3: the first LLM call (the tool call) spends the
+            # last unit, the second is refused and the query ends with the
+            # budget message, not a generic error.
+            err = _trial_query(ws)
+            assert err["type"] == "error"
+            assert err["message"].startswith("Daily LLM budget reached.")
 
-            # Inside the block: TestClient stops the server loop on exit.
-            assert _wait_for_usage(_SIGNED_IN, 4) == 4
+            # The socket stays usable: the next query is refused up front.
+            err = _trial_query(ws)
+            assert err["message"].startswith("Daily LLM budget reached.")
+
+            assert _wait_for_usage(_SIGNED_IN, 3) == 3
+
+    def test_history_summary_refused_by_budget_keeps_the_session(self, client, temp_db, monkeypatch):
+        import api.db as db_module
+        from api import llm_concurrency
+
+        _wire_real_graph(monkeypatch)
+        set_operator_key(monkeypatch, _LENDABLE_MODEL)
+        monkeypatch.setattr(chat, "get_token_threshold", lambda _model_id: 0)
+        monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 3)
+        asyncio.run(db_module.increment_llm_usage(_SIGNED_IN))
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE}))
+            _drain_until(ws, "auth_success")
+            # 1 + 2 answering calls = 3: the summary call is refused, the
+            # answer still stands and the connection isn't torn down.
+            ws.send_text(json.dumps({"type": "query", "message": "what is 2 + 3?"}))
+            assert _drain_until(ws, "response")["message"] == "The total is 5."
+            err = _trial_query(ws)
+            assert err["message"].startswith("Daily LLM budget reached.")
+
+            assert _wait_for_usage(_SIGNED_IN, 3) == 3
 
     def test_byok_query_charges_nothing(self, client, temp_db, monkeypatch):
         _wire_real_graph(monkeypatch)

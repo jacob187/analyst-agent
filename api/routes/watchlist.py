@@ -116,9 +116,10 @@ async def get_briefing(
     # per LLM call actually made (LLMCallCharger below). BYOK requests spend
     # the user's own provider quota and are never charged.
     operator_paid = keys.is_operator_paid(model.provider)
+    budget_used = 0
     if operator_paid:
         try:
-            await ensure_budget_available(user_id)
+            budget_used = await ensure_budget_available(user_id)
         except LLMBudgetExceeded as e:
             raise HTTPException(status_code=429, detail=str(e))
 
@@ -134,7 +135,7 @@ async def get_briefing(
     prior = await get_recent_briefings(user_id=user_id, limit=1)
     previous_briefing = prior[0] if prior else None
 
-    charger = LLMCallCharger(user_id) if operator_paid else None
+    charger = LLMCallCharger(user_id, used=budget_used) if operator_paid else None
     run_config = {"callbacks": [charger]} if charger else None
     try:
         # BriefingService.generate is sync (yfinance + LLM); offload so it doesn't
@@ -157,10 +158,14 @@ async def get_briefing(
         raise HTTPException(status_code=504, detail="Briefing generation timed out")
     except LLMConcurrencyExceeded:
         raise HTTPException(status_code=503, detail="Server busy, retry shortly")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Briefing generation failed: {e}")
+    except Exception:
+        logger.exception("Briefing generation failed (tickers=%d)", len(tickers))
+        raise HTTPException(status_code=500, detail="Briefing generation failed")
     finally:
-        # Count the calls that were made even when the run failed or timed out.
+        # Wait for the charges of the calls made so far, also when the run
+        # failed or timed out. After a timeout the worker thread keeps going:
+        # a call it starts later is still charged (and a failed charge logged)
+        # by the charger, just not awaited here.
         if charger:
             await charger.settle()
 
