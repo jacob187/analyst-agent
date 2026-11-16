@@ -241,8 +241,11 @@ class TestCloseDbDrainsBackgroundWrites:
         assert any("stalled_write" in m and session_id in m for m in unfinished), unfinished
         assert _stored_messages(fresh_db, session_id) == []
 
-    @pytest.mark.parametrize("raw", ["soon", "-1"])
+    @pytest.mark.parametrize("raw", ["soon", "-1", "nan", "inf"])
     def test_invalid_drain_timeout_falls_back_to_default(self, monkeypatch, caplog, raw):
+        from agents import env_utils
+
+        monkeypatch.setattr(env_utils, "_warned", set())
         monkeypatch.setenv("DB_CLOSE_DRAIN_TIMEOUT_SECONDS", raw)
         caplog.set_level(logging.WARNING, logger="api.db")
         assert db_module._drain_timeout_seconds() == db_module.DEFAULT_DRAIN_TIMEOUT_SECONDS

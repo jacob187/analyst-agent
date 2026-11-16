@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from agents.env_utils import env_float
+
 logger = logging.getLogger(__name__)
 
 # Configurable via env var for deployment (e.g., DB_PATH=/data/analyst.db on Fly/Koyeb).
@@ -95,13 +97,20 @@ async def get_db() -> aiosqlite.Connection:
     global _db
     if _db is None:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _db = await aiosqlite.connect(DB_PATH)
-        _db.row_factory = aiosqlite.Row
-        # WAL mode allows concurrent reads during writes and prevents readers
-        # from blocking writers. busy_timeout retries instead of failing
-        # immediately when a write lock is held.
-        await _db.execute("PRAGMA journal_mode=WAL")
-        await _db.execute("PRAGMA busy_timeout=5000")
+        db = await aiosqlite.connect(DB_PATH)
+        try:
+            db.row_factory = aiosqlite.Row
+            # WAL mode allows concurrent reads during writes and prevents readers
+            # from blocking writers. busy_timeout retries instead of failing
+            # immediately when a write lock is held.
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute("PRAGMA busy_timeout=5000")
+        except BaseException:
+            # e.g. "file is not a database". The connection's worker thread is
+            # non-daemon: left open, it keeps the process from exiting.
+            await db.close()
+            raise
+        _db = db
     return _db
 
 async def init_db():
@@ -437,20 +446,9 @@ DEFAULT_DRAIN_TIMEOUT_SECONDS = 5.0
 
 def _drain_timeout_seconds() -> float:
     """``DB_CLOSE_DRAIN_TIMEOUT_SECONDS`` (read per call), else the default."""
-    raw = os.getenv("DB_CLOSE_DRAIN_TIMEOUT_SECONDS")
-    if raw is None:
-        return DEFAULT_DRAIN_TIMEOUT_SECONDS
-    try:
-        timeout = float(raw)
-    except ValueError:
-        timeout = -1.0
-    if timeout < 0:
-        logger.warning(
-            "Ignoring invalid DB_CLOSE_DRAIN_TIMEOUT_SECONDS=%r; using %ss",
-            raw, DEFAULT_DRAIN_TIMEOUT_SECONDS,
-        )
-        return DEFAULT_DRAIN_TIMEOUT_SECONDS
-    return timeout
+    return env_float(
+        "DB_CLOSE_DRAIN_TIMEOUT_SECONDS", DEFAULT_DRAIN_TIMEOUT_SECONDS, minimum=0
+    )
 
 
 async def _drain_background_writes() -> None:
@@ -532,23 +530,18 @@ async def get_or_create_session(ticker: str, user_id: str, model: str | None = N
     Entering AAPL always resumes that user's AAPL conversation — delete
     the session from History to start fresh. If several exist (legacy data),
     the most recently created one wins; rowid breaks created_at's 1-second ties.
-    A resumed session records `model` (when given) as the one now answering.
+    `model` is stored only on a new session; record the model answering a
+    resumed one with `update_session_model`.
     """
     async with _conn() as db:
         ticker = ticker.upper()
         async with db.execute(
-            "SELECT id, model FROM sessions WHERE ticker = ? AND user_id = ? "
+            "SELECT id FROM sessions WHERE ticker = ? AND user_id = ? "
             "ORDER BY created_at DESC, rowid DESC LIMIT 1",
             (ticker, user_id),
         ) as cursor:
             row = await cursor.fetchone()
         if row:
-            if model is not None and row["model"] != model:
-                await db.execute(
-                    "UPDATE sessions SET model = ? WHERE id = ? AND user_id = ?",
-                    (model, row["id"], user_id),
-                )
-                await db.commit()
             return row["id"]
         # No existing session — create one (and ensure company exists)
         session_id = str(uuid.uuid4())

@@ -17,6 +17,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -55,9 +56,30 @@ def test_passes_outside_production(monkeypatch):
     check_production_auth_config()
 
 
+_TEST_ISSUER = "https://test.clerk.test"
+
+
 def test_passes_with_clerk_configured_in_production(prod_env, monkeypatch):
     monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
+    monkeypatch.setenv("CLERK_ISSUER_URL", _TEST_ISSUER)
     monkeypatch.delenv("DISABLE_AUTH", raising=False)
+    check_production_auth_config()
+
+
+def test_refuses_when_clerk_issuer_unset_in_production(prod_env, monkeypatch):
+    # Without the issuer no token can be verified: every signed-in user
+    # would get 503s, so fail at boot instead.
+    monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
+    monkeypatch.delenv("CLERK_ISSUER_URL", raising=False)
+    monkeypatch.delenv("DISABLE_AUTH", raising=False)
+    with pytest.raises(RuntimeError, match="CLERK_ISSUER_URL"):
+        check_production_auth_config()
+
+
+def test_escape_hatch_overrides_missing_issuer(prod_env, monkeypatch):
+    monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
+    monkeypatch.delenv("CLERK_ISSUER_URL", raising=False)
+    monkeypatch.setenv("ANALYST_ALLOW_DISABLED_AUTH", "1")
     check_production_auth_config()
 
 
@@ -129,6 +151,7 @@ def test_app_refuses_to_start_in_prod_with_disable_auth(monkeypatch):
 def test_app_starts_in_prod_with_clerk_configured(monkeypatch):
     monkeypatch.setenv("ENV", "production")
     monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
+    monkeypatch.setenv("CLERK_ISSUER_URL", _TEST_ISSUER)
     # Production also requires a real SEC identity; set it here so the test
     # doesn't silently depend on a developer's .env.
     monkeypatch.setenv("SEC_HEADER", "Real Person real@example.com")
@@ -143,6 +166,54 @@ def test_app_starts_in_dev_without_clerk(monkeypatch):
     monkeypatch.delenv("DISABLE_AUTH", raising=False)
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
+
+
+def _aiosqlite_threads() -> list[threading.Thread]:
+    # aiosqlite names nothing; its worker runs `_connection_worker_thread`.
+    return [
+        t for t in threading.enumerate()
+        if getattr(getattr(t, "_target", None), "__name__", "") == "_connection_worker_thread"
+    ]
+
+
+def test_failed_db_init_closes_the_connection(tmp_path, monkeypatch):
+    """A corrupt DB fails startup; the connection opened for it must be closed,
+    or its non-daemon worker thread keeps uvicorn from exiting."""
+    monkeypatch.setenv("ENV", "development")
+    garbage = tmp_path / "garbage.db"
+    garbage.write_bytes(os.urandom(4096))
+    monkeypatch.setattr(db_module, "DB_PATH", garbage)
+    before = set(_aiosqlite_threads())
+
+    with pytest.raises(Exception, match="not a database"):
+        with TestClient(app):
+            pass
+
+    assert db_module._db is None
+    leaked = [t for t in _aiosqlite_threads() if t not in before]
+    for t in leaked:
+        t.join(timeout=2)
+    assert not [t for t in leaked if t.is_alive()]
+
+
+def test_schema_failure_after_connect_closes_the_connection(tmp_path, monkeypatch):
+    """The connection opens fine but a schema statement fails (a `sessions`
+    view can't be indexed): the lifespan must still close it."""
+    import sqlite3
+
+    monkeypatch.setenv("ENV", "development")
+    path = tmp_path / "view.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE VIEW sessions AS SELECT 1 AS x")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(db_module, "DB_PATH", path)
+
+    with pytest.raises(sqlite3.OperationalError, match="views may not be indexed"):
+        with TestClient(app):
+            pass
+
+    assert db_module._db is None
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +290,7 @@ def test_set_sec_identity_falls_back_to_default(monkeypatch):
 def test_app_refuses_to_start_in_prod_without_sec_header(monkeypatch):
     monkeypatch.setenv("ENV", "production")
     monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
+    monkeypatch.setenv("CLERK_ISSUER_URL", _TEST_ISSUER)
     monkeypatch.delenv("SEC_HEADER", raising=False)
     monkeypatch.delenv("DISABLE_AUTH", raising=False)
     monkeypatch.delenv("ANALYST_ALLOW_DISABLED_AUTH", raising=False)
@@ -230,6 +302,7 @@ def test_app_refuses_to_start_in_prod_without_sec_header(monkeypatch):
 def test_app_starts_in_prod_with_sec_header_configured(monkeypatch):
     monkeypatch.setenv("ENV", "production")
     monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
+    monkeypatch.setenv("CLERK_ISSUER_URL", _TEST_ISSUER)
     monkeypatch.setenv("SEC_HEADER", "Real Person real@example.com")
     monkeypatch.delenv("DISABLE_AUTH", raising=False)
     with TestClient(app) as client:
