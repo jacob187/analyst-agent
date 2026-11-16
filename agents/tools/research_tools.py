@@ -1,7 +1,9 @@
 """Tavily research tools for deep web research on companies and financial topics."""
 
 import asyncio
+import contextvars
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Awaitable, Callable, Optional
 
 from cachetools import TTLCache
@@ -25,6 +27,14 @@ _RESEARCH_MAX_POLLS = 30
 # socket timeout.
 _TAVILY_PER_CALL_TIMEOUT_SECONDS = 10
 
+# Timed-out requests can't be killed, so their threads linger until the socket
+# gives up. They live on this small dedicated pool instead of the loop's shared
+# default executor (auth, planner, SEC and chart work), so a Tavily stall can
+# at worst make news lookups soft-fail rather than starve the rest of the app.
+_TAVILY_TIMEOUT_POOL = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="tavily-timeout"
+)
+
 # Awaited before each billed search after the first (free-trial meter).
 ChargeFn = Callable[[], Awaitable[bool]]
 
@@ -34,11 +44,18 @@ async def _search_with_timeout(search: Any, query: str, timeout_s: float) -> Opt
     a wall-clock cap.
 
     Returns the result, or None on timeout. The hung worker thread is detached
-    (not killed) so the agent step can finish on schedule.
+    (not killed) onto _TAVILY_TIMEOUT_POOL so the agent step can finish on
+    schedule.
     """
+    loop = asyncio.get_running_loop()
+    # to_thread copies the context (tracing/callback vars); keep that here.
+    ctx = contextvars.copy_context()
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(search.invoke, {"query": query}), timeout_s,
+            loop.run_in_executor(
+                _TAVILY_TIMEOUT_POOL, ctx.run, search.invoke, {"query": query}
+            ),
+            timeout_s,
         )
     except asyncio.TimeoutError:
         return None

@@ -5,11 +5,14 @@ Anthropic quirk sets, so adding, removing or re-defaulting a model doesn't
 need a test edit. Only `init_chat_model` (the provider boundary) is mocked.
 """
 
+from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import pytest
+from langchain_anthropic import ChatAnthropic
 
 from agents.llm_factory import (
+    _ANTHROPIC_MIN_OUTPUT_TOKENS,
     _ANTHROPIC_LEGACY_BUDGET_MODELS,
     _ANTHROPIC_SAMPLING_MODELS,
     _PROVIDER_KEY_KWARG,
@@ -118,8 +121,22 @@ class TestCreateLlmContract:
         # has no profile for — too few once adaptive thinking spends some.
         create_llm(model.id, "fake-key")
 
-        expected = 16_000 if model.provider == "anthropic" else None
-        assert mock_init.call_args.kwargs.get("max_tokens") == expected
+        sent = mock_init.call_args.kwargs.get("max_tokens")
+        if model.provider == "anthropic":
+            assert sent is not None
+        else:
+            assert sent is None
+
+    @pytest.mark.parametrize("model_id", sorted(_ANTHROPIC_IDS))
+    def test_anthropic_max_tokens_is_never_below_the_library_default(self, mock_init, model_id):
+        # A model langchain-anthropic profiles at a higher output limit keeps it;
+        # one it falls back to 4096 for is raised to the floor.
+        create_llm(model_id, "fake-key")
+
+        library_default = ChatAnthropic.set_default_max_tokens({"model": model_id})["max_tokens"]
+        assert mock_init.call_args.kwargs["max_tokens"] == max(
+            library_default, _ANTHROPIC_MIN_OUTPUT_TOKENS
+        )
 
     @pytest.mark.parametrize("model", _ALL_MODELS, ids=_by_id)
     def test_thinking_kwargs_follow_provider_and_capability(self, mock_init, model):
@@ -156,7 +173,7 @@ class TestCreateLlmAnthropicSampling:
             f"anthropic:{model_id}",
             temperature=0,
             anthropic_api_key="fake-anthropic-key",
-            max_tokens=16_000,
+            max_tokens=mock.ANY,
         )
 
     @pytest.mark.parametrize("model_id", _NO_SAMPLING_IDS)
@@ -167,7 +184,7 @@ class TestCreateLlmAnthropicSampling:
         mock_init.assert_called_once_with(
             f"anthropic:{model_id}",
             anthropic_api_key="fake-anthropic-key",
-            max_tokens=16_000,
+            max_tokens=mock.ANY,
         )
 
     @pytest.mark.parametrize("model_id", sorted(_ANTHROPIC_SAMPLING_MODELS))
