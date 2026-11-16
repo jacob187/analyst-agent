@@ -13,6 +13,8 @@ from typing import Annotated, Any
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 DEFAULT_BRIEFING_DAYS = 7
+MIN_DAYS = 1
+MAX_DAYS = 365
 DEFAULT_8K_ITEM = "2.02"
 
 # Names a model may use for the free-text input of a search-style tool.
@@ -24,10 +26,17 @@ def _lenient_str(value: Any) -> str:
 
 
 def _lenient_days(value: Any) -> int:
+    """Coerce to a lookback window within MIN_DAYS..MAX_DAYS; never raises.
+
+    A validator exception other than ValueError would escape pydantic and abort
+    the agent turn, and SQLite's ``datetime('now', '-N days')`` yields NULL
+    (no rows) for negative or absurdly large N.
+    """
     try:
-        return int(value)
-    except (TypeError, ValueError):
+        days = int(value)
+    except (TypeError, ValueError, OverflowError):
         return DEFAULT_BRIEFING_DAYS
+    return max(MIN_DAYS, min(days, MAX_DAYS))
 
 
 class ToolArgs(BaseModel):

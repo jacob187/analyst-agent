@@ -88,13 +88,13 @@ def create_market_tools() -> list[StructuredTool]:
         StructuredTool.from_function(
             name="get_market_overview",
             description="Get current levels and daily change for S&P 500, Nasdaq, Dow Jones, and VIX. Use for broad market context, benchmark comparison, or answering macro market questions.",
-            func=lambda: _tool_market_overview(),
+            func=_tool_market_overview,
             args_schema=NoArgs,
         ),
         StructuredTool.from_function(
             name="get_macro_indicators",
             description="Get macro economic indicators: 10-Year and 5-Year Treasury yields, VIX volatility index, and US Dollar Index with 1-month changes. Use for interest rate context and macro environment analysis.",
-            func=lambda: _tool_macro_indicators(),
+            func=_tool_macro_indicators,
             args_schema=NoArgs,
         ),
     ]

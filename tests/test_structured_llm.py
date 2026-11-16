@@ -41,6 +41,9 @@ def test_anthropic_models_get_an_explicit_output_limit_above_the_4096_fallback()
         for thinking in (None, ThinkingConfig(enabled=True, level="medium")):
             llm = create_llm(model.id, "test-key", thinking=thinking)
             assert llm.max_tokens >= 16_000, (model.id, thinking)
+            # ...without lowering a model langchain-anthropic already profiles higher.
+            library_default = ChatAnthropic(model=model.id, api_key="test-key").max_tokens
+            assert llm.max_tokens >= library_default, (model.id, thinking)
 
 
 def test_other_providers_keep_their_default_method():
@@ -48,3 +51,11 @@ def test_other_providers_keep_their_default_method():
     llm = ChatGoogleGenerativeAI(model=google_id, google_api_key="test-key")
     kwargs = _bound_kwargs(structured_llm(llm, _Verdict))
     assert "output_config" not in kwargs
+
+
+def test_anthropic_support_is_a_hard_dependency_not_a_guarded_import():
+    # langchain-anthropic is a pinned dependency, so the factory imports it
+    # at module level rather than falling back when it's missing.
+    import agents.llm_factory as factory
+
+    assert factory.ChatAnthropic is ChatAnthropic

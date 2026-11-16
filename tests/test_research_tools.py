@@ -670,6 +670,38 @@ async def test_news_timeout_returns_soft_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_timed_out_news_call_does_not_hold_a_default_executor_thread(monkeypatch):
+    """A hung Tavily request outlives its timeout (requests.post has none), so
+    it must sit on the news tool's own pool, not the loop's shared executor
+    that auth, planner and SEC work also run on."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    release = threading.Event()
+
+    class _Hung:
+        def __init__(self, **kwargs):
+            pass
+
+        def invoke(self, payload):
+            release.wait(5)
+            return _NEWS_RESPONSE
+
+    monkeypatch.setattr(research_tools, "TavilySearch", _Hung)
+    monkeypatch.setattr(research_tools, "_TAVILY_PER_CALL_TIMEOUT_SECONDS", 0.05)
+    default_pool = ThreadPoolExecutor(max_workers=1)
+    asyncio.get_running_loop().set_default_executor(default_pool)
+    try:
+        out = await research_tools._tool_company_news("AAPL", "k", "basic")
+        assert out == "News retrieval timed out for AAPL."
+        # The only default-executor worker must still be free.
+        assert await asyncio.wait_for(asyncio.to_thread(lambda: "free"), 1) == "free"
+    finally:
+        release.set()
+        default_pool.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("name", list(_EXPECTED_BY_TOOL))
 async def test_trial_each_tool_charges_once_per_tavily_call(fixture_search, name):
     budget = _Budget(10)
