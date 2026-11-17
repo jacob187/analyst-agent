@@ -109,6 +109,12 @@ def _load_report(retriever, form: str):
         return report, getattr(retriever, f"_{slot}_metadata")
 
 
+def _eightk_report(retriever, report):
+    """``report`` (a pinned ``(EightK, FilingMetadata)``), else the
+    retriever's current 8-K via ``_load_report``."""
+    return report if report is not None else _load_report(retriever, "8-K")
+
+
 def _forget_form(retriever, form: str) -> None:
     """Drop every memoized extraction for ``form``. A thread still extracting
     under a dropped key finishes into its own flight, unreachable from here."""
@@ -477,9 +483,6 @@ class SECDataRetrieval:
         Raises if no 8-K is available."""
         return EightKReport(self, _load_report(self, "8-K"))
 
-    def _8k_report(self, report):
-        return report if report is not None else _load_report(self, "8-K")
-
     def get_8k_overview(self, *, report=None) -> Dict[str, Any]:
         """Overview of the latest 8-K: items, content type, earnings flag, dates.
 
@@ -488,7 +491,7 @@ class SECDataRetrieval:
         ``to_context(detail="standard")`` returns a ~300-token LLM-friendly summary.
         """
         try:
-            eightk, meta = self._8k_report(report)
+            eightk, meta = _eightk_report(self, report)
 
             def extract() -> Dict[str, Any]:
                 return {
@@ -523,7 +526,7 @@ class SECDataRetrieval:
             metadata = meta.to_dict() if meta else {}
             return {"text": "No 8-K item number given (e.g. '2.02').", "metadata": metadata, "found": False}
         try:
-            eightk, meta = self._8k_report(report)
+            eightk, meta = _eightk_report(self, report)
 
             def extract() -> Dict[str, Any]:
                 try:
@@ -553,7 +556,7 @@ class SECDataRetrieval:
         ``sec_llm_models.py`` handles interpretation.
         """
         try:
-            eightk, meta = self._8k_report(report)
+            eightk, meta = _eightk_report(self, report)
 
             def extract() -> Dict[str, Any]:
                 metadata = meta.to_dict() if meta else {}
