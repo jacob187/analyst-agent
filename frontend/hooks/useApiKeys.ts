@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { api } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
+import { useAuthReady } from "@/hooks/useAuthReady";
 import { AUTH_DISABLED } from "@/lib/constants";
 import type { ApiKeys, EnvKeysResponse, Model } from "@/types";
 
@@ -93,20 +93,32 @@ function writeKeys(updated: ApiKeys) {
 }
 
 export function useApiKeys() {
-  const { isSignedIn, isLoaded: authLoaded } = useAuth();
+  const { isSignedIn, userId, ready: authReady } = useAuthReady();
   const keys = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-  const [envKeys, setEnvKeys] = useState<EnvKeysResponse | null>(null);
-  const [envLoaded, setEnvLoaded] = useState(false);
+  const [env, setEnv] = useState<{
+    identity: string | null;
+    data: EnvKeysResponse | null;
+  } | null>(null);
   const [models, setModels] = useState<Model[]>([]);
   const [modelsLoaded, setModelsLoaded] = useState(false);
 
+  // /env-keys answers per caller (the server's keys are only lent to signed-in
+  // or self-host callers), so it is fetched once Clerk has settled and again
+  // whenever the identity changes. A response is only used for the identity it
+  // was fetched under, so a stale anonymous answer never reaches a signed-in user.
   useEffect(() => {
-    // Fetch server-side env key availability
+    if (!authReady) return;
+    let cancelled = false;
     api.envKeys()
-      .then(setEnvKeys)
-      .catch(() => {})
-      .finally(() => setEnvLoaded(true));
+      .then((data) => { if (!cancelled) setEnv({ identity: userId, data }); })
+      .catch(() => { if (!cancelled) setEnv({ identity: userId, data: null }); });
+    return () => { cancelled = true; };
+  }, [authReady, userId]);
 
+  const envCurrent = env !== null && env.identity === userId;
+  const envKeys = envCurrent ? env.data : null;
+
+  useEffect(() => {
     // A model id saved before a rename would otherwise count as an explicit
     // choice and lock an anonymous visitor out of the free trial.
     api.models()
@@ -120,11 +132,13 @@ export function useApiKeys() {
       .finally(() => setModelsLoaded(true));
   }, []);
 
-  // Gate consumers until the env-key probe, stale-model check, and Clerk auth
-  // have all resolved, so hasRequiredKeys() never runs while isSignedIn ===
-  // undefined (flashing the "sign in / add keys" panel at a signed-in user
-  // relying on the env key) or against a model id about to be cleared.
-  const loaded = envLoaded && modelsLoaded && authLoaded;
+  // Gate consumers until the stale-model check has resolved and /env-keys has
+  // answered for the current identity (which implies Clerk has settled), so
+  // hasRequiredKeys() never runs on an anonymous answer for a signed-in user
+  // (flashing the "sign in / add keys" panel) or against a model id about to
+  // be cleared. If Clerk never loads, the wait times out and the anonymous
+  // answer is used.
+  const loaded = envCurrent && modelsLoaded;
 
   // Mirrors the backend's resolve_model: an explicitly saved model runs on its
   // own key or not at all; with no saved choice the backend picks whichever
