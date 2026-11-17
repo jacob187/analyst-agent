@@ -1316,6 +1316,8 @@ class TestPerCallBudget:
         set_operator_key(monkeypatch, _LENDABLE_MODEL)
         units = llm_concurrency.call_units(_LENDABLE)
         monkeypatch.setattr(llm_concurrency, "LLM_GLOBAL_DAILY_BUDGET", 3 * units)
+        # The whole (tiny) pool is this user's to spend, so it's the global cap that stops them.
+        monkeypatch.setattr(llm_concurrency, "LLM_USER_GLOBAL_SHARE", 1.0)
         asyncio.run(db_module.increment_llm_usage(llm_concurrency.OPERATOR_GLOBAL_USAGE_KEY, 2 * units))
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:

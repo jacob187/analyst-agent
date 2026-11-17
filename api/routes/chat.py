@@ -39,8 +39,8 @@ from api.llm_concurrency import (
     LLMBudgetExceeded,
     LLMCallCharger,
     LLMConcurrencyExceeded,
-    LLMGlobalBudgetExceeded,
     ensure_budget_available,
+    refusal_message,
 )
 from api.rate_limit import check_rate_limit, client_ip
 from api.tracing import get_tracer
@@ -66,17 +66,6 @@ FREE_TRIAL_AT_CAPACITY = (
     "The free trial is at capacity for today. "
     "Sign in or add your own API key in Settings to continue."
 )
-
-BUDGET_REACHED = (
-    "Daily LLM budget reached. Try again tomorrow or add your own API key in Settings."
-)
-
-
-def _budget_message(e: LLMBudgetExceeded) -> str:
-    """What a refused user sees: their own budget, or everyone's (whose
-    exception message is already user-facing)."""
-    return str(e) if isinstance(e, LLMGlobalBudgetExceeded) else BUDGET_REACHED
-
 
 _trace_hash_key: bytes | None = None
 
@@ -389,7 +378,7 @@ async def chat(websocket: WebSocket, ticker: str):
                             budget_used = await ensure_budget_available(user_id)
                         except LLMBudgetExceeded as e:
                             await _safe_send(websocket, {
-                                "type": "error", "message": _budget_message(e),
+                                "type": "error", "message": refusal_message(e),
                             })
                             continue
                     elif free_trial:
@@ -486,7 +475,7 @@ async def chat(websocket: WebSocket, ticker: str):
                                 _record_span_error(span, e)
                                 logger.info("Daily LLM budget spent mid-query for %s: %s", ticker, e)
                                 await _safe_send(websocket, {
-                                    "type": "error", "message": _budget_message(e),
+                                    "type": "error", "message": refusal_message(e),
                                 })
                             except LLMConcurrencyExceeded as e:
                                 _record_span_error(span, e)

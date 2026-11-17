@@ -38,6 +38,7 @@ from api.llm_concurrency import (
     LLMCallCharger,
     llm_slot,
     read_budget_usage,
+    refusal_message,
 )
 from api.rate_limit import check_rest_rate_limit, client_ip, rate_limit_key
 from api.validators import TICKER_RE
@@ -591,9 +592,11 @@ async def _analyze_or_cache(
     but cached/done. ``cache_only`` (input failed to extract) serves a cache
     hit but returns 'unavailable' on a miss, silently.
     ``on_progress(status, extra)`` (optional) is called as the state advances so the SSE endpoint can stream progress; the
-    JSON endpoint passes None. ``charger`` (operator-paid requests only, from
+    JSON endpoint passes one only for the 8-K, to read its refusal message.
+    ``charger`` (operator-paid requests only, from
     `_budget_charger`) charges the daily budget as this section's LLM call
-    starts and refuses the call the budget can't cover ('budget_exceeded');
+    starts and refuses the call the budget can't cover ('budget_exceeded',
+    with the user-facing `refusal_message` as the progress ``message``);
     cache hits and skipped sections cost nothing.
     """
     form_type = filing.form
@@ -625,7 +628,7 @@ async def _analyze_or_cache(
         )
     except LLMBudgetExceeded as e:
         logger.info("[%s] BUDGET     %s/%s refused: %s", ticker, form_type, analysis_type, e)
-        progress("budget_exceeded", message=str(e))
+        progress("budget_exceeded", message=refusal_message(e))
         return "budget_exceeded", None
     except Exception as e:
         logger.error("[%s] LLM FAILED %s/%s: %s", ticker, form_type, analysis_type, e)
@@ -671,10 +674,6 @@ async def _budget_charger(charge_user_id: str | None) -> LLMCallCharger | None:
     if charge_user_id is None:
         return None
     return LLMCallCharger(charge_user_id, used=await read_budget_usage(charge_user_id))
-
-
-# The 8-K `reason` in the JSON response when its analysis was refused.
-_EIGHTK_BUDGET_REASON = "Not analyzed: daily LLM budget exceeded"
 
 
 @router.get("/{ticker}/filings")
@@ -734,11 +733,19 @@ async def get_company_filings(
     # `budget_exceeded`. Cache hits / BYOK / keyless reads cost nothing.
     charger = await _budget_charger(_budget_user(keys, api_key, model.provider))
 
+    # The refusal message a refused 8-K reports as its `reason`.
+    eightk_refusal: list[str] = []
+
+    def on_eightk_progress(status: str, extra: dict[str, Any]) -> None:
+        if status == "budget_exceeded":
+            eightk_refusal.append(extra["message"])
+
     # Resolve every section concurrently — cache hits return instantly, misses
     # with a key run their LLM calls concurrently.
     results = await asyncio.gather(*[
         _analyze_or_cache(
             ticker, _filing_ref(p), p["atype"], p["input"], model.id, api_key,
+            on_progress=on_eightk_progress if p["section"] == "eightk" else None,
             cache_only=p["cache_only"], charger=charger,
         )
         for p in plan
@@ -768,7 +775,7 @@ async def get_company_filings(
             response["eightk"] = {
                 "kind": eightk_kind,
                 "metadata": eightk.get("metadata", {}),
-                "reason": _EIGHTK_BUDGET_REASON,
+                "reason": eightk_refusal[0],
             }
         if data is None:
             continue

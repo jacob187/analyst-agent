@@ -15,9 +15,13 @@ Primitives:
   run config or the LLM, which also refuses calls once the budget is spent).
   The budget unit is one default-model call: each call is charged
   `call_units(model)` units, its price relative to the registry default.
-  Every charge also lands on a global row (`OPERATOR_GLOBAL_USAGE_KEY`)
-  capped by `LLM_GLOBAL_DAILY_BUDGET`, which bounds the operator's daily
-  spend across all signed-in users.
+  Every charge also lands on a global row (`OPERATOR_GLOBAL_USAGE_KEY`), in
+  the same transaction as the user's row, capped by `LLM_GLOBAL_DAILY_BUDGET`,
+  which bounds the operator's daily spend across all signed-in users. One
+  user may spend at most `LLM_USER_GLOBAL_SHARE` of that pool
+  (`user_daily_budget()`), so draining it for everyone takes about 1/share
+  accounts. That only bounds the damage of mass sign-ups; the real defence
+  is sign-up friction (Clerk bot protection, email verification).
 
 The cap and budget are env-tunable. Tests override the module constants via
 `monkeypatch.setattr` and call `_rebuild_semaphore()` to pick up a new
@@ -38,7 +42,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 
 from agents.env_utils import env_float, env_int
 from agents.model_registry import ModelDef, get_default_model, get_model
-from api.db import get_llm_usage, increment_llm_usage
+from api.db import get_llm_usage, increment_llm_usage_many
 
 logger = logging.getLogger(__name__)
 
@@ -58,10 +62,33 @@ LLM_DAILY_BUDGET = env_int("LLM_DAILY_BUDGET", 350, minimum=0)
 # 0 lends nothing (like LLM_DAILY_BUDGET=0). The anonymous free trial has its
 # own cap (ANON_FREE_DAILY_CAP) and isn't counted here.
 LLM_GLOBAL_DAILY_BUDGET = env_int("LLM_GLOBAL_DAILY_BUDGET", 1500, minimum=0)
+_DEFAULT_USER_GLOBAL_SHARE = 0.02
+
+
+def _user_global_share() -> float:
+    """`LLM_USER_GLOBAL_SHARE`, a fraction in (0, 1]; else the default."""
+    share = env_float("LLM_USER_GLOBAL_SHARE", _DEFAULT_USER_GLOBAL_SHARE, minimum=0)
+    if not 0 < share <= 1:
+        logger.warning(
+            "Ignoring LLM_USER_GLOBAL_SHARE=%s outside (0, 1]; using %s",
+            share, _DEFAULT_USER_GLOBAL_SHARE,
+        )
+        return _DEFAULT_USER_GLOBAL_SHARE
+    return share
+
+
+# Largest fraction of LLM_GLOBAL_DAILY_BUDGET one user may spend per UTC day,
+# so a handful of free accounts can't drain the pool for everyone: it takes
+# about 1/share of them. Sign-up friction is the real defence; this only
+# bounds the damage.
+LLM_USER_GLOBAL_SHARE = _user_global_share()
 # Pseudo user id of the global row in `user_llm_usage` — can't collide with
 # Clerk `user_...` ids, UUIDs or the free trial's `anon_trial:` keys.
 OPERATOR_GLOBAL_USAGE_KEY = "operator:global"
 
+BUDGET_REACHED = (
+    "Daily LLM budget reached. Try again tomorrow or add your own API key in Settings."
+)
 GLOBAL_BUDGET_REACHED = (
     "Today's free daily allowance is used up. "
     "Add your own API key in Settings to keep going, or try again tomorrow."
@@ -89,6 +116,11 @@ class LLMGlobalBudgetExceeded(LLMBudgetExceeded):
 
     def __init__(self, limit: int) -> None:
         super().__init__(limit, GLOBAL_BUDGET_REACHED)
+
+
+def refusal_message(exc: LLMBudgetExceeded) -> str:
+    """What a refused user is told: their own budget, or everyone's, ran out."""
+    return GLOBAL_BUDGET_REACHED if isinstance(exc, LLMGlobalBudgetExceeded) else BUDGET_REACHED
 
 
 class BudgetUsage(NamedTuple):
@@ -143,11 +175,20 @@ async def read_budget_usage(user_id: str) -> BudgetUsage:
     )
 
 
+def user_daily_budget() -> int:
+    """Budget units one user may spend today: `LLM_DAILY_BUDGET`, capped at
+    their share of a nonzero global budget (at least one unit)."""
+    if LLM_GLOBAL_DAILY_BUDGET <= 0:
+        return LLM_DAILY_BUDGET
+    share = max(1, math.floor(LLM_GLOBAL_DAILY_BUDGET * LLM_USER_GLOBAL_SHARE))
+    return min(LLM_DAILY_BUDGET, share)
+
+
 async def ensure_budget_available(user_id: str | None) -> BudgetUsage:
     """Raise if user_id, or all users together, already spent today's budget.
 
     The pre-flight for per-call charging: a request is refused when the
-    user's usage is at or over `LLM_DAILY_BUDGET` (`LLMBudgetExceeded`), or
+    user's usage is at or over `user_daily_budget()` (`LLMBudgetExceeded`), or
     everyone's is at or over `LLM_GLOBAL_DAILY_BUDGET`
     (`LLMGlobalBudgetExceeded`). Returns the usage it read (zeros for
     anonymous traffic, which is never charged) so an `LLMCallCharger` can
@@ -156,8 +197,9 @@ async def ensure_budget_available(user_id: str | None) -> BudgetUsage:
     if user_id is None:
         return BudgetUsage(user=0, overall=0)
     used = await read_budget_usage(user_id)
-    if used.user >= LLM_DAILY_BUDGET:
-        raise LLMBudgetExceeded(LLM_DAILY_BUDGET)
+    limit = user_daily_budget()
+    if used.user >= limit:
+        raise LLMBudgetExceeded(limit)
     if used.overall >= LLM_GLOBAL_DAILY_BUDGET:
         raise LLMGlobalBudgetExceeded(LLM_GLOBAL_DAILY_BUDGET)
     return used
@@ -213,12 +255,10 @@ def _called_model_id(kwargs: dict[str, Any]) -> str | None:
 
 
 async def _charge_units(user_id: str, units: int) -> BudgetUsage:
-    """Add `units` to the user's and the global usage, one update each;
+    """Add `units` to the user's and the global usage in one transaction;
     return both counts after the charge."""
-    return BudgetUsage(
-        user=await increment_llm_usage(user_id, units),
-        overall=await increment_llm_usage(OPERATOR_GLOBAL_USAGE_KEY, units),
-    )
+    counts = await increment_llm_usage_many({user_id: units, OPERATOR_GLOBAL_USAGE_KEY: units})
+    return BudgetUsage(user=counts[user_id], overall=counts[OPERATOR_GLOBAL_USAGE_KEY])
 
 
 class LLMCallCharger(BaseCallbackHandler):
@@ -243,7 +283,7 @@ class LLMCallCharger(BaseCallbackHandler):
     — starting from `used` (what the pre-flight read — required, so a caller
     can't silently start from 0) plus its own charges, and raised to the
     counts each DB increment returns, which include other requests' charges.
-    A call whose units would take the user past `LLM_DAILY_BUDGET` raises
+    A call whose units would take the user past `user_daily_budget()` raises
     `LLMBudgetExceeded`, or everyone past `LLM_GLOBAL_DAILY_BUDGET`
     `LLMGlobalBudgetExceeded`, from the LLM call (`raise_error`), so the run
     stops. The model is the one
@@ -282,9 +322,10 @@ class LLMCallCharger(BaseCallbackHandler):
 
     def _charge(self, kwargs: dict[str, Any]) -> None:
         units = call_units(_called_model_id(kwargs))
+        limit = user_daily_budget()
         with self._lock:
-            if self._used + units > LLM_DAILY_BUDGET:
-                raise LLMBudgetExceeded(LLM_DAILY_BUDGET)
+            if self._used + units > limit:
+                raise LLMBudgetExceeded(limit)
             if self._overall + units > LLM_GLOBAL_DAILY_BUDGET:
                 raise LLMGlobalBudgetExceeded(LLM_GLOBAL_DAILY_BUDGET)
             self._used += units

@@ -430,6 +430,33 @@ async def increment_llm_usage(user_id: str, amount: int = 1) -> int:
         return row["count"]
 
 
+async def increment_llm_usage_many(amounts: dict[str, int]) -> dict[str, int]:
+    """Add each amount to today's LLM usage of its key, in one transaction;
+    return each key's new count.
+
+    Either every row is incremented or none is (a failed or cancelled
+    statement rolls the others back), so counters that must agree — a
+    user's row and the global row — can't drift apart.
+    """
+    today = _today_utc()
+    counts: dict[str, int] = {}
+    async with _conn() as db:
+        for user_id, amount in amounts.items():
+            async with db.execute(
+                """
+                INSERT INTO user_llm_usage (user_id, date, count)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, date) DO UPDATE SET count = count + excluded.count
+                RETURNING count
+                """,
+                (user_id, today, amount),
+            ) as cursor:
+                row = await cursor.fetchone()
+            counts[user_id] = row["count"]
+        await db.commit()
+    return counts
+
+
 async def get_llm_usage(user_id: str) -> int:
     """Return today's LLM dispatch count for user_id, or 0 if none."""
     today = _today_utc()

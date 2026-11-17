@@ -20,6 +20,7 @@ from api.llm_concurrency import (
     LLMConcurrencyExceeded,
     ensure_budget_available,
     llm_slot,
+    refusal_message,
 )
 from api.rate_limit import check_rest_rate_limit, rate_limit_key
 
@@ -122,7 +123,7 @@ async def get_briefing(
         try:
             budget_used = await ensure_budget_available(user_id)
         except LLMBudgetExceeded as e:
-            raise HTTPException(status_code=429, detail=str(e))
+            raise HTTPException(status_code=429, detail=refusal_message(e))
 
     thinking = ThinkingConfig(enabled=True, level="medium") if model.thinking_capable else None
     llm = create_llm(model.id, api_key, thinking=thinking)
@@ -159,6 +160,10 @@ async def get_briefing(
         raise HTTPException(status_code=504, detail="Briefing generation timed out")
     except LLMConcurrencyExceeded:
         raise HTTPException(status_code=503, detail="Server busy, retry shortly")
+    except LLMBudgetExceeded as e:
+        # The pre-flight passed, but the charger refused the call itself (it
+        # costs more units than were left).
+        raise HTTPException(status_code=429, detail=refusal_message(e))
     except Exception:
         logger.exception("Briefing generation failed (tickers=%d)", len(tickers))
         raise HTTPException(status_code=500, detail="Briefing generation failed")
