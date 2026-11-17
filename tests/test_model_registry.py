@@ -151,6 +151,13 @@ class TestModelDefImmutability:
 
 _PRICE_KEYS = ("input_price_per_mtok", "output_price_per_mtok", "prices_as_of")
 
+# Most a lendable model's blended price may be, as a multiple of the default's.
+_MAX_LENDABLE_PRICE_MULTIPLE = 3.0
+
+
+def _blended(model):
+    return model.input_price_per_mtok + model.output_price_per_mtok
+
 
 def _entry(**overrides):
     base = {
@@ -189,6 +196,25 @@ class TestOperatorLendable:
     def test_lendable_must_be_a_real_bool(self, bad):
         with pytest.raises(ValidationError):
             _build_registry([_entry(operator_lendable=bad)])
+
+    def test_lendable_models_are_priced(self):
+        # An unpriced model is charged a flat 1 budget unit per call, so lending
+        # one would let it run at the default model's rate whatever it costs.
+        unpriced = [e["id"] for e in _RAW if e["operator_lendable"] and e["input_price_per_mtok"] is None]
+        assert not unpriced, f"lendable models without a price: {unpriced}"
+
+    def test_lendable_models_are_cheap(self):
+        # The operator's key pays for lendable models, so only budget-tier
+        # models may be lent: none may cost more than a small multiple of the
+        # default model (blended input + output price per Mtok).
+        default = flagged_default_model()
+        assert default.input_price_per_mtok is not None, "default model must be priced"
+        ceiling = _MAX_LENDABLE_PRICE_MULTIPLE * _blended(default)
+        too_pricey = {
+            m.id: _blended(m) for m in get_all_models()
+            if m.operator_lendable and m.input_price_per_mtok is not None and _blended(m) > ceiling
+        }
+        assert not too_pricey, f"lendable models above {ceiling:.2f}/Mtok blended: {too_pricey}"
 
 
 class TestPriceFields:
