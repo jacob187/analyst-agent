@@ -804,17 +804,18 @@ async def test_time_queued_for_a_thread_does_not_count_against_the_call(monkeypa
 
         def invoke(self, payload):
             type(self).calls += 1
-            time.sleep(0.2)
+            time.sleep(0.5)
             return _NEWS_RESPONSE
 
     pool = ThreadPoolExecutor(max_workers=1)
     monkeypatch.setattr(research_tools, "_TAVILY_POOL", pool)
     monkeypatch.setattr(research_tools, "TavilySearch", _Slow)
-    monkeypatch.setattr(research_tools, "_TAVILY_PER_CALL_TIMEOUT_SECONDS", 0.35)
+    # Above one request (0.5s), below one queued wait plus one request (1s).
+    monkeypatch.setattr(research_tools, "_TAVILY_PER_CALL_TIMEOUT_SECONDS", 0.8)
     try:
-        outs = await asyncio.gather(*(
+        outs = await asyncio.wait_for(asyncio.gather(*(
             research_tools._tool_company_news("AAPL", "k", "basic") for _ in range(2)
-        ))
+        )), 10)
     finally:
         pool.shutdown(wait=True)
     assert outs == [_EXPECTED_NEWS, _EXPECTED_NEWS]
@@ -827,17 +828,23 @@ async def test_call_that_gets_no_thread_soft_fails_without_running(hung_search, 
     pool = ThreadPoolExecutor(max_workers=1)
     monkeypatch.setattr(research_tools, "_TAVILY_POOL", pool)
     monkeypatch.setattr(research_tools, "_TAVILY_PER_CALL_TIMEOUT_SECONDS", 5)
-    monkeypatch.setattr(research_tools, "_TAVILY_QUEUE_TIMEOUT_SECONDS", 0.05)
-    try:
-        first = asyncio.create_task(research_tools._tool_tavily_search("AAPL", "q", "k", "basic"))
+
+    async def first_call_running():
         while _HungSearch.calls == 0:
             await asyncio.sleep(0.01)
+
+    try:
+        # The first call gets the only thread under the default queue cap;
+        # only then is the cap shortened for the call queued behind it.
+        first = asyncio.create_task(research_tools._tool_tavily_search("AAPL", "q", "k", "basic"))
+        await asyncio.wait_for(first_call_running(), 5)
+        monkeypatch.setattr(research_tools, "_TAVILY_QUEUE_TIMEOUT_SECONDS", 0.05)
         out = await asyncio.wait_for(
             research_tools._tool_competitor_analysis("AAPL", "k", "basic"), 2
         )
         assert out.startswith("Failed to analyze competitors")
         hung_search.release.set()
-        await first
+        await asyncio.wait_for(first, 5)
     finally:
         hung_search.release.set()
         pool.shutdown(wait=True)
