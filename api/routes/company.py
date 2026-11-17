@@ -24,18 +24,18 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from agents.sec_workflow.analysis_cache import (
     FORMS,
     FilingRef,
-    eightk_input,
+    eightk_overview_and_input,
     eightk_kind,
     get_or_analyze,
     get_retriever,
     latest_filings,
     run_analysis,
 )
+from agents.sec_workflow.get_SEC_data import _load_report
 from api.dependencies import ApiKeys, get_api_keys, resolve_model
 from api.llm_concurrency import (
     LLMBudgetExceeded,
     LLMCallCharger,
-    ensure_budget_available,
     llm_slot,
 )
 from api.rate_limit import check_rest_rate_limit, client_ip, rate_limit_key
@@ -262,6 +262,49 @@ def _build_edgar_url(cik: str, accession: str) -> str:
     return f"https://www.sec.gov/Archives/edgar/data/{cik}/{cleaned}/"
 
 
+def _paired_read(retriever, form: str, read) -> tuple[Any, dict[str, Any]]:
+    """``(read(), metadata of the filing it read)`` for a getter that doesn't
+    report its filing (the XBRL statements). The shared retriever can move to
+    a newer filing mid-request (a concurrent freshness refresh), so the
+    filing (report + metadata, read together) is checked before and after;
+    a read that straddled a swap is retried once, then dropped as
+    ``(None, {})``."""
+    try:
+        for _ in range(2):
+            report, meta = _load_report(retriever, form)
+            value = read()
+            after_report, after_meta = _load_report(retriever, form)
+            if after_report is report and after_meta is meta:
+                return value, meta.to_dict() if meta else {}
+        logger.info("[%s] %s changed during every read; section skipped", retriever.ticker, form)
+    except Exception as e:
+        logger.warning("[%s] %s read failed: %s", retriever.ticker, form, e)
+    return None, {}
+
+
+def _balance_sheet_read(retriever, form: str) -> tuple[str, dict[str, Any]]:
+    """``(balance sheet text, metadata of its filing)``; ``""`` when it
+    can't be extracted (the section is then planned cache_only)."""
+    try:
+        text, meta = retriever.balance_sheet_text(form)
+    except Exception as e:
+        logger.warning("[%s] %s balance sheet extraction failed: %s", retriever.ticker, form, e)
+        return "", {}
+    return text, meta.to_dict() if meta else {}
+
+
+def _statement_reads(retriever, form: str) -> dict[str, Any]:
+    """XBRL income and cash-flow statements of ``form``, each with the
+    metadata of the filing it was read from (``read_metadata``)."""
+    income, income_meta = _paired_read(retriever, form, lambda: retriever.get_income_statement(form))
+    cashflow, cashflow_meta = _paired_read(retriever, form, lambda: retriever.get_cashflow_statement(form))
+    return {
+        "income_stmt_raw": income,
+        "cashflow_raw": cashflow,
+        "read_metadata": {"income_stmt_raw": income_meta, "cashflow_raw": cashflow_meta},
+    }
+
+
 def _fetch_filing_data(ticker: str, fetch_raw: bool = True) -> dict[str, Any]:
     """Synchronous SEC data fetching — runs in a thread pool.
 
@@ -276,7 +319,10 @@ def _fetch_filing_data(ticker: str, fetch_raw: bool = True) -> dict[str, Any]:
     class is a press-release wrapper without structured section access.
 
     Reads the shared per-ticker retriever; ``_load_filing_data`` syncs it with
-    EDGAR's latest filings first.
+    EDGAR's latest filings first. A concurrent refresh can still move it to a
+    newer filing mid-extraction, so every raw read carries the metadata of
+    the filing it actually came from (section results their ``metadata``,
+    the rest ``read_metadata``) and ``_plan_sections`` keys by that.
     """
     retriever = get_retriever(ticker)
     result: dict[str, Any] = {"ticker": ticker}
@@ -294,17 +340,17 @@ def _fetch_filing_data(ticker: str, fetch_raw: bool = True) -> dict[str, Any]:
                 },
             }
             if fetch_raw:
+                tenk["risk_raw"] = retriever.get_risk_factors_raw("10-K")
+                tenk["mda_raw"] = retriever.get_mda_raw("10-K")
+                tenk["balance_sheet_raw"], balance_meta = _balance_sheet_read(retriever, "10-K")
                 tenk.update({
-                    "risk_raw": retriever.get_risk_factors_raw("10-K"),
-                    "mda_raw": retriever.get_mda_raw("10-K"),
-                    "balance_sheet_raw": retriever.extract_balance_sheet_as_str("tenk"),
                     "business_raw": retriever.get_business_raw(),
                     "cyber_raw": retriever.get_cybersecurity_raw(),
                     "legal_raw": retriever.get_legal_proceedings_raw(),
                     "market_risk_raw": retriever.get_market_risk_raw("10-K"),
-                    "income_stmt_raw": retriever.get_income_statement("10-K"),
-                    "cashflow_raw": retriever.get_cashflow_statement("10-K"),
+                    **_statement_reads(retriever, "10-K"),
                 })
+                tenk["read_metadata"]["balance_sheet_raw"] = balance_meta
             result["tenk"] = tenk
     except (ValueError, Exception):
         # Foreign filers (BP, BABA, TSM) file 20-F instead of 10-K.
@@ -346,8 +392,7 @@ def _fetch_filing_data(ticker: str, fetch_raw: bool = True) -> dict[str, Any]:
                 tenq.update({
                     "risk_raw": retriever.get_risk_factors_raw("10-Q"),
                     "mda_raw": retriever.get_mda_raw("10-Q"),
-                    "income_stmt_raw": retriever.get_income_statement("10-Q"),
-                    "cashflow_raw": retriever.get_cashflow_statement("10-Q"),
+                    **_statement_reads(retriever, "10-Q"),
                 })
             result["tenq"] = tenq
     except (ValueError, Exception):
@@ -355,33 +400,31 @@ def _fetch_filing_data(ticker: str, fetch_raw: bool = True) -> dict[str, Any]:
 
     # --- 8-K (earnings or material event) ---
     # The overview (kind + accession) is needed even keyless to pick the cache
-    # key; only the per-item/earnings extraction is gated on fetch_raw.
+    # key; only the per-item/earnings extraction is gated on fetch_raw. The
+    # overview, its metadata (the cache key) and the input all come from one
+    # loaded 8-K, as in the chat 8-K tool.
     try:
-        overview = retriever.get_8k_overview()
+        if fetch_raw:
+            overview, raw = eightk_overview_and_input(retriever)
+        else:
+            overview, raw = retriever.get_8k_overview(), {}
         if not overview.get("found"):
             result["eightk"] = {
                 "kind": "none",
                 "reason": overview.get("text", "No 8-K available"),
             }
         else:
-            eightk_meta = retriever._eightk_metadata
+            read_meta = overview.get("metadata") or {}
             metadata = {
-                **(eightk_meta.to_dict() if eightk_meta else {}),
-                "edgar_url": _build_edgar_url(
-                    eightk_meta.cik, eightk_meta.accession
-                ) if eightk_meta else "",
+                **read_meta,
+                "edgar_url": _build_edgar_url(read_meta.get("cik", ""), read_meta.get("accession", "")),
                 "form_type": "8-K",
             }
             kind = eightk_kind(overview)
-            if not fetch_raw:
-                result["eightk"] = {"kind": kind, "raw": {}, "metadata": metadata}
-            else:
-                # Same input builder the chat 8-K tool uses.
-                kind, raw = eightk_input(retriever, overview, metadata)
-                result["eightk"] = {"kind": kind, "raw": raw, "metadata": metadata}
-                if kind == "event" and not raw["text"]:
-                    primary_item = raw["items"][0] if raw["items"] else None
-                    result["eightk"]["reason"] = f"8-K item {primary_item} could not be extracted"
+            result["eightk"] = {"kind": kind, "raw": raw, "metadata": metadata}
+            if fetch_raw and kind == "event" and not raw["text"]:
+                primary_item = raw["items"][0] if raw["items"] else None
+                result["eightk"]["reason"] = f"8-K item {primary_item} could not be extracted"
     except (ValueError, Exception) as e:
         result["eightk"] = {"kind": "none", "reason": f"No 8-K available ({e})"}
 
@@ -401,17 +444,26 @@ async def _load_filing_data(ticker: str, fetch_raw: bool) -> dict[str, Any]:
     return await asyncio.to_thread(_fetch_filing_data, ticker, fetch_raw)
 
 
-def _filing_ref(filing_data: dict[str, Any], p: dict[str, Any]) -> FilingRef:
+def _filing_ref(p: dict[str, Any]) -> FilingRef:
     """The cache key filing for a planned section."""
-    metadata = filing_data.get(p["section"], {}).get("metadata", {})
-    return FilingRef(p["form"], p["accession"], metadata.get("filing_date", ""))
+    return FilingRef(p["form"], p["accession"], p["filing_date"])
+
+
+def _keyed_by(form_meta: dict[str, Any], read_meta: dict[str, Any] | None) -> dict[str, str]:
+    """``{accession, filing_date}`` a section is keyed by: the filing its input
+    was read from, else (nothing read — keyless, or a failed read) the
+    form's metadata."""
+    meta = read_meta if read_meta and read_meta.get("accession") else form_meta
+    return {"accession": meta.get("accession", ""), "filing_date": meta.get("filing_date", "")}
 
 
 def _plan_sections(filing_data: dict[str, Any]) -> list[dict[str, Any]]:
     """Ordered list of analyzable sections from fetched filing data — the single
     source of truth for both endpoints (#10).
 
-    Each entry: ``{section, key, form, accession, atype, input, cache_only}``.
+    Each entry: ``{section, key, form, accession, filing_date, atype, input,
+    cache_only}``. ``accession``/``filing_date`` (the cache key) are those of
+    the filing the section's input was read from (``_keyed_by``).
     ``section``/``key`` place the result in the response; ``atype`` is the cache
     analysis_type (== key except 8-K, where atype is the 8-K kind). Conditional
     10-K sections (Item 1/1C/3/7A, XBRL) appear only when their raw text was
@@ -431,44 +483,48 @@ def _plan_sections(filing_data: dict[str, Any]) -> list[dict[str, Any]]:
     def failed(raw: dict[str, Any] | None) -> bool:
         return raw is not None and not raw.get("found")
 
+    def section_meta(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+        return raw.get("metadata") if raw else None
+
+    def read_meta(form_data: dict[str, Any], raw_key: str) -> dict[str, Any]:
+        """Metadata of the filing ``raw_key`` was read from, else the form's."""
+        meta = form_data.get("read_metadata", {}).get(raw_key)
+        return meta if meta and meta.get("accession") else form_data["metadata"]
+
     if "tenk" in filing_data:
         tenk = filing_data["tenk"]
-        acc = tenk["metadata"].get("accession", "")
+        form_meta = tenk["metadata"]
         risk_raw, mda_raw = tenk.get("risk_raw"), tenk.get("mda_raw")
-        plan.append({"section": "tenk", "key": "risk_10k", "form": "10-K", "accession": acc, "atype": "risk_10k", "input": risk_raw or {}, "cache_only": failed(risk_raw)})
-        plan.append({"section": "tenk", "key": "mda_10k", "form": "10-K", "accession": acc, "atype": "mda_10k", "input": mda_raw or {}, "cache_only": failed(mda_raw)})
+        plan.append({"section": "tenk", "key": "risk_10k", "form": "10-K", **_keyed_by(form_meta, section_meta(risk_raw)), "atype": "risk_10k", "input": risk_raw or {}, "cache_only": failed(risk_raw)})
+        plan.append({"section": "tenk", "key": "mda_10k", "form": "10-K", **_keyed_by(form_meta, section_meta(mda_raw)), "atype": "mda_10k", "input": mda_raw or {}, "cache_only": failed(mda_raw)})
 
         balance_raw = tenk.get("balance_sheet_raw")
         balance_input: dict[str, Any] = {"tenk": balance_raw or {}}
         if "tenq" in filing_data and filing_data["tenq"].get("balance_sheet_raw"):
             balance_input["tenq"] = filing_data["tenq"]["balance_sheet_raw"]
-        plan.append({"section": "tenk", "key": "balance", "form": "10-K", "accession": acc, "atype": "balance", "input": balance_input, "cache_only": balance_raw is not None and not balance_raw})
+        plan.append({"section": "tenk", "key": "balance", "form": "10-K", **_keyed_by(form_meta, read_meta(tenk, "balance_sheet_raw")), "atype": "balance", "input": balance_input, "cache_only": balance_raw is not None and not balance_raw})
 
         for atype, raw_key in [("business", "business_raw"), ("cybersecurity", "cyber_raw"), ("legal", "legal_raw"), ("market_risk", "market_risk_raw")]:
             raw = tenk.get(raw_key)
             if raw and raw.get("found"):
-                plan.append({"section": "tenk", "key": atype, "form": "10-K", "accession": acc, "atype": atype, "input": raw, "cache_only": False})
+                plan.append({"section": "tenk", "key": atype, "form": "10-K", **_keyed_by(form_meta, section_meta(raw)), "atype": atype, "input": raw, "cache_only": False})
 
-        if tenk.get("income_stmt_raw"):
-            income_input: dict[str, Any] = {"tenk": tenk["income_stmt_raw"], "tenk_metadata": tenk["metadata"]}
-            if "tenq" in filing_data and filing_data["tenq"].get("income_stmt_raw"):
-                income_input["tenq"] = filing_data["tenq"]["income_stmt_raw"]
-                income_input["tenq_metadata"] = filing_data["tenq"]["metadata"]
-            plan.append({"section": "tenk", "key": "income_stmt", "form": "10-K", "accession": acc, "atype": "income_stmt", "input": income_input, "cache_only": False})
-
-        if tenk.get("cashflow_raw"):
-            cashflow_input: dict[str, Any] = {"tenk": tenk["cashflow_raw"], "tenk_metadata": tenk["metadata"]}
-            if "tenq" in filing_data and filing_data["tenq"].get("cashflow_raw"):
-                cashflow_input["tenq"] = filing_data["tenq"]["cashflow_raw"]
-                cashflow_input["tenq_metadata"] = filing_data["tenq"]["metadata"]
-            plan.append({"section": "tenk", "key": "cashflow", "form": "10-K", "accession": acc, "atype": "cashflow", "input": cashflow_input, "cache_only": False})
+        for atype, raw_key in [("income_stmt", "income_stmt_raw"), ("cashflow", "cashflow_raw")]:
+            if not tenk.get(raw_key):
+                continue
+            tenk_meta = read_meta(tenk, raw_key)
+            statement_input: dict[str, Any] = {"tenk": tenk[raw_key], "tenk_metadata": tenk_meta}
+            if "tenq" in filing_data and filing_data["tenq"].get(raw_key):
+                statement_input["tenq"] = filing_data["tenq"][raw_key]
+                statement_input["tenq_metadata"] = read_meta(filing_data["tenq"], raw_key)
+            plan.append({"section": "tenk", "key": atype, "form": "10-K", **_keyed_by(form_meta, tenk_meta), "atype": atype, "input": statement_input, "cache_only": False})
 
     if "tenq" in filing_data:
         tenq = filing_data["tenq"]
-        acc = tenq["metadata"].get("accession", "")
+        form_meta = tenq["metadata"]
         risk_raw, mda_raw = tenq.get("risk_raw"), tenq.get("mda_raw")
-        plan.append({"section": "tenq", "key": "risk_10q", "form": "10-Q", "accession": acc, "atype": "risk_10q", "input": risk_raw or {}, "cache_only": failed(risk_raw)})
-        plan.append({"section": "tenq", "key": "mda_10q", "form": "10-Q", "accession": acc, "atype": "mda_10q", "input": mda_raw or {}, "cache_only": failed(mda_raw)})
+        plan.append({"section": "tenq", "key": "risk_10q", "form": "10-Q", **_keyed_by(form_meta, section_meta(risk_raw)), "atype": "risk_10q", "input": risk_raw or {}, "cache_only": failed(risk_raw)})
+        plan.append({"section": "tenq", "key": "mda_10q", "form": "10-Q", **_keyed_by(form_meta, section_meta(mda_raw)), "atype": "mda_10q", "input": mda_raw or {}, "cache_only": failed(mda_raw)})
 
     eightk = filing_data.get("eightk", {})
     kind = eightk.get("kind", "none")
@@ -479,8 +535,7 @@ def _plan_sections(filing_data: dict[str, Any]) -> list[dict[str, Any]]:
             unusable = raw.get("has_earnings") is False
         else:
             unusable = bool(raw) and not raw.get("text")
-        acc = eightk.get("metadata", {}).get("accession", "")
-        plan.append({"section": "eightk", "key": "analysis", "form": "8-K", "accession": acc, "atype": kind, "input": raw, "cache_only": unusable})
+        plan.append({"section": "eightk", "key": "analysis", "form": "8-K", **_keyed_by(eightk.get("metadata", {}), None), "atype": kind, "input": raw, "cache_only": unusable})
 
     return plan
 
@@ -523,9 +578,9 @@ async def _analyze_or_cache(
     hit but returns 'unavailable' on a miss, silently.
     ``on_progress(status, extra)`` (optional) is called as the state advances so the SSE endpoint can stream progress; the
     JSON endpoint passes None. ``charger`` (operator-paid requests only, from
-    `_budget_charger`) charges one daily-budget unit as this section's LLM
-    call starts and refuses the call once the budget is spent
-    ('budget_exceeded'); cache hits and skipped sections cost nothing.
+    `_budget_charger`) charges the daily budget as this section's LLM call
+    starts and refuses the call the budget can't cover ('budget_exceeded');
+    cache hits and skipped sections cost nothing.
     """
     form_type = filing.form
 
@@ -589,33 +644,24 @@ def _budget_user(keys: ApiKeys, api_key: str | None, provider: str) -> str | Non
     return None
 
 
-async def _budget_charger(
-    charge_user_id: str | None, ticker: str, plan: list[dict[str, Any]],
-) -> LLMCallCharger | None:
+async def _budget_charger(charge_user_id: str | None) -> LLMCallCharger | None:
     """The per-call budget charger for an operator-paid request (None when
     the operator isn't paying). Must run on the event loop.
 
-    Pre-flight (#6): a request that will run ≥1 LLM analysis is refused when
-    the user's daily budget is already spent. After that the charger charges
-    one unit per section LLM call and refuses the calls that would exceed the
-    budget, so a request admitted under budget stops generating once it is
-    spent (`_analyze_or_cache` → 'budget_exceeded'). A fully-cached, BYOK or
-    keyless request is never refused or charged.
-
-    Raises LLMBudgetExceeded so the caller can surface a 429 / SSE error.
+    No request-level refusal: the charger charges each section's LLM call as
+    it starts and refuses the calls the budget can't cover
+    (`_analyze_or_cache` → 'budget_exceeded'), so with today's budget spent
+    cached sections are still served and only the uncached ones are refused.
+    Cache hits, BYOK and keyless requests are never charged.
     """
     if charge_user_id is None:
         return None
-    from api.db import get_filing_analysis, get_llm_usage
-    cached = await asyncio.gather(*[
-        get_filing_analysis(ticker, p["form"], p["accession"], p["atype"])
-        for p in plan if not p["cache_only"]
-    ])
-    if any(c is None for c in cached):
-        used = await ensure_budget_available(charge_user_id)
-    else:
-        used = await get_llm_usage(charge_user_id)  # nothing to generate: never refused
-    return LLMCallCharger(charge_user_id, used=used)
+    from api.db import get_llm_usage
+    return LLMCallCharger(charge_user_id, used=await get_llm_usage(charge_user_id))
+
+
+# The 8-K `reason` in the JSON response when its analysis was refused.
+_EIGHTK_BUDGET_REASON = "Not analyzed: daily LLM budget exceeded"
 
 
 @router.get("/{ticker}/filings")
@@ -670,19 +716,16 @@ async def get_company_filings(
 
     plan = _plan_sections(filing_data)
 
-    # Operator-paid: refuse if today's budget is spent and an LLM call would
-    # run; each generated section is then charged one unit, and sections past
-    # the budget are left out. Fully-cached / BYOK / keyless reads cost nothing.
-    try:
-        charger = await _budget_charger(_budget_user(keys, api_key, model.provider), ticker, plan)
-    except LLMBudgetExceeded as e:
-        raise HTTPException(status_code=429, detail=str(e))
+    # Operator-paid: each generated section is charged as its LLM call starts;
+    # sections the daily budget can't cover are left out and listed in
+    # `budget_exceeded`. Cache hits / BYOK / keyless reads cost nothing.
+    charger = await _budget_charger(_budget_user(keys, api_key, model.provider))
 
     # Resolve every section concurrently — cache hits return instantly, misses
     # with a key run their LLM calls concurrently.
     results = await asyncio.gather(*[
         _analyze_or_cache(
-            ticker, _filing_ref(filing_data, p), p["atype"], p["input"], model.id, api_key,
+            ticker, _filing_ref(p), p["atype"], p["input"], model.id, api_key,
             cache_only=p["cache_only"], charger=charger,
         )
         for p in plan
@@ -690,7 +733,15 @@ async def get_company_filings(
     if charger is not None:
         await charger.settle()
 
-    response: dict[str, Any] = {"ticker": ticker}
+    # Steps (same "{form}/{atype}" names as the SSE progress events) whose
+    # analysis was refused because the daily budget is spent.
+    response: dict[str, Any] = {
+        "ticker": ticker,
+        "budget_exceeded": [
+            f"{p['form']}/{p['atype']}"
+            for p, (status, _data) in zip(plan, results) if status == "budget_exceeded"
+        ],
+    }
     if "tenk" in filing_data:
         response["tenk"] = {"metadata": filing_data["tenk"]["metadata"]}
     if "tenq" in filing_data:
@@ -699,7 +750,13 @@ async def get_company_filings(
     eightk = filing_data.get("eightk", {})
     eightk_kind = await _reported_eightk_kind(ticker, filing_data, plan)
 
-    for p, (_status, data) in zip(plan, results):
+    for p, (status, data) in zip(plan, results):
+        if p["section"] == "eightk" and status == "budget_exceeded":
+            response["eightk"] = {
+                "kind": eightk_kind,
+                "metadata": eightk.get("metadata", {}),
+                "reason": _EIGHTK_BUDGET_REASON,
+            }
         if data is None:
             continue
         if p["section"] in ("tenk", "tenq"):
@@ -816,14 +873,10 @@ async def stream_company_filings(
                 "eightk_metadata": eightk.get("metadata") if eightk_kind != "none" else None,
             })
 
-            # Operator-paid + ≥1 cache miss with today's budget spent → error +
-            # stop. Otherwise each generated section is charged one unit, and
-            # sections past the budget report 'budget_exceeded'.
-            try:
-                charger = await _budget_charger(charge_user_id, ticker, plan)
-            except LLMBudgetExceeded as e:
-                yield _sse({"type": "error", "message": str(e)})
-                return
+            # Operator-paid: each generated section is charged as its LLM call
+            # starts; sections the budget can't cover report 'budget_exceeded'
+            # while cached ones are still served.
+            charger = await _budget_charger(charge_user_id)
 
             # Run all sections concurrently using a shared queue. Each task pushes
             # progress + section events as they happen; the outer generator yields
@@ -838,7 +891,7 @@ async def stream_company_filings(
                     queue.put_nowait(_sse({"type": "progress", "step": step, "status": status, **extra}))
 
                 _status, data = await _analyze_or_cache(
-                    ticker, _filing_ref(filing_data, p), p["atype"], p["input"],
+                    ticker, _filing_ref(p), p["atype"], p["input"],
                     model.id, api_key, on_progress=on_progress, cache_only=p["cache_only"],
                     charger=charger,
                 )

@@ -8,6 +8,7 @@ chat, watchlist and filings endpoint tests.
 
 import asyncio
 import logging
+import math
 import os
 import subprocess
 import sys
@@ -19,12 +20,14 @@ from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.runnables import RunnableLambda
 
 import api.db as db_module
+from agents.model_registry import get_default_model
 from api import llm_concurrency
 from api.llm_concurrency import (
     LLMBudgetExceeded,
     LLMCallCharger,
     ensure_budget_available,
 )
+from tests.conftest import models_where, one_per_provider
 
 
 USER_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -92,18 +95,47 @@ async def test_get_llm_usage_rolls_over_next_day(fresh_db, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.eval_unit
-def test_default_budget_is_sized_for_per_call_charging():
-    # A fresh interpreter: reloading the module in-process would replace
-    # LLMBudgetExceeded under the routes that catch it.
-    env = {k: v for k, v in os.environ.items() if k != "LLM_DAILY_BUDGET"}
+_SETTINGS = ("LLM_DAILY_BUDGET", "LLM_DISPATCH_CONCURRENCY", "LLM_DISPATCH_WAIT_SECONDS")
+
+
+def _settings_in_fresh_interpreter(**overrides: str) -> list[str]:
+    """The budget/dispatch settings as a fresh interpreter imports them with
+    `overrides` in the environment (reloading the module in-process would
+    replace LLMBudgetExceeded under the routes that catch it)."""
+    env = {k: v for k, v in os.environ.items() if k not in _SETTINGS}
+    env.update(overrides)
     result = subprocess.run(
-        [sys.executable, "-c", "import api.llm_concurrency as m; print(m.LLM_DAILY_BUDGET)"],
+        [sys.executable, "-c",
+         "import api.llm_concurrency as m; "
+         "print(m.LLM_DAILY_BUDGET, m.LLM_DISPATCH_CONCURRENCY, m.LLM_DISPATCH_WAIT_SECONDS)"],
         cwd=Path(__file__).resolve().parent.parent, env=env,
         capture_output=True, text=True, timeout=120,
     )
     assert result.returncode == 0, result.stderr
-    assert int(result.stdout.split()[-1]) == 350
+    return result.stdout.split()[-3:]
+
+
+@pytest.mark.eval_unit
+def test_default_budget_is_sized_for_per_call_charging():
+    assert _settings_in_fresh_interpreter() == ["350", "8", "30.0"]
+
+
+@pytest.mark.eval_unit
+@pytest.mark.parametrize("raw_int, raw_float", [("", ""), ("3.5e2", "nan"), ("abc", "abc"), ("-1", "-1")])
+def test_malformed_budget_settings_fall_back_to_defaults(raw_int, raw_float):
+    """A blank or malformed value must not crash backend import."""
+    overrides = {
+        "LLM_DAILY_BUDGET": raw_int,
+        "LLM_DISPATCH_CONCURRENCY": raw_int,
+        "LLM_DISPATCH_WAIT_SECONDS": raw_float,
+    }
+    assert _settings_in_fresh_interpreter(**overrides) == ["350", "8", "30.0"]
+
+
+@pytest.mark.eval_unit
+def test_zero_dispatch_concurrency_falls_back_to_default():
+    # A zero-slot pool would refuse every LLM call.
+    assert _settings_in_fresh_interpreter(LLM_DISPATCH_CONCURRENCY="0")[1] == "8"
 
 
 # ---------------------------------------------------------------------------
@@ -294,3 +326,104 @@ async def test_charge_failing_after_settle_is_logged(fresh_db, monkeypatch, capl
                 break
             await asyncio.sleep(0.01)
     assert any("database is locked" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Price-weighted charging: one unit is one default-model call
+# ---------------------------------------------------------------------------
+
+
+def _blended(model) -> float | None:
+    if model.input_price_per_mtok is None or model.output_price_per_mtok is None:
+        return None
+    return model.input_price_per_mtok + model.output_price_per_mtok
+
+
+def budget_units(model) -> int:
+    """Units one call on `model` should cost, from models.json prices:
+    its blended (input + output) price over the default model's, rounded up."""
+    price, base = _blended(model), _blended(get_default_model())
+    if price is None or not base:
+        return 1
+    return max(1, math.ceil(round(price / base, 9)))
+
+
+def pricier_lendable_model():
+    """A model the operator lends whose call costs more than the default's."""
+    pricier = [m for m in models_where(operator_lendable=True) if budget_units(m) > 1]
+    if not pricier:
+        pytest.skip("no operator_lendable model priced above the default model")
+    return max(pricier, key=budget_units)
+
+
+class _NamedFakeChatModel(FakeListChatModel):
+    """Reports `model` as its model name, as real provider chat models do."""
+
+    model: str
+
+
+def _named_llm(model_id: str) -> FakeListChatModel:
+    return _NamedFakeChatModel(model=model_id, responses=["ok"])
+
+
+@pytest.mark.eval_unit
+def test_default_model_call_costs_one_unit():
+    assert llm_concurrency.call_units(get_default_model().id) == 1
+
+
+@pytest.mark.eval_unit
+@pytest.mark.parametrize("model", models_where(), ids=lambda m: m.id)
+def test_call_units_follow_registry_prices(model):
+    assert llm_concurrency.call_units(model.id) == budget_units(model)
+
+
+@pytest.mark.eval_unit
+def test_unknown_or_unpriced_model_costs_one_unit_with_a_warning(caplog):
+    unpriced = [m.id for m in models_where() if _blended(m) is None]
+    with caplog.at_level(logging.WARNING, logger="api.llm_concurrency"):
+        for model_id in ["unknown-model", *unpriced]:
+            assert llm_concurrency.call_units(model_id) == 1
+    assert any("unknown-model" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.eval_unit
+async def test_charger_weights_each_call_by_the_called_models_price(fresh_db):
+    model = pricier_lendable_model()
+    llm = _named_llm(model.id)
+    charger = LLMCallCharger(USER_A, used=0)
+    for _ in range(2):
+        await llm.ainvoke("hi", config={"callbacks": [charger]})
+    assert await charger.settle() == 2
+    assert await db_module.get_llm_usage(USER_A) == 2 * budget_units(model)
+
+
+@pytest.mark.eval_unit
+async def test_charger_refuses_a_call_the_budget_cannot_cover(fresh_db, monkeypatch):
+    """With fewer units left than a pricey call costs, that call is refused,
+    while a default-model call still fits."""
+    model = pricier_lendable_model()
+    units = budget_units(model)
+    monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 2 * units - 1)
+    charger = LLMCallCharger(USER_A, used=0)
+    config = {"callbacks": [charger]}
+
+    await _named_llm(model.id).ainvoke("hi", config=config)
+    await charger.settle()
+    with pytest.raises(LLMBudgetExceeded):
+        await _named_llm(model.id).ainvoke("hi", config=config)
+    await _named_llm(get_default_model().id).ainvoke("hi", config=config)
+
+    assert await charger.settle() == 2
+    assert await db_module.get_llm_usage(USER_A) == units + 1
+
+
+@pytest.mark.eval_unit
+@pytest.mark.parametrize("model", one_per_provider(), ids=lambda m: m.id)
+def test_provider_chat_models_report_their_registry_id(model):
+    """Weighting reads the model name each provider's chat model reports;
+    it must be the registry id `create_llm` was given."""
+    from agents.llm_factory import create_llm
+
+    llm = create_llm(model.id, "not-a-real-key")
+    reported = llm._get_ls_params_with_defaults()
+    assert llm_concurrency._called_model_id({"metadata": reported}) == model.id

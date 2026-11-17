@@ -20,42 +20,58 @@ _research_cache: TTLCache = TTLCache(maxsize=256, ttl=900)
 _RESEARCH_POLL_INTERVAL_SECONDS = 2.0
 _RESEARCH_MAX_POLLS = 30
 
-# Per-call wall-clock cap on a Tavily search. langchain-tavily's underlying
+# Per-call wall-clock cap on a Tavily request, timed from when the call starts
+# running (not from when it was queued). langchain-tavily's underlying
 # requests.post() has no timeout argument, so we enforce one externally with
 # asyncio.wait_for. A hung Tavily request returns None to the caller (treated
-# as a soft failure) instead of blocking the tool for the full ~75s OS-level
-# socket timeout.
+# as a soft failure) instead of blocking the tool for the full OS-level socket
+# timeout.
 _TAVILY_PER_CALL_TIMEOUT_SECONDS = 10
 
-# Timed-out requests can't be killed, so their threads linger until the socket
-# gives up. They live on this small dedicated pool instead of the loop's shared
-# default executor (auth, planner, SEC and chart work), so a Tavily stall can
-# at worst make news lookups soft-fail rather than starve the rest of the app.
-_TAVILY_TIMEOUT_POOL = ThreadPoolExecutor(
-    max_workers=4, thread_name_prefix="tavily-timeout"
-)
+# Every Tavily call (searches, deep-research start and polls) runs on this
+# pool. Timed-out requests can't be killed, so their threads linger until the
+# socket gives up; here they can't starve the loop's shared default executor
+# (auth, planner, SEC and chart work), and at worst make research tools
+# soft-fail. Sized well above normal concurrent research so healthy calls
+# rarely queue.
+_TAVILY_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="tavily")
+
+# Longest a call waits for a free pool thread — only when stalled calls hold
+# all of them — before soft-failing without running.
+_TAVILY_QUEUE_TIMEOUT_SECONDS = 10
 
 # Awaited before each billed search after the first (free-trial meter).
 ChargeFn = Callable[[], Awaitable[bool]]
 
 
-async def _search_with_timeout(search: Any, query: str, timeout_s: float) -> Optional[Any]:
-    """Run the blocking search.invoke({"query": query}) off the event loop with
-    a wall-clock cap.
+async def _run_tavily(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Optional[Any]:
+    """``fn(*args, **kwargs)`` (a blocking Tavily call) on ``_TAVILY_POOL``.
 
-    Returns the result, or None on timeout. The hung worker thread is detached
-    (not killed) onto _TAVILY_TIMEOUT_POOL so the agent step can finish on
-    schedule.
+    Returns the result, or None when the call didn't get a thread within
+    ``_TAVILY_QUEUE_TIMEOUT_SECONDS`` (it never runs) or didn't finish within
+    ``_TAVILY_PER_CALL_TIMEOUT_SECONDS`` of starting (its thread is detached,
+    not killed). Exceptions from ``fn`` propagate.
     """
     loop = asyncio.get_running_loop()
     # to_thread copies the context (tracing/callback vars); keep that here.
     ctx = contextvars.copy_context()
+    started = asyncio.Event()
+
+    def call() -> Any:
+        loop.call_soon_threadsafe(started.set)
+        return ctx.run(fn, *args, **kwargs)
+
+    submitted = _TAVILY_POOL.submit(call)
+    try:
+        await asyncio.wait_for(started.wait(), _TAVILY_QUEUE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        # Cancelled right here (not a loop tick later via a wrapper), so a
+        # still-queued call never runs.
+        submitted.cancel()
+        return None
     try:
         return await asyncio.wait_for(
-            loop.run_in_executor(
-                _TAVILY_TIMEOUT_POOL, ctx.run, search.invoke, {"query": query}
-            ),
-            timeout_s,
+            asyncio.wrap_future(submitted), _TAVILY_PER_CALL_TIMEOUT_SECONDS
         )
     except asyncio.TimeoutError:
         return None
@@ -94,8 +110,10 @@ async def _tool_tavily_search(
 
         # Enhance query with company context
         enhanced_query = f"{ticker} company {query}"
-        result = await asyncio.to_thread(search.invoke, {"query": enhanced_query})
+        result = await _run_tavily(search.invoke, {"query": enhanced_query})
 
+        if result is None:
+            return "Failed to perform web search: Tavily timed out"
         if isinstance(result, str):
             return result
         elif isinstance(result, dict):
@@ -152,8 +170,9 @@ async def _tool_tavily_research_async(
     between polls so neither the event loop nor the thread pool is pinned for
     other tools (charts, briefing, SEC analysis).
 
-    HTTP calls themselves stay sync via `asyncio.to_thread` since the Tavily
-    SDK does not expose async methods.
+    HTTP calls themselves stay sync, run on the Tavily pool via `_run_tavily`,
+    since the Tavily SDK does not expose async methods. A poll that times out
+    counts as still in progress.
     """
     cache_key = _get_cache_key(ticker, topic)
 
@@ -165,14 +184,16 @@ async def _tool_tavily_research_async(
         client = TavilyClient(api_key=tavily_api_key)
         research_query = f"Comprehensive analysis of {ticker}: {topic}"
 
-        response = await asyncio.to_thread(client.research, input=research_query)
+        response = await _run_tavily(client.research, input=research_query)
+        if response is None:
+            return "Failed to initiate deep research: Tavily timed out"
         request_id = response.get("request_id")
 
         if not request_id:
             return "Failed to initiate deep research: no request_id returned"
 
         for _ in range(_RESEARCH_MAX_POLLS):
-            result = await asyncio.to_thread(client.get_research, request_id)
+            result = await _run_tavily(client.get_research, request_id) or {}
             status = result.get("status", "")
 
             if status == "completed":
@@ -213,8 +234,8 @@ async def _tool_company_news(
         # Freshness: day-first, fall back to week so quiet days still return
         # something. Without time_range Tavily ranks purely by relevance and
         # cheerfully returns week-old "top" articles.
-        # Each call goes through _search_with_timeout so a hung Tavily
-        # endpoint can't pin the agent step.
+        # Each call goes through _run_tavily so a hung Tavily endpoint can't
+        # pin the agent step.
         result: dict | str | None = None
         for time_range in ("day", "week"):
             if time_range == "week" and allow_retry and not await allow_retry():
@@ -228,9 +249,7 @@ async def _tool_company_news(
                 time_range=time_range,
             )
             try:
-                result = await _search_with_timeout(
-                    search, query, _TAVILY_PER_CALL_TIMEOUT_SECONDS,
-                )
+                result = await _run_tavily(search.invoke, {"query": query})
             except ToolException:
                 # langchain_tavily raises on zero results rather than returning them.
                 result = {"results": []}
@@ -289,8 +308,10 @@ async def _tool_competitor_analysis(ticker: str, tavily_api_key: str, search_dep
         )
 
         query = f"{ticker} competitors market share industry analysis comparison"
-        result = await asyncio.to_thread(search.invoke, {"query": query})
+        result = await _run_tavily(search.invoke, {"query": query})
 
+        if result is None:
+            return "Failed to analyze competitors: Tavily timed out"
         if isinstance(result, str):
             return result
         elif isinstance(result, dict):
@@ -344,8 +365,10 @@ async def _tool_industry_trends(ticker: str, tavily_api_key: str, search_depth: 
         )
 
         query = f"{ticker} industry trends outlook forecast market analysis 2025"
-        result = await asyncio.to_thread(search.invoke, {"query": query})
+        result = await _run_tavily(search.invoke, {"query": query})
 
+        if result is None:
+            return "Failed to analyze industry trends: Tavily timed out"
         if isinstance(result, str):
             return result
         elif isinstance(result, dict):
@@ -419,7 +442,7 @@ def create_research_tools(
     Create Tavily research tools bound to a specific ticker.
 
     Every tool is async-only (``coroutine=``): invoke with ``ainvoke``. Blocking
-    Tavily calls run via ``asyncio.to_thread``.
+    Tavily calls run on the bounded Tavily pool (``_run_tavily``).
 
     Args:
         ticker: Company ticker symbol

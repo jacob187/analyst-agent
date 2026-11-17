@@ -52,6 +52,8 @@ class _FakeRetriever:
     `eightk` slot under test.
     """
 
+    ticker = _TICKER
+
     def __init__(
         self,
         overview: dict[str, Any],
@@ -72,6 +74,10 @@ class _FakeRetriever:
 
     def get_tenq_filing(self):
         raise ValueError("no tenq in this fixture")
+
+    def latest_8k(self) -> "_FakeRetriever":
+        # The pinned 8-K exposes the same getters, all reading one filing.
+        return self
 
     def get_8k_overview(self) -> dict[str, Any]:
         return self._overview
