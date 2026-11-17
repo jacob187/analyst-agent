@@ -214,8 +214,11 @@ def tenk(accession: str, filed: str, risk: str, mda: str = "10-K MD&A text") -> 
     return FakeFiling("10-K", accession, date.fromisoformat(filed), report)
 
 
-def tenq(accession: str, filed: str, risk: str, mda: str = "10-Q MD&A text") -> FakeFiling:
-    report = FakeReport({"Item 1A": risk, "Item 2": mda}, _balance_frame(360e9))
+def tenq(
+    accession: str, filed: str, risk: str, mda: str = "10-Q MD&A text", *, balance_sheet: bool = True,
+) -> FakeFiling:
+    balance = _balance_frame(360e9) if balance_sheet else None
+    report = FakeReport({"Item 1A": risk, "Item 2": mda}, balance)
     return FakeFiling("10-Q", accession, date.fromisoformat(filed), report)
 
 

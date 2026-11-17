@@ -346,15 +346,57 @@ async def test_served_analysis_carries_filing_reference(fresh_db, edgar, llm):
     cached = json.loads(await _ask(llm, "get_balance_sheet_summary"))
 
     ref = generated["filing_reference"]
-    assert ref["filing_date"] == "2025-11-01"
-    assert ref["accession"] == K1
+    assert ref["filing_date"] == "2026-02-01"
+    assert ref["accession"] == Q1
     assert datetime.fromisoformat(ref["analyzed_at"]).tzinfo is not None
     assert cached["filing_reference"] == ref
 
 
 async def test_filing_reference_is_not_stored(fresh_db, edgar, llm):
     await _ask(llm, "get_balance_sheet_summary")
-    assert "filing_reference" not in await _row("10-K", K1, "balance")
+    assert "filing_reference" not in await _row("10-Q", Q1, "balance_10q")
+
+
+# ── Balance sheet: the newest filing with one (10-Q or 10-K) ──────────────────
+
+
+def _balance_text(filing) -> str:
+    return filing.report.financials.balance_sheet().to_dataframe().to_string()
+
+
+async def test_balance_sheet_summary_analyses_the_newer_10q(fresh_db, edgar, llm):
+    out = json.loads(await _ask(llm, "get_balance_sheet_summary"))
+
+    assert llm.calls == 1
+    assert _balance_text(edgar.filings["10-Q"][0]) in llm.prompts[0]
+    assert _balance_text(edgar.filings["10-K"][0]) not in llm.prompts[0]
+    assert out["filing_reference"]["accession"] == Q1
+    assert await _row("10-Q", Q1, "balance_10q") == _stored_part(out)
+    assert await _row("10-K", K1, "balance") is None
+
+
+async def test_balance_sheet_summary_uses_the_10k_when_it_is_newer(fresh_db, edgar, llm):
+    edgar.publish(tenk(K2, "2026-11-01", TENK_RISK_2))
+
+    out = json.loads(await _ask(llm, "get_balance_sheet_summary"))
+
+    assert _balance_text(edgar.filings["10-K"][0]) in llm.prompts[0]
+    assert out["filing_reference"]["accession"] == K2
+    assert await _row("10-K", K2, "balance") == _stored_part(out)
+
+
+async def test_balance_sheet_summary_falls_back_when_the_10q_has_none(fresh_db, monkeypatch, llm):
+    fake = FakeEdgar()
+    fake.publish(tenk(K1, "2025-11-01", TENK_RISK_1))
+    fake.publish(tenq(Q1, "2026-02-01", TENQ_RISK, balance_sheet=False))
+    fake.install(monkeypatch)
+
+    out = json.loads(await _ask(llm, "get_balance_sheet_summary"))
+
+    assert _balance_text(fake.filings["10-K"][0]) in llm.prompts[0]
+    assert out["filing_reference"]["accession"] == K1
+    assert await _row("10-K", K1, "balance") == _stored_part(out)
+    assert await _row("10-Q", Q1, "balance_10q") is None
 
 
 async def test_get_or_analyze_miss_without_generator_returns_none(fresh_db):
@@ -543,6 +585,21 @@ async def test_company_page_serves_chats_analysis(fresh_db, edgar, llm, page):
     assert risk_prompts == []  # the page did not re-analyse the 10-K risk factors
     assert data["tenk"]["risk_10k"] == chat_risk
     assert data["eightk"]["analysis"] == chat_8k
+
+
+async def test_chat_and_page_balance_analyses_never_overwrite_each_other(fresh_db, edgar, llm, page):
+    # The page analyses the 10-K's balance sheet; chat the newer 10-Q's.
+    # Different inputs, so each is stored under its own filing's key.
+    data = await page()
+    page_balance = await _row("10-K", K1, "balance")
+    assert _stored_part(data["tenk"]["balance"]) == page_balance
+
+    chat = json.loads(await _ask(llm, "get_balance_sheet_summary"))
+
+    assert chat["filing_reference"]["accession"] == Q1
+    assert await _row("10-Q", Q1, "balance_10q") == _stored_part(chat)
+    assert await _row("10-K", K1, "balance") == page_balance
+    assert (await page())["tenk"]["balance"] == data["tenk"]["balance"]
 
 
 async def test_company_page_and_chat_share_the_freshness_lookup(fresh_db, edgar, llm, page, monkeypatch):

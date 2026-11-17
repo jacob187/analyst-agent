@@ -94,10 +94,6 @@ async def _fresh_retriever(ticker: str, *forms: str) -> SECDataRetrieval:
     return await asyncio.to_thread(get_retriever, ticker)
 
 
-async def _latest_10k(ticker: str) -> FilingRef:
-    return (await _fresh_refs(ticker, ("10-K",)))["10-K"]
-
-
 def _read_ref(form: str, read: Dict[str, Any], looked_up: FilingRef) -> FilingRef:
     """The filing ``read`` (a section / overview result) came from: the key
     its analysis is saved under. A concurrent refresh can move the shared
@@ -229,17 +225,33 @@ async def _tool_raw_balance_sheets(ticker: str, llm: BaseChatModel) -> str:
 
 
 async def _tool_balance_sheet_summary(ticker: str, llm: BaseChatModel) -> str:
-    """Return summarized balance sheet analysis for the given ticker (cached)."""
+    """Analysis of the latest balance sheet (cached): the 10-Q's when the
+    10-Q is newer than the 10-K and has one, else the 10-K's.
 
-    def load_input() -> tuple[FilingRef, Dict[str, Any]]:
-        # The company page's "balance" input: the latest 10-K's balance sheet,
-        # keyed by the accession of the 10-K it was read from.
-        text, meta = get_retriever(ticker).balance_sheet_text("10-K")
-        return FilingRef("10-K", meta.accession, meta.filing_date), {"tenk": text}
+    Each is keyed by the filing it was read from. The 10-K's shares the
+    company page's ``balance`` key (the same 10-K-only input); the 10-Q's is
+    ``balance_10q`` under the 10-Q, so it never overwrites the page's.
+    """
+
+    def load(form: str, key: str) -> Callable[[], tuple[FilingRef, Dict[str, Any]]]:
+        def load_input() -> tuple[FilingRef, Dict[str, Any]]:
+            try:
+                text, meta = get_retriever(ticker).balance_sheet_text(form)
+            except Exception as e:
+                raise _SectionUnavailable(f"No {form} balance sheet: {e}") from e
+            return FilingRef(form, meta.accession, meta.filing_date), {key: text}
+
+        return load_input
 
     try:
-        tenk = await _latest_10k(ticker)
-        return await _serve_analysis(ticker, llm, tenk, "balance", load_input)
+        refs = await _fresh_refs(ticker, ("10-K", "10-Q"))
+        tenk, tenq = refs["10-K"], refs["10-Q"]
+        if tenq is not None and tenq.filing_date > tenk.filing_date:
+            try:
+                return await _serve_analysis(ticker, llm, tenq, "balance_10q", load("10-Q", "tenq"))
+            except _SectionUnavailable:
+                pass  # e.g. no XBRL balance sheet: fall back to the 10-K's
+        return await _serve_analysis(ticker, llm, tenk, "balance", load("10-K", "tenk"))
     except Exception as e:
         return f"Failed to analyze balance sheet for {ticker}: {e}"
 

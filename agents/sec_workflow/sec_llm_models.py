@@ -427,7 +427,7 @@ class SECDocumentProcessor:
             return self.generate_risk_factors_prompt(ticker, raw_data), self.risk_parser
         if analysis_type in ("mda_10k", "mda_10q"):
             return self.generate_mda_prompt(ticker, raw_data), self.mda_parser
-        if analysis_type == "balance":
+        if analysis_type in ("balance", "balance_10q"):
             prompt = self.generate_balance_sheet_prompt(
                 ticker, raw_data.get("tenk", {}), raw_data.get("tenq", {})
             )
@@ -460,7 +460,8 @@ class SECDocumentProcessor:
         """Run one analysis by its ``filing_analyses`` type via ``ainvoke``.
 
         ``analysis_type`` is one of 'risk_10k', 'risk_10q', 'mda_10k',
-        'mda_10q', 'balance' (raw_data ``{"tenk", "tenq"}``), 'earnings',
+        'mda_10q', 'balance' / 'balance_10q' (raw_data ``{"tenk", "tenq"}``,
+        either may be absent), 'earnings',
         'event', 'business', 'cybersecurity', 'legal', 'market_risk',
         'income_stmt', 'cashflow'.
 
