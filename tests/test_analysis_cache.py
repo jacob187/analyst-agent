@@ -459,6 +459,20 @@ async def test_company_without_the_form_caches_none(monkeypatch):
     assert fake.companies == 1
 
 
+async def test_lookups_after_the_ttl_read_only_the_recent_submissions(edgar, monkeypatch):
+    # Each lookup builds a fresh Company; only the first looks through the
+    # older submission pages (this filer has no 20-F anywhere).
+    await latest_filing(TICKER, "10-K")
+    downloads = edgar.page_downloads
+
+    monkeypatch.setenv("FILING_FRESHNESS_TTL_SECONDS", "0")
+    for _ in range(3):
+        await latest_filing(TICKER, "10-K")
+
+    assert edgar.companies == 4
+    assert edgar.page_downloads == downloads
+
+
 def test_ttl_defaults_to_four_hours(monkeypatch):
     monkeypatch.delenv("FILING_FRESHNESS_TTL_SECONDS", raising=False)
     assert freshness_ttl_seconds() == DEFAULT_FRESHNESS_TTL_SECONDS == 4 * 3600

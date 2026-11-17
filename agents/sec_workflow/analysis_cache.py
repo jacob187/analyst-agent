@@ -178,7 +178,8 @@ def _fresh_ref(key: tuple[str, str]) -> Any:
 
 def _refresh(ticker: str):
     """Point the shared retriever at EDGAR's latest filing of every form —
-    one submissions request for all of them. A retriever built just now
+    one submissions request (the recent page) for all of them; older pages
+    are downloaded at most once per retriever. A retriever built just now
     already holds a fresh ``Company``, so it is reused."""
     with _lock:
         existed = ticker in _shared_retrievers
@@ -191,7 +192,8 @@ async def latest_filings(ticker: str, forms) -> dict[str, FilingRef | None]:
     has none).
 
     Asks SEC EDGAR only when an entry is older than the freshness TTL, and
-    then refreshes every form in one submissions request; concurrent callers
+    then refreshes every form in one submissions request (see
+    ``SECDataRetrieval.refresh_latest_filings``); concurrent callers
     for a ticker share that lookup. When the lookup fails, a form whose
     expired ref is still backed by the current retriever is served stale
     (logged) — its stored analyses stay reachable through an EDGAR outage —

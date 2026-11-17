@@ -7,6 +7,12 @@ counts calls at the LLM boundary.
 against these objects with no network. ``FakeEdgar.requests`` counts filing
 index lookups; ``FakeEdgar.companies`` counts ``Company`` builds (each one an
 EDGAR submissions request in production).
+
+Like EDGAR, a company's submissions are a recent page (the newest
+``FakeEdgar.recent_size`` filings, fetched with the ``Company``) plus older
+pages that edgartools downloads only on a full load (``get_filings`` with
+``trigger_full_load=True``, its default); ``FakeEdgar.page_downloads`` counts
+those older-page requests.
 """
 
 from __future__ import annotations
@@ -245,6 +251,9 @@ class _Filings:
     def __init__(self, filings: list[FakeFiling]):
         self._filings = filings
 
+    def __len__(self) -> int:
+        return len(self._filings)
+
     def latest(self, n: int = 1):
         return self._filings[0] if self._filings else None
 
@@ -262,9 +271,24 @@ class FakeEdgar:
     outage: Exception | None = None
     # ``Company(ticker)`` builds that hit the outage (each a failed request).
     failed_companies: int = 0
+    # Newest filings (all forms) on the recent submissions page; None: all.
+    recent_size: int | None = None
+    # Older submissions pages one full load downloads (edgartools ``files``).
+    older_pages: int = 2
+    page_downloads: int = 0
 
     def publish(self, filing: FakeFiling) -> None:
         self.filings.setdefault(filing.form, []).insert(0, filing)
+
+    def recent(self, filings: list[FakeFiling]) -> list[FakeFiling]:
+        """The ``filings`` that are on the recent submissions page."""
+        if self.recent_size is None:
+            return filings
+        newest = sorted(
+            (f for fs in self.filings.values() for f in fs),
+            key=lambda f: f.filing_date, reverse=True,
+        )[: self.recent_size]
+        return [f for f in filings if any(f is n for n in newest)]
 
     def company(self, ticker: str) -> "_FakeCompany":
         if self.outage is not None:
@@ -289,15 +313,26 @@ class _FakeCompany:
         self._edgar = edgar
         self.ticker = ticker
         self.name = COMPANY_NAME
+        self._loaded_all_filings = False
 
     def latest(self, form: str, n: int = 1):
-        return self.get_filings(form).latest(n)
+        # edgartools: the recent page first, a full load only if it has none.
+        filings = self.get_filings(form, trigger_full_load=False)
+        if len(filings) < n:
+            filings = self.get_filings(form, trigger_full_load=True)
+        return filings.latest(n)
 
-    def get_filings(self, form: str, **_kwargs):
+    def get_filings(self, form: str, trigger_full_load: bool = True, **_kwargs):
         self._edgar.requests += 1
         if self._edgar.latency:
             time.sleep(self._edgar.latency)
-        return _Filings(self._edgar.filings.get(form, []))
+        if trigger_full_load and not self._loaded_all_filings:
+            self._edgar.page_downloads += self._edgar.older_pages
+            self._loaded_all_filings = True
+        filings = self._edgar.filings.get(form, [])
+        if not self._loaded_all_filings:
+            filings = self._edgar.recent(filings)
+        return _Filings(filings)
 
 
 # ── LLM boundary ─────────────────────────────────────────────────────────────

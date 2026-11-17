@@ -206,11 +206,23 @@ class FilingMetadata:
             return f"Form {self.form} filed {self.filing_date}, Period: {self.period_of_report}"
 
 
+# A ``Company``'s submissions are a recent page (at least the last year or
+# 1000 filings), fetched in one request on first use, plus older pages that
+# edgartools downloads one request each on a full load: ``get_filings``
+# defaults to ``trigger_full_load=True``. New filings only ever land on the
+# recent page.
+
+
 def _latest(company, form: str):
-    """The company's latest ``form`` filing (None if it has none)."""
-    if form == "8-K":
-        return company.get_filings(form="8-K").latest(1)
+    """The company's latest ``form`` filing (None if it has none): from the
+    recent page, loading the older pages only when it has none."""
     return company.latest(form=form)
+
+
+def _latest_recent(company, form: str):
+    """The latest ``form`` filing on the company's recent page (None if it
+    has none there). Never downloads the older pages."""
+    return company.get_filings(form=form, trigger_full_load=False).latest(1)
 
 
 class EightKReport:
@@ -256,6 +268,8 @@ class SECDataRetrieval:
         self._tenq_metadata = None
         self._eightk_metadata = None
         self._twentyf_metadata = None
+        # Forms a full-history lookup found no filing of (see refresh).
+        self._absent_forms: set[str] = set()
 
     def check_filing_availability(self) -> Dict[str, Any]:
         """Check what filings are available for this company.
@@ -401,15 +415,21 @@ class SECDataRetrieval:
 
         edgartools' ``Company`` loads its submissions once and caches them, so a
         long-lived retriever never sees a newly published filing. This builds
-        one fresh ``Company`` (one submissions request, whatever the number of
-        forms) and, for each form whose latest accession differs from the
-        cached one, swaps in the new filing and drops that form's parsed
-        object and memoized extractions so section getters read the new filing.
-        ``reuse_company`` skips the rebuild for a retriever whose ``Company``
-        was built just now (it has not loaded its submissions yet).
+        one fresh ``Company`` and reads only its recent submissions page (one
+        request, whatever the number of forms) and, for each form whose latest
+        accession differs from the cached one, swaps in the new filing and
+        drops that form's parsed object and memoized extractions so section
+        getters read the new filing. A form missing from the recent page is
+        resolved by ``_latest_beyond_recent``, which downloads the older pages
+        at most once per retriever. ``reuse_company`` skips the rebuild for a
+        retriever whose ``Company`` was built just now (it has not loaded its
+        submissions yet).
         """
         company = self.company if reuse_company else Company(self.ticker)
-        latest = {form: _latest(company, form) for form in forms}
+        latest = {form: _latest_recent(company, form) for form in forms}
+        missing = [form for form, filing in latest.items() if filing is None]
+        if missing:
+            latest.update(self._latest_beyond_recent(company, missing))
         self.company = company
         metas: Dict[str, Optional[FilingMetadata]] = {}
         for form, filing in latest.items():
@@ -427,6 +447,23 @@ class SECDataRetrieval:
                     _forget_form(self, form)
                 metas[form] = getattr(self, f"_{slot}_metadata")
         return metas
+
+    def _latest_beyond_recent(self, company, forms) -> Dict[str, Any]:
+        """Latest filing of each of ``forms``, none of which is on
+        ``company``'s recent page. New filings land on the recent page, so
+        the filing this retriever already holds is still the latest, and a
+        form the full history lacked is still absent; only a form with
+        neither downloads the older pages (once per ``Company``)."""
+        latest: Dict[str, Any] = {}
+        for form in forms:
+            held = getattr(self, f"_{_FORM_SLOTS[form]}_filing")
+            if held is not None or form in self._absent_forms:
+                latest[form] = held
+                continue
+            latest[form] = _latest(company, form)
+            if latest[form] is None:
+                self._absent_forms.add(form)
+        return latest
 
     # ── 8-K public methods ────────────────────────────────────────────────
     #
