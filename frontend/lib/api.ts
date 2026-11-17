@@ -218,7 +218,8 @@ export const api = {
     ),
 
   // Watchlist
-  watchlist: () => get<WatchlistResponse>("/watchlist"),
+  watchlist: (headers?: Record<string, string>) =>
+    get<WatchlistResponse>("/watchlist", headers),
 
   addToWatchlist: (ticker: string) =>
     post<{ success: boolean; ticker: string }>("/watchlist", { ticker }),
