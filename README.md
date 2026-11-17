@@ -195,7 +195,7 @@ The backend verifies Clerk session tokens against Clerk's published signing keys
 
 ```bash
 ENV=production
-CLERK_SECRET_KEY=sk_live_...   # turns verification on
+CLERK_SECRET_KEY=<your Clerk secret key>   # turns verification on
 # The token issuer (`iss`). With the frontend proxying Clerk at /__clerk (the
 # production setup in frontend/proxy.ts), it is the proxied Frontend API URL:
 CLERK_ISSUER_URL=https://your-frontend.example.com/__clerk
