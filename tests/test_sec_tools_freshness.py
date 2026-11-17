@@ -20,7 +20,7 @@ from tests.sec_fakes import CountingChatModel, FakeEdgar, eightk, tenk, tenq
 
 TICKER = "TSTC"
 K1, K2 = "0000320193-25-000101", "0000320193-26-000202"
-Q1 = "0000320193-26-000111"
+Q1, Q2 = "0000320193-26-000111", "0000320193-26-000212"
 E1, E2 = "0000320193-26-000121", "0000320193-26-000222"
 K1_RISK = "K1-RISK: supply chain concentration and antitrust exposure."
 K2_RISK = "K2-RISK: new export controls on advanced chips."
@@ -117,6 +117,7 @@ async def test_section_analysis_is_keyed_by_the_filing_read(fresh_db, edgar, llm
 
 
 async def test_balance_sheet_analysis_is_keyed_by_the_filing_read(fresh_db, edgar, llm, monkeypatch):
+    del edgar.filings["10-Q"]  # no newer 10-Q: the 10-K's balance sheet is analysed
     await _ref_then_concurrent_refresh(edgar, monkeypatch)
 
     out = json.loads(await _ask(llm, "get_balance_sheet_summary"))
@@ -124,6 +125,21 @@ async def test_balance_sheet_analysis_is_keyed_by_the_filing_read(fresh_db, edga
     assert out["filing_reference"]["accession"] == K2
     assert await _row("10-K", K2, "balance") is not None
     assert await _row("10-K", K1, "balance") is None
+
+
+async def test_10q_balance_sheet_analysis_is_keyed_by_the_filing_read(fresh_db, edgar, llm, monkeypatch):
+    # Request A gets the Q1 ref; a concurrent refresh moves the retriever to
+    # Q2 before A reads the balance sheet: the analysis is Q2's.
+    monkeypatch.setenv("FILING_FRESHNESS_TTL_SECONDS", "3600")
+    assert (await latest_filing(TICKER, "10-Q")).accession == Q1
+    edgar.publish(tenq(Q2, "2026-05-01", TENQ_RISK))
+    await asyncio.to_thread(get_retriever(TICKER).refresh_latest_filing, "10-Q")
+
+    out = json.loads(await _ask(llm, "get_balance_sheet_summary"))
+
+    assert out["filing_reference"] == {**out["filing_reference"], "accession": Q2, "filing_date": "2026-05-01"}
+    assert await _row("10-Q", Q2, "balance_10q") is not None
+    assert await _row("10-Q", Q1, "balance_10q") is None
 
 
 async def test_8k_analysis_is_keyed_by_the_filing_read(fresh_db, edgar, llm, monkeypatch):
@@ -139,6 +155,29 @@ async def test_8k_analysis_is_keyed_by_the_filing_read(fresh_db, edgar, llm, mon
     assert await _row("8-K", E2, "event") is not None
     assert await _row("8-K", E1, "earnings") is None
     assert await _row("8-K", E1, "event") is None
+
+
+@pytest.mark.parametrize("newer_is_earnings", [True, False])
+async def test_8k_input_and_key_come_from_one_filing(fresh_db, edgar, llm, newer_is_earnings):
+    # A refresh lands after the overview of E1 (an earnings 8-K) is read but
+    # before its analysis input is: the input must still be E1's, saved
+    # under E1, never the newer 8-K's text under E1's accession.
+    newer = eightk(E2, "2026-11-10", earnings=newer_is_earnings, item_text="CEO resigned.")
+    assert (await latest_filing(TICKER, "8-K")).accession == E1
+
+    def concurrent_refresh():
+        edgar.publish(newer)
+        get_retriever(TICKER).refresh_latest_filing("8-K")
+
+    edgar.filings["8-K"][-1].report.after_overview = concurrent_refresh
+
+    out = json.loads(await _ask(llm, "analyze_latest_8k"))
+
+    assert llm.calls == 1
+    assert "Earnings release filed 2026-01-30" in llm.prompts[0]
+    assert "2026-11-10" not in llm.prompts[0] and "CEO resigned." not in llm.prompts[0]
+    assert out["filing_reference"]["accession"] == E1
+    assert await _row("8-K", E1, "earnings") is not None
 
 
 # ── #30: a stored analysis is served without downloading the filing ──────────

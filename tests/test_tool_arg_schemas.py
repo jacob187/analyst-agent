@@ -530,6 +530,13 @@ def edgar(monkeypatch):
         ({}, "2.02"),
         ("1.01", "1.01"),
         ({"query": "5.02"}, "5.02"),
+        # The plan worker's `ainvoke("")`, and blank items a model may send,
+        # mean "no item chosen": the default, not a lookup of item ''.
+        ("", "2.02"),
+        ("   ", "2.02"),
+        ({"item": ""}, "2.02"),
+        ({"item": None}, "2.02"),
+        ({"item": " 5.02 "}, "5.02"),
     ],
 )
 async def test_get_8k_item_argument_forms(edgar, args, expected):

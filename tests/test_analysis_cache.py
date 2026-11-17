@@ -227,6 +227,86 @@ async def test_edgar_outage_after_ttl_serves_the_stored_analyses(fresh_db, edgar
     assert llm.calls == 2
 
 
+class _Clock:
+    """Monotonic clock the analysis cache reads, advanced by hand."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    fake = _Clock()
+    monkeypatch.setattr(analysis_cache, "_clock", fake)
+    return fake
+
+
+async def test_failed_lookup_backs_off_and_serves_stale(fresh_db, edgar, llm, clock, monkeypatch):
+    # During an outage only the first call asks EDGAR; callers in the
+    # backoff window, concurrent or later, are served the stale ref at once.
+    monkeypatch.setenv("FILING_FRESHNESS_TTL_SECONDS", "3600")
+    monkeypatch.setenv("FILING_LOOKUP_FAILURE_BACKOFF_SECONDS", "60")
+    risk = json.loads(await _ask(llm, "get_risk_factors_summary"))
+    edgar.outage = RuntimeError("EDGAR 429")
+    clock.now += 3600  # the TTL lapses
+
+    served = await asyncio.gather(*(_ask(llm, "get_risk_factors_summary") for _ in range(4)))
+    clock.now += 59
+    served.append(await _ask(llm, "get_risk_factors_summary"))
+
+    assert edgar.failed_companies == 1
+    assert [json.loads(out) for out in served] == [risk] * 5
+    assert llm.calls == 1
+
+
+async def test_lookup_recovers_after_the_backoff(fresh_db, edgar, llm, clock, monkeypatch):
+    monkeypatch.setenv("FILING_FRESHNESS_TTL_SECONDS", "3600")
+    monkeypatch.setenv("FILING_LOOKUP_FAILURE_BACKOFF_SECONDS", "60")
+    await _ask(llm, "get_risk_factors_summary")
+    edgar.outage = RuntimeError("EDGAR 429")
+    clock.now += 3600
+    await _ask(llm, "get_risk_factors_summary")
+    assert edgar.failed_companies == 1
+
+    # EDGAR is back and has a newer 10-K: once the backoff lapses the next
+    # call asks again and analyses it.
+    edgar.outage = None
+    edgar.publish(tenk(K2, "2026-11-01", TENK_RISK_2))
+    clock.now += 60
+    out = json.loads(await _ask(llm, "get_risk_factors_summary"))
+
+    assert out["filing_reference"]["accession"] == K2
+    assert TENK_RISK_2 in llm.prompts[-1]
+    # Success clears the failure: the next lapse asks EDGAR right away.
+    edgar.outage = RuntimeError("EDGAR 503")
+    clock.now += 3600
+    await _ask(llm, "get_risk_factors_summary")
+    assert edgar.failed_companies == 2
+
+
+async def test_backoff_never_hides_a_lookup_with_nothing_stale(fresh_db, edgar, llm, clock, monkeypatch):
+    # A ticker with no cached ref has nothing to serve, so a call inside the
+    # backoff window still asks EDGAR (and fails until it is back).
+    monkeypatch.setenv("FILING_LOOKUP_FAILURE_BACKOFF_SECONDS", "60")
+    edgar.outage = RuntimeError("EDGAR 429")
+    assert "EDGAR 429" in await _ask(llm, "get_risk_factors_summary")
+    edgar.outage = None
+    out = json.loads(await _ask(llm, "get_risk_factors_summary"))
+    assert out["filing_reference"]["accession"] == K1
+
+
+def test_failure_backoff_defaults_and_env_override(monkeypatch):
+    monkeypatch.delenv("FILING_LOOKUP_FAILURE_BACKOFF_SECONDS", raising=False)
+    assert analysis_cache.lookup_failure_backoff_seconds() == 60
+    monkeypatch.setenv("FILING_LOOKUP_FAILURE_BACKOFF_SECONDS", "5")
+    assert analysis_cache.lookup_failure_backoff_seconds() == 5
+    monkeypatch.setenv("FILING_LOOKUP_FAILURE_BACKOFF_SECONDS", "-1")
+    assert analysis_cache.lookup_failure_backoff_seconds() == 60
+
+
 async def test_edgar_outage_with_nothing_cached_still_fails(fresh_db, edgar, llm):
     edgar.outage = RuntimeError("EDGAR 429")
     out = await _ask(llm, "get_risk_factors_summary")
@@ -266,15 +346,57 @@ async def test_served_analysis_carries_filing_reference(fresh_db, edgar, llm):
     cached = json.loads(await _ask(llm, "get_balance_sheet_summary"))
 
     ref = generated["filing_reference"]
-    assert ref["filing_date"] == "2025-11-01"
-    assert ref["accession"] == K1
+    assert ref["filing_date"] == "2026-02-01"
+    assert ref["accession"] == Q1
     assert datetime.fromisoformat(ref["analyzed_at"]).tzinfo is not None
     assert cached["filing_reference"] == ref
 
 
 async def test_filing_reference_is_not_stored(fresh_db, edgar, llm):
     await _ask(llm, "get_balance_sheet_summary")
-    assert "filing_reference" not in await _row("10-K", K1, "balance")
+    assert "filing_reference" not in await _row("10-Q", Q1, "balance_10q")
+
+
+# ── Balance sheet: the newest filing with one (10-Q or 10-K) ──────────────────
+
+
+def _balance_text(filing) -> str:
+    return filing.report.financials.balance_sheet().to_dataframe().to_string()
+
+
+async def test_balance_sheet_summary_analyses_the_newer_10q(fresh_db, edgar, llm):
+    out = json.loads(await _ask(llm, "get_balance_sheet_summary"))
+
+    assert llm.calls == 1
+    assert _balance_text(edgar.filings["10-Q"][0]) in llm.prompts[0]
+    assert _balance_text(edgar.filings["10-K"][0]) not in llm.prompts[0]
+    assert out["filing_reference"]["accession"] == Q1
+    assert await _row("10-Q", Q1, "balance_10q") == _stored_part(out)
+    assert await _row("10-K", K1, "balance") is None
+
+
+async def test_balance_sheet_summary_uses_the_10k_when_it_is_newer(fresh_db, edgar, llm):
+    edgar.publish(tenk(K2, "2026-11-01", TENK_RISK_2))
+
+    out = json.loads(await _ask(llm, "get_balance_sheet_summary"))
+
+    assert _balance_text(edgar.filings["10-K"][0]) in llm.prompts[0]
+    assert out["filing_reference"]["accession"] == K2
+    assert await _row("10-K", K2, "balance") == _stored_part(out)
+
+
+async def test_balance_sheet_summary_falls_back_when_the_10q_has_none(fresh_db, monkeypatch, llm):
+    fake = FakeEdgar()
+    fake.publish(tenk(K1, "2025-11-01", TENK_RISK_1))
+    fake.publish(tenq(Q1, "2026-02-01", TENQ_RISK, balance_sheet=False))
+    fake.install(monkeypatch)
+
+    out = json.loads(await _ask(llm, "get_balance_sheet_summary"))
+
+    assert _balance_text(fake.filings["10-K"][0]) in llm.prompts[0]
+    assert out["filing_reference"]["accession"] == K1
+    assert await _row("10-K", K1, "balance") == _stored_part(out)
+    assert await _row("10-Q", Q1, "balance_10q") is None
 
 
 async def test_get_or_analyze_miss_without_generator_returns_none(fresh_db):
@@ -335,6 +457,20 @@ async def test_company_without_the_form_caches_none(monkeypatch):
     assert await latest_filing(TICKER, "10-K") is None
     assert await latest_filing(TICKER, "10-K") is None
     assert fake.companies == 1
+
+
+async def test_lookups_after_the_ttl_read_only_the_recent_submissions(edgar, monkeypatch):
+    # Each lookup builds a fresh Company; only the first looks through the
+    # older submission pages (this filer has no 20-F anywhere).
+    await latest_filing(TICKER, "10-K")
+    downloads = edgar.page_downloads
+
+    monkeypatch.setenv("FILING_FRESHNESS_TTL_SECONDS", "0")
+    for _ in range(3):
+        await latest_filing(TICKER, "10-K")
+
+    assert edgar.companies == 4
+    assert edgar.page_downloads == downloads
 
 
 def test_ttl_defaults_to_four_hours(monkeypatch):
@@ -463,6 +599,21 @@ async def test_company_page_serves_chats_analysis(fresh_db, edgar, llm, page):
     assert risk_prompts == []  # the page did not re-analyse the 10-K risk factors
     assert data["tenk"]["risk_10k"] == chat_risk
     assert data["eightk"]["analysis"] == chat_8k
+
+
+async def test_chat_and_page_balance_analyses_never_overwrite_each_other(fresh_db, edgar, llm, page):
+    # The page analyses the 10-K's balance sheet; chat the newer 10-Q's.
+    # Different inputs, so each is stored under its own filing's key.
+    data = await page()
+    page_balance = await _row("10-K", K1, "balance")
+    assert _stored_part(data["tenk"]["balance"]) == page_balance
+
+    chat = json.loads(await _ask(llm, "get_balance_sheet_summary"))
+
+    assert chat["filing_reference"]["accession"] == Q1
+    assert await _row("10-Q", Q1, "balance_10q") == _stored_part(chat)
+    assert await _row("10-K", K1, "balance") == page_balance
+    assert (await page())["tenk"]["balance"] == data["tenk"]["balance"]
 
 
 async def test_company_page_and_chat_share_the_freshness_lookup(fresh_db, edgar, llm, page, monkeypatch):
