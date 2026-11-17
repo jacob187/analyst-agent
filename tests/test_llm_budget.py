@@ -23,8 +23,11 @@ import api.db as db_module
 from agents.model_registry import get_default_model
 from api import llm_concurrency
 from api.llm_concurrency import (
+    OPERATOR_GLOBAL_USAGE_KEY as GLOBAL,
+    BudgetUsage,
     LLMBudgetExceeded,
     LLMCallCharger,
+    LLMGlobalBudgetExceeded,
     ensure_budget_available,
 )
 from tests.conftest import models_where, one_per_provider
@@ -32,6 +35,7 @@ from tests.conftest import models_where, one_per_provider
 
 USER_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 USER_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+NONE_USED = BudgetUsage(user=0, overall=0)
 
 
 @pytest.fixture
@@ -66,6 +70,15 @@ async def test_increment_llm_usage_isolated_per_user(fresh_db):
 
 
 @pytest.mark.eval_unit
+async def test_increment_llm_usage_adds_an_amount_in_one_update(fresh_db):
+    # A weighted call is charged in one statement, so concurrent callers each
+    # see a count that includes their whole charge.
+    assert await db_module.increment_llm_usage(USER_A, 3) == 3
+    assert await db_module.increment_llm_usage(USER_A, 2) == 5
+    assert await db_module.get_llm_usage(USER_A) == 5
+
+
+@pytest.mark.eval_unit
 async def test_concurrent_increments_each_see_their_own_count(fresh_db):
     # Parallel planner workers charge the trial search meter at once; each
     # must get a distinct count or two can be refused at the cap boundary.
@@ -95,7 +108,10 @@ async def test_get_llm_usage_rolls_over_next_day(fresh_db, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-_SETTINGS = ("LLM_DAILY_BUDGET", "LLM_DISPATCH_CONCURRENCY", "LLM_DISPATCH_WAIT_SECONDS")
+_SETTINGS = (
+    "LLM_DAILY_BUDGET", "LLM_GLOBAL_DAILY_BUDGET",
+    "LLM_DISPATCH_CONCURRENCY", "LLM_DISPATCH_WAIT_SECONDS",
+)
 
 
 def _settings_in_fresh_interpreter(**overrides: str) -> list[str]:
@@ -107,17 +123,18 @@ def _settings_in_fresh_interpreter(**overrides: str) -> list[str]:
     result = subprocess.run(
         [sys.executable, "-c",
          "import api.llm_concurrency as m; "
-         "print(m.LLM_DAILY_BUDGET, m.LLM_DISPATCH_CONCURRENCY, m.LLM_DISPATCH_WAIT_SECONDS)"],
+         "print(m.LLM_DAILY_BUDGET, m.LLM_GLOBAL_DAILY_BUDGET, "
+         "m.LLM_DISPATCH_CONCURRENCY, m.LLM_DISPATCH_WAIT_SECONDS)"],
         cwd=Path(__file__).resolve().parent.parent, env=env,
         capture_output=True, text=True, timeout=120,
     )
     assert result.returncode == 0, result.stderr
-    return result.stdout.split()[-3:]
+    return result.stdout.split()[-4:]
 
 
 @pytest.mark.eval_unit
 def test_default_budget_is_sized_for_per_call_charging():
-    assert _settings_in_fresh_interpreter() == ["350", "8", "30.0"]
+    assert _settings_in_fresh_interpreter() == ["350", "1500", "8", "30.0"]
 
 
 @pytest.mark.eval_unit
@@ -126,16 +143,17 @@ def test_malformed_budget_settings_fall_back_to_defaults(raw_int, raw_float):
     """A blank or malformed value must not crash backend import."""
     overrides = {
         "LLM_DAILY_BUDGET": raw_int,
+        "LLM_GLOBAL_DAILY_BUDGET": raw_int,
         "LLM_DISPATCH_CONCURRENCY": raw_int,
         "LLM_DISPATCH_WAIT_SECONDS": raw_float,
     }
-    assert _settings_in_fresh_interpreter(**overrides) == ["350", "8", "30.0"]
+    assert _settings_in_fresh_interpreter(**overrides) == ["350", "1500", "8", "30.0"]
 
 
 @pytest.mark.eval_unit
 def test_zero_dispatch_concurrency_falls_back_to_default():
     # A zero-slot pool would refuse every LLM call.
-    assert _settings_in_fresh_interpreter(LLM_DISPATCH_CONCURRENCY="0")[1] == "8"
+    assert _settings_in_fresh_interpreter(LLM_DISPATCH_CONCURRENCY="0")[2] == "8"
 
 
 # ---------------------------------------------------------------------------
@@ -147,9 +165,11 @@ def test_zero_dispatch_concurrency_falls_back_to_default():
 async def test_ensure_budget_available_under_limit_returns_usage(fresh_db, monkeypatch):
     monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 2)
     await db_module.increment_llm_usage(USER_A)
-    assert await ensure_budget_available(USER_A) == 1
+    await db_module.increment_llm_usage(GLOBAL, 4)
+    assert await ensure_budget_available(USER_A) == BudgetUsage(user=1, overall=4)
     # The check itself charges nothing.
     assert await db_module.get_llm_usage(USER_A) == 1
+    assert await db_module.get_llm_usage(GLOBAL) == 4
 
 
 @pytest.mark.eval_unit
@@ -157,15 +177,38 @@ async def test_ensure_budget_available_refuses_at_limit(fresh_db, monkeypatch):
     monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 2)
     await db_module.increment_llm_usage(USER_A)
     await db_module.increment_llm_usage(USER_A)
-    with pytest.raises(LLMBudgetExceeded):
+    with pytest.raises(LLMBudgetExceeded) as refused:
         await ensure_budget_available(USER_A)
+    assert not isinstance(refused.value, LLMGlobalBudgetExceeded)
     assert await db_module.get_llm_usage(USER_A) == 2
+
+
+@pytest.mark.eval_unit
+async def test_ensure_budget_available_refuses_once_everyone_has_spent_the_global_budget(
+    fresh_db, monkeypatch,
+):
+    # Many accounts, each under its own budget, still add up to one cap.
+    monkeypatch.setattr(llm_concurrency, "LLM_GLOBAL_DAILY_BUDGET", 3)
+    await db_module.increment_llm_usage(GLOBAL, 3)
+    with pytest.raises(LLMGlobalBudgetExceeded) as refused:
+        await ensure_budget_available(USER_A)
+    assert "free daily allowance" in str(refused.value)
+    assert "your own API key" in str(refused.value)
+
+
+@pytest.mark.eval_unit
+async def test_zero_global_budget_lends_nothing(fresh_db, monkeypatch):
+    # 0 means no operator-paid calls at all, as LLM_DAILY_BUDGET=0 does.
+    monkeypatch.setattr(llm_concurrency, "LLM_GLOBAL_DAILY_BUDGET", 0)
+    with pytest.raises(LLMGlobalBudgetExceeded):
+        await ensure_budget_available(USER_A)
 
 
 @pytest.mark.eval_unit
 async def test_ensure_budget_available_anonymous_is_noop(fresh_db, monkeypatch):
     monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 0)
-    assert await ensure_budget_available(None) == 0
+    monkeypatch.setattr(llm_concurrency, "LLM_GLOBAL_DAILY_BUDGET", 0)
+    assert await ensure_budget_available(None) == BudgetUsage(user=0, overall=0)
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +223,7 @@ def _fake_llm():
 @pytest.mark.eval_unit
 async def test_charger_counts_concurrent_calls_on_the_loop(fresh_db):
     llm = _fake_llm()
-    charger = LLMCallCharger(USER_A, used=0)
+    charger = LLMCallCharger(USER_A, used=NONE_USED)
     config = {"callbacks": [charger]}
     await asyncio.gather(*(llm.ainvoke("hi", config=config) for _ in range(5)))
     assert await charger.settle() == 5
@@ -199,7 +242,7 @@ async def test_charger_counts_calls_made_from_worker_threads(fresh_db):
         await llm.ainvoke("hi")
         return "done"
 
-    charger = LLMCallCharger(USER_A, used=0)
+    charger = LLMCallCharger(USER_A, used=NONE_USED)
     await RunnableLambda(node).ainvoke("q", config={"callbacks": [charger]})
     assert await charger.settle() == 4
     assert await db_module.get_llm_usage(USER_A) == 4
@@ -207,7 +250,7 @@ async def test_charger_counts_calls_made_from_worker_threads(fresh_db):
 
 @pytest.mark.eval_unit
 async def test_charger_charges_nothing_when_no_llm_runs(fresh_db):
-    charger = LLMCallCharger(USER_A, used=0)
+    charger = LLMCallCharger(USER_A, used=NONE_USED)
     await RunnableLambda(lambda x: x).ainvoke("q", config={"callbacks": [charger]})
     assert await charger.settle() == 0
     assert await db_module.get_llm_usage(USER_A) == 0
@@ -233,7 +276,7 @@ async def test_charger_stops_an_on_loop_run_once_the_budget_is_spent(fresh_db, m
 async def test_charger_stops_a_worker_thread_call_once_the_budget_is_spent(fresh_db, monkeypatch):
     monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 1)
     llm = _fake_llm()
-    charger = LLMCallCharger(USER_A, used=0)
+    charger = LLMCallCharger(USER_A, used=NONE_USED)
     config = {"callbacks": [charger]}
 
     await asyncio.to_thread(llm.invoke, "hi", config)
@@ -250,7 +293,7 @@ async def test_charger_learns_of_other_runs_charges(fresh_db, monkeypatch):
     # own charge returns the true count, and its next call is refused.
     monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 3)
     llm = _fake_llm()
-    charger = LLMCallCharger(USER_A, used=0)
+    charger = LLMCallCharger(USER_A, used=NONE_USED)
     config = {"callbacks": [charger]}
     await db_module.increment_llm_usage(USER_A)
     await db_module.increment_llm_usage(USER_A)
@@ -282,6 +325,52 @@ async def test_concurrent_runs_overshoot_by_at_most_their_in_flight_calls(fresh_
 
 
 @pytest.mark.eval_unit
+async def test_every_users_charges_add_to_the_global_usage(fresh_db):
+    llm = _fake_llm()
+    for user in (USER_A, USER_B):
+        charger = LLMCallCharger(user, used=await ensure_budget_available(user))
+        await llm.ainvoke("hi", config={"callbacks": [charger]})
+        await llm.ainvoke("hi", config={"callbacks": [charger]})
+        assert await charger.settle() == 2
+    assert await db_module.get_llm_usage(USER_A) == 2
+    assert await db_module.get_llm_usage(USER_B) == 2
+    assert await db_module.get_llm_usage(GLOBAL) == 4
+
+
+@pytest.mark.eval_unit
+async def test_charger_stops_a_run_once_the_global_budget_is_spent(fresh_db, monkeypatch):
+    # USER_B is far under their own budget; everyone else's usage stops them.
+    monkeypatch.setattr(llm_concurrency, "LLM_GLOBAL_DAILY_BUDGET", 3)
+    await db_module.increment_llm_usage(GLOBAL, 2)
+    llm = _fake_llm()
+    charger = LLMCallCharger(USER_B, used=await ensure_budget_available(USER_B))
+    config = {"callbacks": [charger]}
+
+    await llm.ainvoke("hi", config=config)  # global 2 -> 3: the last allowed call
+    with pytest.raises(LLMGlobalBudgetExceeded):
+        await llm.ainvoke("hi", config=config)
+
+    assert await charger.settle() == 1
+    assert await db_module.get_llm_usage(USER_B) == 1
+    assert await db_module.get_llm_usage(GLOBAL) == 3
+
+
+@pytest.mark.eval_unit
+async def test_charger_learns_of_other_users_global_charges(fresh_db, monkeypatch):
+    monkeypatch.setattr(llm_concurrency, "LLM_GLOBAL_DAILY_BUDGET", 3)
+    llm = _fake_llm()
+    charger = LLMCallCharger(USER_A, used=await ensure_budget_available(USER_A))
+    config = {"callbacks": [charger]}
+    await db_module.increment_llm_usage(GLOBAL, 2)  # another user, meanwhile
+
+    await llm.ainvoke("hi", config=config)
+    await charger.settle()  # the charge has landed: global usage is 3
+    with pytest.raises(LLMGlobalBudgetExceeded):
+        await llm.ainvoke("hi", config=config)
+    assert await db_module.get_llm_usage(GLOBAL) == 3
+
+
+@pytest.mark.eval_unit
 def test_sync_call_on_the_loop_thread_does_not_deadlock(tmp_path, monkeypatch):
     """A sync `invoke` made on the loop thread itself (blocking the loop) fires
     the callback there; the charger must not wait on the loop it is blocking.
@@ -293,7 +382,7 @@ def test_sync_call_on_the_loop_thread_does_not_deadlock(tmp_path, monkeypatch):
     async def main():
         await db_module.init_db()
         try:
-            charger = LLMCallCharger(USER_A, used=0)
+            charger = LLMCallCharger(USER_A, used=NONE_USED)
             _fake_llm().invoke("hi", config={"callbacks": [charger]})
             result["calls"] = await charger.settle()
             result["usage"] = await db_module.get_llm_usage(USER_A)
@@ -312,10 +401,10 @@ async def test_charge_failing_after_settle_is_logged(fresh_db, monkeypatch, capl
     """A call that starts after the route settled (a briefing thread still
     running past its 504) is charged by a task nobody awaits; if that charge
     fails it must still be logged."""
-    charger = LLMCallCharger(USER_A, used=0)
+    charger = LLMCallCharger(USER_A, used=NONE_USED)
     assert await charger.settle() == 0
 
-    async def failing_increment(user_id):
+    async def failing_increment(user_id, amount=1):
         raise RuntimeError("database is locked")
 
     monkeypatch.setattr(llm_concurrency, "increment_llm_usage", failing_increment)
@@ -390,7 +479,7 @@ def test_unknown_or_unpriced_model_costs_one_unit_with_a_warning(caplog):
 async def test_charger_weights_each_call_by_the_called_models_price(fresh_db):
     model = pricier_lendable_model()
     llm = _named_llm(model.id)
-    charger = LLMCallCharger(USER_A, used=0)
+    charger = LLMCallCharger(USER_A, used=NONE_USED)
     for _ in range(2):
         await llm.ainvoke("hi", config={"callbacks": [charger]})
     assert await charger.settle() == 2
@@ -404,7 +493,7 @@ async def test_charger_refuses_a_call_the_budget_cannot_cover(fresh_db, monkeypa
     model = pricier_lendable_model()
     units = budget_units(model)
     monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 2 * units - 1)
-    charger = LLMCallCharger(USER_A, used=0)
+    charger = LLMCallCharger(USER_A, used=NONE_USED)
     config = {"callbacks": [charger]}
 
     await _named_llm(model.id).ainvoke("hi", config=config)

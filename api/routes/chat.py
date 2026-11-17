@@ -35,9 +35,11 @@ from api.dependencies import (
     resolve_ws_keys,
 )
 from api.llm_concurrency import (
+    BudgetUsage,
     LLMBudgetExceeded,
     LLMCallCharger,
     LLMConcurrencyExceeded,
+    LLMGlobalBudgetExceeded,
     ensure_budget_available,
 )
 from api.rate_limit import check_rate_limit, client_ip
@@ -68,6 +70,12 @@ FREE_TRIAL_AT_CAPACITY = (
 BUDGET_REACHED = (
     "Daily LLM budget reached. Try again tomorrow or add your own API key in Settings."
 )
+
+
+def _budget_message(e: LLMBudgetExceeded) -> str:
+    """What a refused user sees: their own budget, or everyone's (whose
+    exception message is already user-facing)."""
+    return str(e) if isinstance(e, LLMGlobalBudgetExceeded) else BUDGET_REACHED
 
 
 _trace_hash_key: bytes | None = None
@@ -375,13 +383,13 @@ async def chat(websocket: WebSocket, ticker: str):
                     # and the run is stopped once the budget runs out
                     # (LLMCallCharger on the run config, below).
                     charger: LLMCallCharger | None = None
-                    budget_used = 0
+                    budget_used = BudgetUsage(user=0, overall=0)
                     if operator_paid:
                         try:
                             budget_used = await ensure_budget_available(user_id)
-                        except LLMBudgetExceeded:
+                        except LLMBudgetExceeded as e:
                             await _safe_send(websocket, {
-                                "type": "error", "message": BUDGET_REACHED,
+                                "type": "error", "message": _budget_message(e),
                             })
                             continue
                     elif free_trial:
@@ -476,9 +484,9 @@ async def chat(websocket: WebSocket, ticker: str):
                             except LLMBudgetExceeded as e:
                                 # The budget ran out mid-run (LLMCallCharger).
                                 _record_span_error(span, e)
-                                logger.info("Daily LLM budget spent mid-query for %s", ticker)
+                                logger.info("Daily LLM budget spent mid-query for %s: %s", ticker, e)
                                 await _safe_send(websocket, {
-                                    "type": "error", "message": BUDGET_REACHED,
+                                    "type": "error", "message": _budget_message(e),
                                 })
                             except LLMConcurrencyExceeded as e:
                                 _record_span_error(span, e)

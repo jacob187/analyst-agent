@@ -14,6 +14,7 @@ from api.db import (
 )
 from api.dependencies import ApiKeys, get_api_keys, resolve_model
 from api.llm_concurrency import (
+    BudgetUsage,
     LLMBudgetExceeded,
     LLMCallCharger,
     LLMConcurrencyExceeded,
@@ -116,7 +117,7 @@ async def get_briefing(
     # per LLM call actually made (LLMCallCharger below). BYOK requests spend
     # the user's own provider quota and are never charged.
     operator_paid = keys.is_operator_paid(model.provider)
-    budget_used = 0
+    budget_used = BudgetUsage(user=0, overall=0)
     if operator_paid:
         try:
             budget_used = await ensure_budget_available(user_id)

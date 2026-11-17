@@ -24,7 +24,7 @@ from agents.sec_workflow.analysis_cache import (
     latest_filing,
 )
 from agents.tools.sec_tools import create_sec_tools
-from api.llm_concurrency import LLMCallCharger
+from api.llm_concurrency import BudgetUsage, LLMCallCharger
 from tests.conftest import byok_header
 from tests.sec_fakes import CountingChatModel, FakeEdgar, eightk, tenk, tenq
 
@@ -494,7 +494,7 @@ async def test_unsupported_form_is_refused(edgar):
 
 
 async def test_all_summaries_llm_calls_reach_run_callbacks(fresh_db, edgar, llm):
-    charger = LLMCallCharger(USER, used=0)
+    charger = LLMCallCharger(USER, used=BudgetUsage(user=0, overall=0))
     out = await _ask(llm, "get_all_summaries", config={"callbacks": [charger]})
 
     assert "=== RISK ANALYSIS ===" in out and "balance analysis" in out
@@ -505,7 +505,7 @@ async def test_all_summaries_llm_calls_reach_run_callbacks(fresh_db, edgar, llm)
 
 async def test_cache_hits_charge_nothing(fresh_db, edgar, llm):
     await _ask(llm, "get_all_summaries")
-    charger = LLMCallCharger(USER, used=0)
+    charger = LLMCallCharger(USER, used=BudgetUsage(user=0, overall=0))
     await _ask(llm, "get_all_summaries", config={"callbacks": [charger]})
     assert await charger.settle() == 0
 
@@ -534,7 +534,7 @@ async def test_graph_worker_charges_the_runs_callbacks(fresh_db, edgar, llm):
         "classification": None, "plan": plan, "step_results": {}, "final_response": "",
     }
 
-    charger = LLMCallCharger(USER, used=0)
+    charger = LLMCallCharger(USER, used=BudgetUsage(user=0, overall=0))
     final = await graph.compile().ainvoke(state, config={"callbacks": [charger]})
 
     result = final["step_results"][1]

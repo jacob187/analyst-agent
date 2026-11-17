@@ -37,6 +37,7 @@ from api.llm_concurrency import (
     LLMBudgetExceeded,
     LLMCallCharger,
     llm_slot,
+    read_budget_usage,
 )
 from api.rate_limit import check_rest_rate_limit, client_ip, rate_limit_key
 from api.validators import TICKER_RE
@@ -656,8 +657,7 @@ async def _budget_charger(charge_user_id: str | None) -> LLMCallCharger | None:
     """
     if charge_user_id is None:
         return None
-    from api.db import get_llm_usage
-    return LLMCallCharger(charge_user_id, used=await get_llm_usage(charge_user_id))
+    return LLMCallCharger(charge_user_id, used=await read_budget_usage(charge_user_id))
 
 
 # The 8-K `reason` in the JSON response when its analysis was refused.

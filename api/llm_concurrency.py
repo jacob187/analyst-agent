@@ -15,6 +15,9 @@ Primitives:
   run config or the LLM, which also refuses calls once the budget is spent).
   The budget unit is one default-model call: each call is charged
   `call_units(model)` units, its price relative to the registry default.
+  Every charge also lands on a global row (`OPERATOR_GLOBAL_USAGE_KEY`)
+  capped by `LLM_GLOBAL_DAILY_BUDGET`, which bounds the operator's daily
+  spend across all signed-in users.
 
 The cap and budget are env-tunable. Tests override the module constants via
 `monkeypatch.setattr` and call `_rebuild_semaphore()` to pick up a new
@@ -29,7 +32,7 @@ import logging
 import math
 import threading
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, NamedTuple
 
 from langchain_core.callbacks import BaseCallbackHandler
 
@@ -49,6 +52,20 @@ LLM_DISPATCH_WAIT_SECONDS = env_float("LLM_DISPATCH_WAIT_SECONDS", 30.0, minimum
 # + answer + summary, more with tools or planning), so 350 keeps roughly the
 # former 100-request allowance on the default model.
 LLM_DAILY_BUDGET = env_int("LLM_DAILY_BUDGET", 350, minimum=0)
+# Budget units per UTC day across ALL signed-in users on the operator's key,
+# in the same units and charged at the same time as LLM_DAILY_BUDGET. Sign-ups
+# are free, so per-user budgets alone don't bound the operator's daily bill.
+# 0 lends nothing (like LLM_DAILY_BUDGET=0). The anonymous free trial has its
+# own cap (ANON_FREE_DAILY_CAP) and isn't counted here.
+LLM_GLOBAL_DAILY_BUDGET = env_int("LLM_GLOBAL_DAILY_BUDGET", 1500, minimum=0)
+# Pseudo user id of the global row in `user_llm_usage` — can't collide with
+# Clerk `user_...` ids, UUIDs or the free trial's `anon_trial:` keys.
+OPERATOR_GLOBAL_USAGE_KEY = "operator:global"
+
+GLOBAL_BUDGET_REACHED = (
+    "Today's free daily allowance is used up. "
+    "Add your own API key in Settings to keep going, or try again tomorrow."
+)
 
 
 _semaphore = asyncio.Semaphore(LLM_DISPATCH_CONCURRENCY)
@@ -61,9 +78,25 @@ class LLMConcurrencyExceeded(RuntimeError):
 class LLMBudgetExceeded(RuntimeError):
     """Raised when a user crosses their daily LLM dispatch budget."""
 
-    def __init__(self, limit: int) -> None:
+    def __init__(self, limit: int, message: str | None = None) -> None:
         self.limit = limit
-        super().__init__(f"Daily LLM budget of {limit} exceeded")
+        super().__init__(message or f"Daily LLM budget of {limit} exceeded")
+
+
+class LLMGlobalBudgetExceeded(LLMBudgetExceeded):
+    """Raised when operator-paid usage across all users crosses
+    `LLM_GLOBAL_DAILY_BUDGET`. Its message is user-facing."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(limit, GLOBAL_BUDGET_REACHED)
+
+
+class BudgetUsage(NamedTuple):
+    """Today's operator-paid usage in budget units: the user's own, and
+    everyone's (`OPERATOR_GLOBAL_USAGE_KEY`)."""
+
+    user: int
+    overall: int
 
 
 def _rebuild_semaphore() -> None:
@@ -102,19 +135,31 @@ async def llm_slot():
         _semaphore.release()
 
 
-async def ensure_budget_available(user_id: str | None) -> int:
-    """Raise `LLMBudgetExceeded` if user_id has already spent today's budget.
+async def read_budget_usage(user_id: str) -> BudgetUsage:
+    """Today's usage for user_id and across all users; refuses nothing."""
+    return BudgetUsage(
+        user=await get_llm_usage(user_id),
+        overall=await get_llm_usage(OPERATOR_GLOBAL_USAGE_KEY),
+    )
 
-    The pre-flight for per-call charging: a request is refused when usage is
-    already at or over `LLM_DAILY_BUDGET`. Returns the usage it read (0 for
+
+async def ensure_budget_available(user_id: str | None) -> BudgetUsage:
+    """Raise if user_id, or all users together, already spent today's budget.
+
+    The pre-flight for per-call charging: a request is refused when the
+    user's usage is at or over `LLM_DAILY_BUDGET` (`LLMBudgetExceeded`), or
+    everyone's is at or over `LLM_GLOBAL_DAILY_BUDGET`
+    (`LLMGlobalBudgetExceeded`). Returns the usage it read (zeros for
     anonymous traffic, which is never charged) so an `LLMCallCharger` can
     start from it.
     """
     if user_id is None:
-        return 0
-    used = await get_llm_usage(user_id)
-    if used >= LLM_DAILY_BUDGET:
+        return BudgetUsage(user=0, overall=0)
+    used = await read_budget_usage(user_id)
+    if used.user >= LLM_DAILY_BUDGET:
         raise LLMBudgetExceeded(LLM_DAILY_BUDGET)
+    if used.overall >= LLM_GLOBAL_DAILY_BUDGET:
+        raise LLMGlobalBudgetExceeded(LLM_GLOBAL_DAILY_BUDGET)
     return used
 
 
@@ -167,17 +212,19 @@ def _called_model_id(kwargs: dict[str, Any]) -> str | None:
     return name.removeprefix("models/")
 
 
-async def _charge_units(user_id: str, units: int) -> int:
-    """Add `units` to today's usage; return the count after the last one."""
-    count = 0
-    for _ in range(units):
-        count = await increment_llm_usage(user_id)
-    return count
+async def _charge_units(user_id: str, units: int) -> BudgetUsage:
+    """Add `units` to the user's and the global usage, one update each;
+    return both counts after the charge."""
+    return BudgetUsage(
+        user=await increment_llm_usage(user_id, units),
+        overall=await increment_llm_usage(OPERATOR_GLOBAL_USAGE_KEY, units),
+    )
 
 
 class LLMCallCharger(BaseCallbackHandler):
     """LangChain callback that charges `call_units(model)` budget units per
-    LLM call started, and stops the run once the user's daily budget is spent.
+    LLM call started, and stops the run once the user's or the global daily
+    budget is spent.
 
     Attach it through the run config so every chat-model / LLM start inside
     the run is counted — graph nodes, sync tools in worker threads, and
@@ -192,12 +239,14 @@ class LLMCallCharger(BaseCallbackHandler):
         finally:
             await charger.settle()
 
-    Enforcement: the charger tracks today's usage, starting from `used` (what
-    the pre-flight read — required, so a caller can't silently start from 0)
-    plus its own charges, and raised to the count each DB
-    increment returns, which includes other requests' charges. A call whose
-    units would take that past `LLM_DAILY_BUDGET` raises `LLMBudgetExceeded`
-    from the LLM call (`raise_error`), so the run stops. The model is the one
+    Enforcement: the charger tracks today's usage — the user's and everyone's
+    — starting from `used` (what the pre-flight read — required, so a caller
+    can't silently start from 0) plus its own charges, and raised to the
+    counts each DB increment returns, which include other requests' charges.
+    A call whose units would take the user past `LLM_DAILY_BUDGET` raises
+    `LLMBudgetExceeded`, or everyone past `LLM_GLOBAL_DAILY_BUDGET`
+    `LLMGlobalBudgetExceeded`, from the LLM call (`raise_error`), so the run
+    stops. The model is the one
     the call reports (`ls_model_name`), so every route that attaches the
     charger is weighted by the model actually run. The check never
     waits on the DB, so it can't block or deadlock whichever thread the call
@@ -221,11 +270,12 @@ class LLMCallCharger(BaseCallbackHandler):
     run_inline = True  # fire on the calling thread; scheduling is ours
     raise_error = True  # LLMBudgetExceeded must reach the LLM call
 
-    def __init__(self, user_id: str, *, used: int) -> None:
+    def __init__(self, user_id: str, *, used: BudgetUsage) -> None:
         self.user_id = user_id
         self.calls = 0
         self.units = 0
-        self._used = used
+        self._used = used.user
+        self._overall = used.overall
         self._loop = asyncio.get_running_loop()
         self._lock = threading.Lock()
         self._pending: list[concurrent.futures.Future] = []
@@ -235,7 +285,10 @@ class LLMCallCharger(BaseCallbackHandler):
         with self._lock:
             if self._used + units > LLM_DAILY_BUDGET:
                 raise LLMBudgetExceeded(LLM_DAILY_BUDGET)
+            if self._overall + units > LLM_GLOBAL_DAILY_BUDGET:
+                raise LLMGlobalBudgetExceeded(LLM_GLOBAL_DAILY_BUDGET)
             self._used += units
+            self._overall += units
             self.calls += 1
             self.units += units
         coro = _charge_units(self.user_id, units)
@@ -260,8 +313,10 @@ class LLMCallCharger(BaseCallbackHandler):
         if exc is not None:
             logger.error("LLM budget charge failed for a call: %r", exc)
             return
+        counts = future.result()
         with self._lock:
-            self._used = max(self._used, future.result())
+            self._used = max(self._used, counts.user)
+            self._overall = max(self._overall, counts.overall)
 
     def on_llm_start(self, serialized: dict[str, Any], prompts: list[str], **kwargs: Any) -> None:
         self._charge(kwargs)

@@ -351,8 +351,9 @@ async def init_db():
             SELECT user_id, ticker, added_at FROM watchlist
         """)
 
-        # Per-user daily LLM dispatch counter. Backs the operator-paid budget
-        # check in api/llm_concurrency.py. PK is (user_id, date) so each day
+        # Per-user daily LLM usage counter (plus pseudo-user rows for global
+        # caps). Backs the operator-paid budget checks in
+        # api/llm_concurrency.py. PK is (user_id, date) so each day
         # rolls over naturally — no cron needed.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS user_llm_usage (
@@ -408,8 +409,8 @@ def _today_utc() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
-async def increment_llm_usage(user_id: str) -> int:
-    """Increment today's LLM dispatch count for user_id; return the new count.
+async def increment_llm_usage(user_id: str, amount: int = 1) -> int:
+    """Add `amount` to today's LLM usage count for user_id; return the new count.
 
     Atomic via a single `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`, so
     each caller sees the count its own increment produced, never a later one.
@@ -418,11 +419,11 @@ async def increment_llm_usage(user_id: str) -> int:
         async with db.execute(
             """
             INSERT INTO user_llm_usage (user_id, date, count)
-            VALUES (?, ?, 1)
-            ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id, date) DO UPDATE SET count = count + excluded.count
             RETURNING count
             """,
-            (user_id, _today_utc()),
+            (user_id, _today_utc(), amount),
         ) as cursor:
             row = await cursor.fetchone()
         await db.commit()
