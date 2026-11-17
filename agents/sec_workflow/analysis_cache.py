@@ -358,6 +358,8 @@ def eightk_kind(overview: dict[str, Any]) -> str:
 def eightk_input(retriever, overview: dict[str, Any], metadata: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """``(kind, raw)`` LLM input for the latest 8-K (kind per ``eightk_kind``;
     an event's primary item text is empty when it failed to extract).
+    ``retriever`` is a ``SECDataRetrieval`` or, so the input is read from the
+    same filing as ``overview``, the ``EightKReport`` it came from.
     Blocking (edgartools)."""
     kind = eightk_kind(overview)
     if kind == "earnings":
@@ -375,3 +377,20 @@ def eightk_input(retriever, overview: dict[str, Any], metadata: dict[str, Any]) 
         "text": item_text,
         "metadata": metadata,
     }
+
+
+def eightk_overview_and_input(retriever) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(overview, raw)`` for the latest 8-K, both read from one loaded
+    filing, so a concurrent refresh can't pair a newer 8-K's text with the
+    overview's accession and kind (the analysis key). ``raw`` is ``{}`` when
+    the overview is not found. Blocking (edgartools)."""
+    try:
+        report = retriever.latest_8k()
+    except Exception as e:
+        logger.warning("[%s] 8-K load failed: %s", retriever.ticker, e)
+        return {"found": False, "text": f"Error fetching 8-K overview: {e}", "metadata": {}}, {}
+    overview = report.get_8k_overview()
+    if not overview.get("found"):
+        return overview, {}
+    _, raw = eightk_input(report, overview, overview.get("metadata", {}))
+    return overview, raw

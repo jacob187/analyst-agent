@@ -213,6 +213,24 @@ def _latest(company, form: str):
     return company.latest(form=form)
 
 
+class EightKReport:
+    """One loaded 8-K (``SECDataRetrieval.latest_8k``) with the retriever's
+    8-K getters, all reading this filing and citing its metadata."""
+
+    def __init__(self, retriever: "SECDataRetrieval", report):
+        self._retriever = retriever
+        self._report = report  # (EightK, FilingMetadata), read together
+
+    def get_8k_overview(self) -> Dict[str, Any]:
+        return self._retriever.get_8k_overview(report=self._report)
+
+    def get_8k_item(self, item: str) -> Dict[str, Any]:
+        return self._retriever.get_8k_item(item, report=self._report)
+
+    def get_earnings_data(self) -> Dict[str, Any]:
+        return self._retriever.get_earnings_data(report=self._report)
+
+
 class SECDataRetrieval:
     def __init__(self, ticker: str):
         # edgar.set_identity is called once at process startup from api/main.py
@@ -411,8 +429,21 @@ class SECDataRetrieval:
         return metas
 
     # ── 8-K public methods ────────────────────────────────────────────────
+    #
+    # Each getter loads the retriever's current 8-K, unless given ``report``
+    # (from ``latest_8k``), which pins it to one already-loaded filing.
 
-    def get_8k_overview(self) -> Dict[str, Any]:
+    def latest_8k(self) -> "EightKReport":
+        """The latest 8-K, loaded once: its getters all read this filing,
+        even if a refresh moves the retriever to a newer 8-K meanwhile, so
+        an overview and the text read after it describe the same filing.
+        Raises if no 8-K is available."""
+        return EightKReport(self, _load_report(self, "8-K"))
+
+    def _8k_report(self, report):
+        return report if report is not None else _load_report(self, "8-K")
+
+    def get_8k_overview(self, *, report=None) -> Dict[str, Any]:
         """Overview of the latest 8-K: items, content type, earnings flag, dates.
 
         The ``content_type`` field is rule-based (no LLM call) and classifies the
@@ -420,7 +451,7 @@ class SECDataRetrieval:
         ``to_context(detail="standard")`` returns a ~300-token LLM-friendly summary.
         """
         try:
-            eightk, meta = _load_report(self, "8-K")
+            eightk, meta = self._8k_report(report)
 
             def extract() -> Dict[str, Any]:
                 return {
@@ -440,7 +471,7 @@ class SECDataRetrieval:
             logger.warning("[%s] 8-K overview extraction failed: %s", self.ticker, e)
             return {"found": False, "text": f"Error fetching 8-K overview: {e}", "metadata": {}}
 
-    def get_8k_item(self, item: str) -> Dict[str, Any]:
+    def get_8k_item(self, item: str, *, report=None) -> Dict[str, Any]:
         """Extract text for a specific 8-K item number (e.g. '2.02', '1.01').
 
         Uses ``EightK.__getitem__`` which accepts formats like '2.02',
@@ -448,13 +479,14 @@ class SECDataRetrieval:
         ``get_section`` for consistency.
         """
         item = (item or "").strip()
-        metadata = self._eightk_metadata.to_dict() if self._eightk_metadata else {}
         if not item:
             # A blank key would ask edgartools for item '' — a FutureWarning
             # today and a SectionNotFoundError in edgartools 6.0.
+            meta = report[1] if report is not None else self._eightk_metadata
+            metadata = meta.to_dict() if meta else {}
             return {"text": "No 8-K item number given (e.g. '2.02').", "metadata": metadata, "found": False}
         try:
-            eightk, meta = _load_report(self, "8-K")
+            eightk, meta = self._8k_report(report)
 
             def extract() -> Dict[str, Any]:
                 try:
@@ -475,7 +507,7 @@ class SECDataRetrieval:
             logger.warning("[%s] 8-K item %s extraction failed: %s", self.ticker, item, e)
             return {"text": f"Error extracting 8-K item {item}: {e}", "metadata": {}, "found": False}
 
-    def get_earnings_data(self) -> Dict[str, Any]:
+    def get_earnings_data(self, *, report=None) -> Dict[str, Any]:
         """Structured earnings from 8-K Item 2.02 + EX-99.1 press release.
 
         Uses edgartools v5 ``EarningsRelease`` to parse income statement,
@@ -484,7 +516,7 @@ class SECDataRetrieval:
         ``sec_llm_models.py`` handles interpretation.
         """
         try:
-            eightk, meta = _load_report(self, "8-K")
+            eightk, meta = self._8k_report(report)
 
             def extract() -> Dict[str, Any]:
                 metadata = meta.to_dict() if meta else {}

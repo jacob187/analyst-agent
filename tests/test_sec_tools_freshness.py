@@ -141,6 +141,29 @@ async def test_8k_analysis_is_keyed_by_the_filing_read(fresh_db, edgar, llm, mon
     assert await _row("8-K", E1, "event") is None
 
 
+@pytest.mark.parametrize("newer_is_earnings", [True, False])
+async def test_8k_input_and_key_come_from_one_filing(fresh_db, edgar, llm, newer_is_earnings):
+    # A refresh lands after the overview of E1 (an earnings 8-K) is read but
+    # before its analysis input is: the input must still be E1's, saved
+    # under E1, never the newer 8-K's text under E1's accession.
+    newer = eightk(E2, "2026-11-10", earnings=newer_is_earnings, item_text="CEO resigned.")
+    assert (await latest_filing(TICKER, "8-K")).accession == E1
+
+    def concurrent_refresh():
+        edgar.publish(newer)
+        get_retriever(TICKER).refresh_latest_filing("8-K")
+
+    edgar.filings["8-K"][-1].report.after_overview = concurrent_refresh
+
+    out = json.loads(await _ask(llm, "analyze_latest_8k"))
+
+    assert llm.calls == 1
+    assert "Earnings release filed 2026-01-30" in llm.prompts[0]
+    assert "2026-11-10" not in llm.prompts[0] and "CEO resigned." not in llm.prompts[0]
+    assert out["filing_reference"]["accession"] == E1
+    assert await _row("8-K", E1, "earnings") is not None
+
+
 # ── #30: a stored analysis is served without downloading the filing ──────────
 
 

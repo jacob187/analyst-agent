@@ -7,8 +7,8 @@ from typing import Callable, Dict, Any
 from agents.sec_workflow.analysis_cache import (
     CachedAnalysis,
     FilingRef,
-    eightk_input,
     eightk_kind,
+    eightk_overview_and_input,
     get_or_analyze,
     get_retriever,
     latest_filing,
@@ -373,6 +373,7 @@ async def _tool_analyze_latest_8k(ticker: str, llm: BaseChatModel) -> str:
     try:
         filing = await latest_filing(ticker, "8-K")
         overview: Dict[str, Any] = {"found": False}
+        raw: Dict[str, Any] = {}
         if filing is not None:
             # The kind is fixed per filing, so a stored analysis of either
             # kind is this 8-K's: served without loading the filing.
@@ -383,7 +384,8 @@ async def _tool_analyze_latest_8k(ticker: str, llm: BaseChatModel) -> str:
             if len(hits) == 1:
                 return _served(hits[0])
             retriever = await asyncio.to_thread(get_retriever, ticker)
-            overview = await asyncio.to_thread(retriever.get_8k_overview)
+            # Kind, cache key and input all from one filing (one read).
+            overview, raw = await asyncio.to_thread(eightk_overview_and_input, retriever)
         if not overview.get("found"):
             return json.dumps(
                 {"found": False, "reason": f"No 8-K filing found for {ticker}"},
@@ -399,7 +401,6 @@ async def _tool_analyze_latest_8k(ticker: str, llm: BaseChatModel) -> str:
     read = _read_ref("8-K", overview, filing)
 
     def load_input() -> tuple[FilingRef, Dict[str, Any]]:
-        _, raw = eightk_input(retriever, overview, overview.get("metadata", {}))
         if kind == "earnings" and raw.get("has_earnings") is False:
             raise _SectionUnavailable(
                 f"No earnings data in latest 8-K for {ticker}. "

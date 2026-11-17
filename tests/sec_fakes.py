@@ -163,8 +163,14 @@ class FakeEightK:
         self._count_lock = threading.Lock()
         self.reads: Counter[str] = Counter()
         self.read_delay = 0.0
+        # Called (once) when the overview is built, e.g. to land a concurrent
+        # refresh between the overview read and the analysis-input read.
+        self.after_overview = None
 
     def to_context(self, detail: str = "standard") -> str:
+        hook, self.after_overview = self.after_overview, None
+        if hook is not None:
+            hook()
         return f"8K: {COMPANY_NAME} Current Report\nItems: {', '.join(self.items)}"
 
     def __getitem__(self, item: str) -> str | None:
