@@ -19,7 +19,7 @@ from tests.sec_fakes import FakeEdgar, FakeFiling, FakeReport, eightk, tenk, ten
 TICKER = "PAIR"
 K1, K2, K3 = "0000320193-25-000101", "0000320193-26-000202", "0000320193-26-000303"
 Q1 = "0000320193-26-000111"
-E1 = "0000320193-26-000121"
+E1, E2 = "0000320193-26-000121", "0000320193-26-000222"
 
 
 @pytest.fixture
@@ -64,6 +64,40 @@ def test_sections_read_after_a_refresh_are_keyed_by_the_new_filing(edgar):
     assert plan["risk_10q"]["accession"] == Q1
     assert plan["mda_10k"]["filing_date"] == "2026-11-01"
     assert plan["risk_10k"]["filing_date"] == "2025-11-01"
+
+
+def test_eightk_is_keyed_by_the_filing_its_overview_and_input_came_from(edgar):
+    """A newer 8-K lands while the page reads the latest one's overview: the
+    analysis key, kind and input all stay on the 8-K that was read."""
+    retriever = analysis_cache.get_retriever(TICKER)
+    old_report = edgar.filings["8-K"][0].report
+    gate, entered = threading.Event(), threading.Event()
+    to_context = old_report.to_context
+
+    def held_to_context(detail="standard"):
+        entered.set()
+        gate.wait(5)
+        return to_context(detail)
+
+    old_report.to_context = held_to_context
+    data: dict = {}
+    worker = threading.Thread(target=lambda: data.update(_fetch_filing_data(TICKER, True)))
+    worker.start()
+    try:
+        assert entered.wait(5)
+        edgar.publish(eightk(E2, "2026-03-01", earnings=False, item_text="NEW-EVENT"))
+        retriever.refresh_latest_filings(("8-K",))
+    finally:
+        gate.set()
+        worker.join(5)
+    assert not worker.is_alive()
+
+    entry = next(p for p in _plan_sections(data) if p["section"] == "eightk")
+    assert entry["accession"] == E1
+    assert entry["atype"] == "earnings"
+    assert entry["input"]["has_earnings"] is True
+    assert entry["input"]["metadata"]["accession"] == E1
+    assert data["eightk"]["metadata"]["accession"] == E1
 
 
 def test_paired_read_retries_a_read_that_straddled_a_refresh(edgar):

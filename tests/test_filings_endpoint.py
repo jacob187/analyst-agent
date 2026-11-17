@@ -122,6 +122,8 @@ def mock_filings_deps():
             "text": "MD&A text...", "metadata": form_metadata[form], "found": True,
         }
         sec_instance.balance_sheet_text.return_value = ("Balance sheet text", mock_tenk_meta)
+        # The pinned 8-K (`latest_8k`) answers with the same 8-K getters.
+        sec_instance.latest_8k.return_value = sec_instance
         sec_instance.get_8k_overview.return_value = {
             "found": True,
             "has_earnings": True,

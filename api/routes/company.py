@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from agents.sec_workflow.analysis_cache import (
     FORMS,
     FilingRef,
-    eightk_input,
+    eightk_overview_and_input,
     eightk_kind,
     get_or_analyze,
     get_retriever,
@@ -400,33 +400,31 @@ def _fetch_filing_data(ticker: str, fetch_raw: bool = True) -> dict[str, Any]:
 
     # --- 8-K (earnings or material event) ---
     # The overview (kind + accession) is needed even keyless to pick the cache
-    # key; only the per-item/earnings extraction is gated on fetch_raw.
+    # key; only the per-item/earnings extraction is gated on fetch_raw. The
+    # overview, its metadata (the cache key) and the input all come from one
+    # loaded 8-K, as in the chat 8-K tool.
     try:
-        overview = retriever.get_8k_overview()
+        if fetch_raw:
+            overview, raw = eightk_overview_and_input(retriever)
+        else:
+            overview, raw = retriever.get_8k_overview(), {}
         if not overview.get("found"):
             result["eightk"] = {
                 "kind": "none",
                 "reason": overview.get("text", "No 8-K available"),
             }
         else:
-            eightk_meta = retriever._eightk_metadata
+            read_meta = overview.get("metadata") or {}
             metadata = {
-                **(eightk_meta.to_dict() if eightk_meta else {}),
-                "edgar_url": _build_edgar_url(
-                    eightk_meta.cik, eightk_meta.accession
-                ) if eightk_meta else "",
+                **read_meta,
+                "edgar_url": _build_edgar_url(read_meta.get("cik", ""), read_meta.get("accession", "")),
                 "form_type": "8-K",
             }
             kind = eightk_kind(overview)
-            if not fetch_raw:
-                result["eightk"] = {"kind": kind, "raw": {}, "metadata": metadata}
-            else:
-                # Same input builder the chat 8-K tool uses.
-                kind, raw = eightk_input(retriever, overview, metadata)
-                result["eightk"] = {"kind": kind, "raw": raw, "metadata": metadata}
-                if kind == "event" and not raw["text"]:
-                    primary_item = raw["items"][0] if raw["items"] else None
-                    result["eightk"]["reason"] = f"8-K item {primary_item} could not be extracted"
+            result["eightk"] = {"kind": kind, "raw": raw, "metadata": metadata}
+            if fetch_raw and kind == "event" and not raw["text"]:
+                primary_item = raw["items"][0] if raw["items"] else None
+                result["eightk"]["reason"] = f"8-K item {primary_item} could not be extracted"
     except (ValueError, Exception) as e:
         result["eightk"] = {"kind": "none", "reason": f"No 8-K available ({e})"}
 
