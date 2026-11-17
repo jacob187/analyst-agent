@@ -101,12 +101,16 @@ def setup_tracing() -> TracerProvider | None:
 
     try:
         provider = _build_provider()
+        # Validates OTEL_BSP_* (e.g. a batch size above the queue size).
+        processor = BatchSpanProcessor(OTLPSpanExporter())
     except ValueError as e:
-        # A malformed standard OTEL_* setting (e.g. a span limit): the SDK
-        # raises, but tracing is optional and must not take startup down.
+        # A malformed or inconsistent standard OTEL_* setting (a span limit,
+        # a batch processor size): the SDK raises, but tracing is optional and
+        # must not take startup down. Limits read at SDK import are cleaned up
+        # earlier, by api.main's sanitize_otel_limit_env().
         logger.warning("Tracing: OFF (invalid OpenTelemetry configuration: %s)", e)
         return None
-    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+    provider.add_span_processor(processor)
     LangChainInstrumentor().instrument(tracer_provider=provider)
     _provider = provider
     logger.info(

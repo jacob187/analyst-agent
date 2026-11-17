@@ -52,6 +52,18 @@ def test_int_rejects_non_integers(monkeypatch, caplog, raw):
     assert len(_warnings(caplog)) == 1
 
 
+def test_int_beyond_float_range_never_raises(monkeypatch, caplog):
+    # Ints are exact: one too big for a float is still a valid integer.
+    monkeypatch.setenv(_NAME, "1" + "0" * 400)
+    assert env_int(_NAME, 9) == 10**400
+    assert env_int(_NAME, 9, minimum=0) == 10**400
+    # Past int()'s digit limit it is unparseable: the default, with a warning.
+    monkeypatch.setenv(_NAME, "9" * 5000)
+    with caplog.at_level(logging.WARNING):
+        assert env_int(_NAME, 9) == 9
+    assert len(_warnings(caplog)) == 1
+
+
 def test_minimum_is_inclusive(monkeypatch, caplog):
     monkeypatch.setenv(_NAME, "0")
     assert env_float(_NAME, 5.0, minimum=0) == 0.0

@@ -51,6 +51,46 @@ logging.basicConfig(
 # own logs. Keep its warnings and errors; override with EDGAR_LOG_LEVEL.
 logging.getLogger("edgar").setLevel(resolve_log_level("EDGAR_LOG_LEVEL", "WARNING"))
 
+
+def sanitize_otel_limit_env() -> None:
+    """Drop malformed OpenTelemetry span-limit settings from the environment,
+    warning once per variable, so the SDK uses its defaults instead.
+
+    The SDK parses OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT when `opentelemetry.sdk.trace`
+    is first imported (by langsmith/openinference during the router imports
+    below) and raises on a non-integer, which would fail the app import even
+    with tracing off. The SDK accepts a non-negative integer, or blank for
+    "no limit".
+    """
+    from opentelemetry.sdk import environment_variables as otel_env
+
+    names = (
+        otel_env.OTEL_ATTRIBUTE_COUNT_LIMIT,
+        otel_env.OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT,
+        otel_env.OTEL_EVENT_ATTRIBUTE_COUNT_LIMIT,
+        otel_env.OTEL_LINK_ATTRIBUTE_COUNT_LIMIT,
+        otel_env.OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT,
+        otel_env.OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT,
+        otel_env.OTEL_SPAN_EVENT_COUNT_LIMIT,
+        otel_env.OTEL_SPAN_LINK_COUNT_LIMIT,
+    )
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None or not raw.strip():
+            continue
+        try:
+            valid = int(raw.strip()) >= 0
+        except ValueError:
+            valid = False
+        if not valid:
+            logging.getLogger(__name__).warning(
+                "Ignoring invalid %s=%r; using the OpenTelemetry default", name, raw
+            )
+            del os.environ[name]
+
+
+sanitize_otel_limit_env()
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse

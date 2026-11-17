@@ -1235,3 +1235,43 @@ class TestClerkTokenWithoutBackendClerk:
         with caplog.at_level("WARNING", logger="api.dependencies"):
             await get_api_keys(x_user_id=None, x_clerk_session_token="some.jwt.token")
         assert self._token_warnings(caplog) == []
+
+
+# ---------------------------------------------------------------------------
+# Free-trial caps read at import: a blank or malformed value must not crash it.
+# ---------------------------------------------------------------------------
+
+_ANON_CAPS = ("ANON_FREE_QUERIES", "ANON_FREE_DAILY_CAP", "ANON_FREE_SEARCH_DAILY_CAP")
+
+
+def _import_anon_caps(value: str):
+    """Import api.dependencies in a fresh interpreter (the caps are read once at
+    import) with every free-trial cap set to `value`; return the caps it read."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    env = {**os.environ, **{name: value for name in _ANON_CAPS}}
+    code = "import api.dependencies as d; print(" + ", ".join(f"d.{n}" for n in _ANON_CAPS) + ")"
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=Path(__file__).resolve().parent.parent,
+        env=env, capture_output=True, text=True, timeout=180,
+    )
+    assert result.returncode == 0, result.stderr
+    return tuple(map(int, result.stdout.split()[-3:])), result.stderr
+
+
+@pytest.mark.eval_unit
+@pytest.mark.parametrize("raw", ["", "abc", "3.5", "-1"])
+def test_malformed_anon_caps_fall_back_to_defaults(raw):
+    caps, stderr = _import_anon_caps(raw)
+    assert caps == (3, 200, 25)
+    if raw:
+        assert all(f"{name}=" in stderr for name in _ANON_CAPS)
+
+
+@pytest.mark.eval_unit
+def test_anon_caps_accept_zero_to_disable():
+    caps, _ = _import_anon_caps("0")
+    assert caps == (0, 0, 0)

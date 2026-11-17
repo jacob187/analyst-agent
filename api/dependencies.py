@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 
 from fastapi import Header, HTTPException
 
+from agents.env_utils import env_int
 from agents.model_registry import (
     ModelDef, get_all_models, get_default_model, get_free_tier_model, get_model,
 )
@@ -75,12 +76,13 @@ PROVIDER_ENV_VARS: dict[str, str] = {
 # Both counters live in `user_llm_usage` so they survive restarts/deploys.
 # This exists so a demo visitor can chat without signing in or bringing a
 # key; it does not change env-key resolution for any other model or route.
-ANON_FREE_QUERIES = int(os.getenv("ANON_FREE_QUERIES", "3"))
-ANON_FREE_DAILY_CAP = int(os.getenv("ANON_FREE_DAILY_CAP", "200"))
+# A blank or malformed value falls back to the default (0 disables).
+ANON_FREE_QUERIES = env_int("ANON_FREE_QUERIES", 3, minimum=0)
+ANON_FREE_DAILY_CAP = env_int("ANON_FREE_DAILY_CAP", 200, minimum=0)
 # Trial sessions also borrow the operator's Tavily key, metered per Tavily
 # call (get_company_news's week fallback counts as a second). Basic searches
 # are 1 credit, so 25 keeps a month inside Tavily's 1,000 free credits.
-ANON_FREE_SEARCH_DAILY_CAP = int(os.getenv("ANON_FREE_SEARCH_DAILY_CAP", "25"))
+ANON_FREE_SEARCH_DAILY_CAP = env_int("ANON_FREE_SEARCH_DAILY_CAP", 25, minimum=0)
 # Pseudo user ids for `user_llm_usage` — can't collide with Clerk `user_...`
 # ids or UUIDs.
 FREE_TRIAL_GLOBAL_USAGE_KEY = "anon_trial:global"
