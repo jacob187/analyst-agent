@@ -7,11 +7,13 @@ the ~13 pool threads for the entire poll, starving other `asyncio.to_thread`
 work (charts, briefing, SEC tools).
 
 Post-fix: the async variant uses `await asyncio.sleep(...)` between polls and
-wraps `client.research` / `client.get_research` in `asyncio.to_thread`, so the
-loop and the thread pool both stay free.
+runs `client.research` / `client.get_research` on the Tavily pool, so the
+loop and the default thread pool both stay free.
 """
 
 import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from langchain_core.tools import ToolException
@@ -699,6 +701,147 @@ async def test_timed_out_news_call_does_not_hold_a_default_executor_thread(monke
     finally:
         release.set()
         default_pool.shutdown(wait=True)
+
+
+# ── Every Tavily call: bounded pool, call-time timeout, soft failure ─────────
+
+
+class _HungSearch:
+    """A Tavily search whose request never answers until `release` is set."""
+
+    release = threading.Event()
+    calls = 0
+
+    def __init__(self, **kwargs):
+        pass
+
+    def invoke(self, payload):
+        type(self).calls += 1
+        type(self).release.wait(5)
+        return _SEARCH_RESPONSE
+
+
+@pytest.fixture
+def hung_search(monkeypatch):
+    _HungSearch.release = threading.Event()
+    _HungSearch.calls = 0
+    monkeypatch.setattr(research_tools, "TavilySearch", _HungSearch)
+    monkeypatch.setattr(research_tools, "_TAVILY_PER_CALL_TIMEOUT_SECONDS", 0.05)
+    yield _HungSearch
+    _HungSearch.release.set()
+
+
+@pytest.fixture
+async def one_thread_default_executor():
+    """The loop's shared default executor with a single worker."""
+    pool = ThreadPoolExecutor(max_workers=1)
+    asyncio.get_running_loop().set_default_executor(pool)
+    yield
+    pool.shutdown(wait=False)
+
+
+_PLAIN_SEARCHES = {
+    "web_search": lambda: research_tools._tool_tavily_search("AAPL", "q", "k", "basic"),
+    "analyze_competitors": lambda: research_tools._tool_competitor_analysis("AAPL", "k", "basic"),
+    "get_industry_trends": lambda: research_tools._tool_industry_trends("AAPL", "k", "basic"),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", list(_PLAIN_SEARCHES))
+async def test_hung_search_soft_fails_off_the_default_executor(
+    hung_search, one_thread_default_executor, name
+):
+    out = await asyncio.wait_for(_PLAIN_SEARCHES[name](), 2)
+    assert out.startswith("Failed")
+    assert "timed out" in out
+    # The only default-executor worker is still free.
+    assert await asyncio.wait_for(asyncio.to_thread(lambda: "free"), 1) == "free"
+
+
+@pytest.mark.asyncio
+async def test_trial_timed_out_search_is_not_cached(hung_search):
+    budget = _Budget(10)
+    out = await _trial_tools(budget)["web_search"].ainvoke("q")
+    assert out.startswith("Failed")
+    assert len(research_tools._research_cache) == 0
+
+
+@pytest.mark.asyncio
+async def test_hung_deep_research_start_soft_fails_off_the_default_executor(
+    monkeypatch, one_thread_default_executor
+):
+    release = threading.Event()
+
+    class _HungClient(_FakeTavilyClient):
+        def research(self, input):  # noqa: A002
+            release.wait(5)
+            return {"request_id": "late"}
+
+    monkeypatch.setattr(research_tools, "TavilyClient", _HungClient)
+    monkeypatch.setattr(research_tools, "_TAVILY_PER_CALL_TIMEOUT_SECONDS", 0.05)
+    try:
+        out = await asyncio.wait_for(
+            research_tools._tool_tavily_research_async("AAPL", "x", "k"), 2
+        )
+        assert out.startswith("Failed to initiate deep research")
+        assert await asyncio.wait_for(asyncio.to_thread(lambda: "free"), 1) == "free"
+    finally:
+        release.set()
+
+
+@pytest.mark.asyncio
+async def test_time_queued_for_a_thread_does_not_count_against_the_call(monkeypatch):
+    """With every pool thread busy, a call waits its turn; the timeout covers
+    only its own request."""
+    import time
+
+    class _Slow:
+        calls = 0
+
+        def __init__(self, **kwargs):
+            pass
+
+        def invoke(self, payload):
+            type(self).calls += 1
+            time.sleep(0.2)
+            return _NEWS_RESPONSE
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(research_tools, "_TAVILY_POOL", pool)
+    monkeypatch.setattr(research_tools, "TavilySearch", _Slow)
+    monkeypatch.setattr(research_tools, "_TAVILY_PER_CALL_TIMEOUT_SECONDS", 0.35)
+    try:
+        outs = await asyncio.gather(*(
+            research_tools._tool_company_news("AAPL", "k", "basic") for _ in range(2)
+        ))
+    finally:
+        pool.shutdown(wait=True)
+    assert outs == [_EXPECTED_NEWS, _EXPECTED_NEWS]
+    # Neither day search timed out into the week fallback.
+    assert _Slow.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_call_that_gets_no_thread_soft_fails_without_running(hung_search, monkeypatch):
+    pool = ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(research_tools, "_TAVILY_POOL", pool)
+    monkeypatch.setattr(research_tools, "_TAVILY_PER_CALL_TIMEOUT_SECONDS", 5)
+    monkeypatch.setattr(research_tools, "_TAVILY_QUEUE_TIMEOUT_SECONDS", 0.05)
+    try:
+        first = asyncio.create_task(research_tools._tool_tavily_search("AAPL", "q", "k", "basic"))
+        while _HungSearch.calls == 0:
+            await asyncio.sleep(0.01)
+        out = await asyncio.wait_for(
+            research_tools._tool_competitor_analysis("AAPL", "k", "basic"), 2
+        )
+        assert out.startswith("Failed to analyze competitors")
+        hung_search.release.set()
+        await first
+    finally:
+        hung_search.release.set()
+        pool.shutdown(wait=True)
+    assert _HungSearch.calls == 1  # the queued call never reached Tavily
 
 
 @pytest.mark.asyncio
