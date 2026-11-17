@@ -251,12 +251,15 @@ class FakeEdgar:
     companies: int = 0
     # When set, ``Company(ticker)`` raises it (EDGAR 429 / 5xx / outage).
     outage: Exception | None = None
+    # ``Company(ticker)`` builds that hit the outage (each a failed request).
+    failed_companies: int = 0
 
     def publish(self, filing: FakeFiling) -> None:
         self.filings.setdefault(filing.form, []).insert(0, filing)
 
     def company(self, ticker: str) -> "_FakeCompany":
         if self.outage is not None:
+            self.failed_companies += 1
             raise self.outage
         self.companies += 1
         return _FakeCompany(self, ticker)

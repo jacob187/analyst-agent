@@ -227,6 +227,86 @@ async def test_edgar_outage_after_ttl_serves_the_stored_analyses(fresh_db, edgar
     assert llm.calls == 2
 
 
+class _Clock:
+    """Monotonic clock the analysis cache reads, advanced by hand."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    fake = _Clock()
+    monkeypatch.setattr(analysis_cache, "_clock", fake)
+    return fake
+
+
+async def test_failed_lookup_backs_off_and_serves_stale(fresh_db, edgar, llm, clock, monkeypatch):
+    # During an outage only the first call asks EDGAR; callers in the
+    # backoff window, concurrent or later, are served the stale ref at once.
+    monkeypatch.setenv("FILING_FRESHNESS_TTL_SECONDS", "3600")
+    monkeypatch.setenv("FILING_LOOKUP_FAILURE_BACKOFF_SECONDS", "60")
+    risk = json.loads(await _ask(llm, "get_risk_factors_summary"))
+    edgar.outage = RuntimeError("EDGAR 429")
+    clock.now += 3600  # the TTL lapses
+
+    served = await asyncio.gather(*(_ask(llm, "get_risk_factors_summary") for _ in range(4)))
+    clock.now += 59
+    served.append(await _ask(llm, "get_risk_factors_summary"))
+
+    assert edgar.failed_companies == 1
+    assert [json.loads(out) for out in served] == [risk] * 5
+    assert llm.calls == 1
+
+
+async def test_lookup_recovers_after_the_backoff(fresh_db, edgar, llm, clock, monkeypatch):
+    monkeypatch.setenv("FILING_FRESHNESS_TTL_SECONDS", "3600")
+    monkeypatch.setenv("FILING_LOOKUP_FAILURE_BACKOFF_SECONDS", "60")
+    await _ask(llm, "get_risk_factors_summary")
+    edgar.outage = RuntimeError("EDGAR 429")
+    clock.now += 3600
+    await _ask(llm, "get_risk_factors_summary")
+    assert edgar.failed_companies == 1
+
+    # EDGAR is back and has a newer 10-K: once the backoff lapses the next
+    # call asks again and analyses it.
+    edgar.outage = None
+    edgar.publish(tenk(K2, "2026-11-01", TENK_RISK_2))
+    clock.now += 60
+    out = json.loads(await _ask(llm, "get_risk_factors_summary"))
+
+    assert out["filing_reference"]["accession"] == K2
+    assert TENK_RISK_2 in llm.prompts[-1]
+    # Success clears the failure: the next lapse asks EDGAR right away.
+    edgar.outage = RuntimeError("EDGAR 503")
+    clock.now += 3600
+    await _ask(llm, "get_risk_factors_summary")
+    assert edgar.failed_companies == 2
+
+
+async def test_backoff_never_hides_a_lookup_with_nothing_stale(fresh_db, edgar, llm, clock, monkeypatch):
+    # A ticker with no cached ref has nothing to serve, so a call inside the
+    # backoff window still asks EDGAR (and fails until it is back).
+    monkeypatch.setenv("FILING_LOOKUP_FAILURE_BACKOFF_SECONDS", "60")
+    edgar.outage = RuntimeError("EDGAR 429")
+    assert "EDGAR 429" in await _ask(llm, "get_risk_factors_summary")
+    edgar.outage = None
+    out = json.loads(await _ask(llm, "get_risk_factors_summary"))
+    assert out["filing_reference"]["accession"] == K1
+
+
+def test_failure_backoff_defaults_and_env_override(monkeypatch):
+    monkeypatch.delenv("FILING_LOOKUP_FAILURE_BACKOFF_SECONDS", raising=False)
+    assert analysis_cache.lookup_failure_backoff_seconds() == 60
+    monkeypatch.setenv("FILING_LOOKUP_FAILURE_BACKOFF_SECONDS", "5")
+    assert analysis_cache.lookup_failure_backoff_seconds() == 5
+    monkeypatch.setenv("FILING_LOOKUP_FAILURE_BACKOFF_SECONDS", "-1")
+    assert analysis_cache.lookup_failure_backoff_seconds() == 60
+
+
 async def test_edgar_outage_with_nothing_cached_still_fails(fresh_db, edgar, llm):
     edgar.outage = RuntimeError("EDGAR 429")
     out = await _ask(llm, "get_risk_factors_summary")
