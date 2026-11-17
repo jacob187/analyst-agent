@@ -21,10 +21,7 @@ import {
 } from "@clerk/nextjs";
 import type { ReactNode } from "react";
 
-export const authDisabled = process.env.NEXT_PUBLIC_DISABLE_AUTH === "true";
-
-/** Stable user_id used when auth is disabled — matches the backend's USER_ID_RE. */
-export const LOCAL_DEV_USER_ID = "user_localdev";
+import { AUTH_DISABLED, LOCAL_DEV_USER_ID } from "./constants";
 
 interface UseAuthShape {
   isLoaded: boolean;
@@ -36,7 +33,7 @@ function noAuthUseAuth(): UseAuthShape {
   return { isLoaded: true, isSignedIn: true, userId: LOCAL_DEV_USER_ID };
 }
 
-export const useAuth: () => UseAuthShape = authDisabled
+export const useAuth: () => UseAuthShape = AUTH_DISABLED
   ? noAuthUseAuth
   : (clerkUseAuth as () => UseAuthShape);
 
@@ -46,7 +43,7 @@ interface ShowProps {
 }
 
 export function Show({ when, children }: ShowProps) {
-  if (authDisabled) {
+  if (AUTH_DISABLED) {
     // Treat the local-dev user as always-signed-in.
     return when === "signed-in" ? <>{children}</> : null;
   }
@@ -59,11 +56,11 @@ interface SignInButtonProps {
 }
 
 export function SignInButton({ mode, children }: SignInButtonProps) {
-  if (authDisabled) return null;
+  if (AUTH_DISABLED) return null;
   return <ClerkSignInButton mode={mode}>{children}</ClerkSignInButton>;
 }
 
 export function UserButton(props: React.ComponentProps<typeof ClerkUserButton>) {
-  if (authDisabled) return null;
+  if (AUTH_DISABLED) return null;
   return <ClerkUserButton {...props} />;
 }

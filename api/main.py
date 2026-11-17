@@ -16,20 +16,84 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
-    format="%(asctime)s  %(name)s  %(message)s",
-    datefmt="%H:%M:%S",
-)
-
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 # Load .env from project root so GOOGLE_API_KEY, TAVILY_API_KEY, etc.
 # are available via os.getenv() as fallbacks for local development.
+# Before the logging setup below, so LOG_LEVEL / EDGAR_LOG_LEVEL apply too.
 load_dotenv(Path(__file__).parent.parent / ".env")
+
+
+def resolve_log_level(env_var: str, default: str) -> int:
+    """Level named by `env_var`, or `default` (with a warning) when it isn't a
+    known level name, so a typo can't crash startup."""
+    raw = os.getenv(env_var)
+    levels = logging.getLevelNamesMapping()
+    if raw is None:
+        return levels[default]
+    level = levels.get(raw.strip().upper())
+    if level is None:
+        # A named logger, not logging.warning(): that would run basicConfig()
+        # implicitly and turn the real configuration below into a no-op.
+        logging.getLogger(__name__).warning(
+            "Ignoring invalid %s=%r; using %s", env_var, raw, default
+        )
+        return levels[default]
+    return level
+
+
+logging.basicConfig(
+    level=resolve_log_level("LOG_LEVEL", "INFO"),
+    format="%(asctime)s  %(name)s  %(message)s",
+    datefmt="%H:%M:%S",
+)
+# edgartools logs every section-detection step at INFO, which buries the app's
+# own logs. Keep its warnings and errors; override with EDGAR_LOG_LEVEL.
+logging.getLogger("edgar").setLevel(resolve_log_level("EDGAR_LOG_LEVEL", "WARNING"))
+
+
+def sanitize_otel_limit_env() -> None:
+    """Drop malformed OpenTelemetry span-limit settings from the environment,
+    warning once per variable, so the SDK uses its defaults instead.
+
+    The SDK parses OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT when `opentelemetry.sdk.trace`
+    is first imported (by langsmith/openinference during the router imports
+    below) and raises on a non-integer, which would fail the app import even
+    with tracing off. The SDK accepts a non-negative integer, or blank for
+    "no limit".
+    """
+    from opentelemetry.sdk import environment_variables as otel_env
+
+    names = (
+        otel_env.OTEL_ATTRIBUTE_COUNT_LIMIT,
+        otel_env.OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT,
+        otel_env.OTEL_EVENT_ATTRIBUTE_COUNT_LIMIT,
+        otel_env.OTEL_LINK_ATTRIBUTE_COUNT_LIMIT,
+        otel_env.OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT,
+        otel_env.OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT,
+        otel_env.OTEL_SPAN_EVENT_COUNT_LIMIT,
+        otel_env.OTEL_SPAN_LINK_COUNT_LIMIT,
+    )
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None or not raw.strip():
+            continue
+        try:
+            valid = int(raw.strip()) >= 0
+        except ValueError:
+            valid = False
+        if not valid:
+            logging.getLogger(__name__).warning(
+                "Ignoring invalid %s=%r; using the OpenTelemetry default", name, raw
+            )
+            del os.environ[name]
+
+
+sanitize_otel_limit_env()
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -44,6 +108,7 @@ from api.routes.chat import router as chat_router
 from api.routes.watchlist import router as watchlist_router
 from api.routes.models import router as models_router
 from api.routes.company import router as company_router
+from api.tracing import setup_tracing, shutdown_tracing
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +139,16 @@ def check_production_auth_config() -> None:
         raise RuntimeError(
             "Refusing to start: ENV=production but CLERK_SECRET_KEY is not set. "
             "Configure Clerk, or set ANALYST_ALLOW_DISABLED_AUTH=1 to override."
+        )
+    if not (os.getenv("CLERK_ISSUER_URL") or "").strip():
+        # Without it no session token can be verified: every signed-in
+        # request would fail with 503.
+        raise RuntimeError(
+            "Refusing to start: ENV=production with CLERK_SECRET_KEY set but "
+            "CLERK_ISSUER_URL unset. Set it to the Clerk Frontend API URL that "
+            "issues session tokens (for a proxied instance, "
+            "https://<frontend>/__clerk), or set ANALYST_ALLOW_DISABLED_AUTH=1 "
+            "to override."
         )
 
 
@@ -117,9 +192,20 @@ async def lifespan(app: FastAPI):
     check_production_auth_config()
     check_production_sec_config()
     set_sec_identity()
-    await init_db()
-    yield
-    await close_db()
+    tracing_provider = setup_tracing()
+    try:
+        try:
+            await init_db()
+        except BaseException:
+            # Close what init_db opened: aiosqlite's non-daemon worker thread
+            # would otherwise keep the process alive after startup fails.
+            await close_db()
+            raise
+        yield
+        await close_db()
+    finally:
+        # Flush spans even if startup or DB shutdown fails.
+        shutdown_tracing(tracing_provider)
 
 
 app = FastAPI(title="Analyst Agent API", lifespan=lifespan)

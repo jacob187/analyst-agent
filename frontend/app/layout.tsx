@@ -5,11 +5,7 @@ import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Navbar } from "@/components/layout/Navbar";
 import { Footer } from "@/components/layout/Footer";
-import { UserIdSync } from "@/components/UserIdSync";
-
-// Skips loading Clerk entirely when set — for self-hosters who don't want to
-// create a Clerk account. Pair with `DISABLE_AUTH=true` on the backend.
-const authDisabled = process.env.NEXT_PUBLIC_DISABLE_AUTH === "true";
+import { AUTH_DISABLED } from "@/lib/constants";
 
 const bricolage = Bricolage_Grotesque({
   variable: "--font-bricolage",
@@ -49,7 +45,6 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          <UserIdSync />
           <Navbar />
           <main className="flex-1">{children}</main>
           <Footer />
@@ -58,5 +53,7 @@ export default function RootLayout({
     </html>
   );
 
-  return authDisabled ? shell : <ClerkProvider afterSignOutUrl="/">{shell}</ClerkProvider>;
+  // AUTH_DISABLED skips loading Clerk entirely — for self-hosters who don't
+  // want to create a Clerk account. Pair with `DISABLE_AUTH=true` on the backend.
+  return AUTH_DISABLED ? shell : <ClerkProvider afterSignOutUrl="/">{shell}</ClerkProvider>;
 }

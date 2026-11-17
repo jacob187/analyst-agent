@@ -4,11 +4,11 @@ import { useEffect, useState } from "react";
 import { Building2, Loader2 } from "lucide-react";
 import { CompanyCard } from "@/components/companies/CompanyCard";
 import { api } from "@/lib/api";
-import { useUserId } from "@/hooks/useUserId";
+import { useAuth } from "@/lib/auth";
 import type { TickerSummary } from "@/types";
 
 export default function CompaniesPage() {
-  const { loaded } = useUserId();
+  const { isLoaded: loaded } = useAuth();
   const [tickers, setTickers] = useState<TickerSummary[]>([]);
   const [loading, setLoading] = useState(true);
 

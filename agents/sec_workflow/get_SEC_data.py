@@ -1,8 +1,13 @@
 from edgar import Company, CompanyNotFoundError
+import copy
 import json
 import logging
+import threading
+from collections.abc import Callable
 from typing import Literal, Optional, Dict, Any
 from datetime import datetime
+
+from cachetools import LRUCache
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +33,134 @@ _TENQ_ITEM_KEYS: Dict[str, str] = {
     "5":  "Item 5",   # Other Information (Part II — insider trading etc.)
 }
 
+# Form → lazy-cache attribute stem on SECDataRetrieval (``_{stem}_filing`` etc.).
+_FORM_SLOTS: Dict[str, str] = {"10-K": "tenk", "10-Q": "tenq", "8-K": "eightk", "20-F": "twentyf"}
+
+# Extraction memo entries per retriever (retrievers are themselves LRU-bounded
+# in analysis_cache). A filing has ~15 sections the tools ask for.
+_EXTRACTION_MEMO_SIZE = 64
+
+
+# ── Per-retriever extraction memo ────────────────────────────────────────────
+#
+# Chat tools and the filings endpoint call the section getters concurrently
+# from worker threads. edgartools caches nothing across report objects and
+# its own lazy parse (``cached_property`` / ``Document._sections``) is an
+# unlocked check-then-set, so concurrent first calls each built a report
+# object and re-ran section detection. This state makes each step run once:
+#
+# - ``form_locks[slot]`` (RLock): loading a form's filing + report object, and
+#   ``refresh_latest_filing`` swapping them. Report object and metadata are
+#   read together under it so a memo key never pairs a new accession with
+#   the old filing's text.
+# - ``parse_locks[slot]``: first access of ``report.sections`` (the document
+#   parse + section detection), so two different sections share one parse.
+# - ``flights[key]``: one lock (+ result) per extraction key
+#   ``(form, accession, kind, *args)``. Concurrent misses on one key extract
+#   once; different keys extract in parallel. Only successful results are
+#   kept, so a failed attempt is retried by the next caller.
+#
+# Nesting: flight → parse, and form → guard (refresh). The form lock is taken
+# and released before a flight, never inside one; ``guard`` is a leaf. Flight
+# locks are plain Locks: an extraction must not call a memoized getter with
+# its own key (it would deadlock). None does; getters that use another getter
+# (``get_mda_raw`` → ``get_section``) call it outside any flight.
+#
+# State lives in the instance ``__dict__`` and is created on first use.
+
+
+class _Flight:
+    __slots__ = ("lock", "value")
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.value: Optional[Dict[str, Any]] = None
+
+
+class _MemoState:
+    def __init__(self):
+        self.guard = threading.Lock()
+        self.flights: LRUCache = LRUCache(maxsize=_EXTRACTION_MEMO_SIZE)
+        self.form_locks = {slot: threading.RLock() for slot in _FORM_SLOTS.values()}
+        self.parse_locks = {slot: threading.Lock() for slot in _FORM_SLOTS.values()}
+
+
+_memo_init_lock = threading.Lock()
+
+
+def _memo_state(retriever) -> _MemoState:
+    state = retriever.__dict__.get("_memo_state")
+    if state is None:
+        with _memo_init_lock:
+            state = retriever.__dict__.setdefault("_memo_state", _MemoState())
+    return state
+
+
+def _form_lock(retriever, slot: str) -> threading.RLock:
+    return _memo_state(retriever).form_locks[slot]
+
+
+def _load_report(retriever, form: str):
+    """``(report object, FilingMetadata)`` for ``form``, loaded at most once
+    and read together. Raises if the filing is unavailable."""
+    slot = _FORM_SLOTS[form]
+    with _form_lock(retriever, slot):
+        report = getattr(retriever, f"get_{slot}")()
+        return report, getattr(retriever, f"_{slot}_metadata")
+
+
+def _eightk_report(retriever, report):
+    """``report`` (a pinned ``(EightK, FilingMetadata)``), else the
+    retriever's current 8-K via ``_load_report``."""
+    return report if report is not None else _load_report(retriever, "8-K")
+
+
+def _forget_form(retriever, form: str) -> None:
+    """Drop every memoized extraction for ``form``. A thread still extracting
+    under a dropped key finishes into its own flight, unreachable from here."""
+    state = _memo_state(retriever)
+    with state.guard:
+        for key in [k for k in state.flights if k[0] == form]:
+            del state.flights[key]
+
+
+def _found(result: Dict[str, Any]) -> bool:
+    return result.get("found") is True
+
+
+def _memoized_extract(
+    retriever,
+    form: str,
+    report,
+    metadata,
+    key_parts: tuple,
+    extract: Callable[[], Dict[str, Any]],
+    keep: Callable[[Dict[str, Any]], bool] = _found,
+) -> Dict[str, Any]:
+    """``extract()`` once per ``(form, accession, *key_parts)``; concurrent
+    callers wait for the first. Results ``keep`` rejects (errors, not-found)
+    are returned but not stored. Exceptions propagate unstored. The memo
+    keeps its own copy, so mutating a result can't change it."""
+    state = _memo_state(retriever)
+    accession = metadata.accession if metadata is not None else None
+    key = (form, accession, *key_parts)
+    with state.guard:
+        flight = state.flights.get(key)
+        if flight is None:
+            flight = state.flights[key] = _Flight()
+    with flight.lock:
+        if flight.value is None:
+            slot = _FORM_SLOTS[form]
+            with state.parse_locks[slot]:
+                # edgartools parses + detects sections on first access and
+                # caches it on the report; later accesses are free.
+                getattr(report, "sections", None)
+            result = extract()
+            if keep(result):
+                flight.value = copy.deepcopy(result)
+            return result
+        return copy.deepcopy(flight.value)
+
 
 class FilingMetadata:
     """Metadata for SEC filings to track provenance."""
@@ -48,6 +181,18 @@ class FilingMetadata:
         self.period_of_report = period_of_report
         self.company_name = company_name
 
+    @classmethod
+    def from_filing(cls, filing) -> "FilingMetadata":
+        """Metadata of an edgartools ``EntityFiling``."""
+        return cls(
+            form=filing.form,
+            cik=str(filing.cik),
+            accession=filing.accession_number,
+            filing_date=str(filing.filing_date),
+            period_of_report=str(filing.period_of_report),
+            company_name=filing.company,
+        )
+
     def to_dict(self) -> Dict[str, str]:
         return {
             "form": self.form,
@@ -65,6 +210,43 @@ class FilingMetadata:
             return f"Form {self.form} filed {self.filing_date}, Period: Quarter ended {self.period_of_report}"
         else:
             return f"Form {self.form} filed {self.filing_date}, Period: {self.period_of_report}"
+
+
+# A ``Company``'s submissions are a recent page (at least the last year or
+# 1000 filings), fetched in one request on first use, plus older pages that
+# edgartools downloads one request each on a full load: ``get_filings``
+# defaults to ``trigger_full_load=True``. New filings only ever land on the
+# recent page.
+
+
+def _latest(company, form: str):
+    """The company's latest ``form`` filing (None if it has none): from the
+    recent page, loading the older pages only when it has none."""
+    return company.latest(form=form)
+
+
+def _latest_recent(company, form: str):
+    """The latest ``form`` filing on the company's recent page (None if it
+    has none there). Never downloads the older pages."""
+    return company.get_filings(form=form, trigger_full_load=False).latest(1)
+
+
+class EightKReport:
+    """One loaded 8-K (``SECDataRetrieval.latest_8k``) with the retriever's
+    8-K getters, all reading this filing and citing its metadata."""
+
+    def __init__(self, retriever: "SECDataRetrieval", report):
+        self._retriever = retriever
+        self._report = report  # (EightK, FilingMetadata), read together
+
+    def get_8k_overview(self) -> Dict[str, Any]:
+        return self._retriever.get_8k_overview(report=self._report)
+
+    def get_8k_item(self, item: str) -> Dict[str, Any]:
+        return self._retriever.get_8k_item(item, report=self._report)
+
+    def get_earnings_data(self) -> Dict[str, Any]:
+        return self._retriever.get_earnings_data(report=self._report)
 
 
 class SECDataRetrieval:
@@ -92,6 +274,8 @@ class SECDataRetrieval:
         self._tenq_metadata = None
         self._eightk_metadata = None
         self._twentyf_metadata = None
+        # Forms a full-history lookup found no filing of (see refresh).
+        self._absent_forms: set[str] = set()
 
     def check_filing_availability(self) -> Dict[str, Any]:
         """Check what filings are available for this company.
@@ -134,53 +318,61 @@ class SECDataRetrieval:
             pass
         return result
 
-    # Lazy getters for filings (EntityFiling objects)
+    # Lazy getters for filings (EntityFiling objects). Each form's load runs
+    # under its form lock so concurrent first calls fetch and build once.
     def get_tenk_filing(self):
-        if self._tenk_filing is None:
-            self._tenk_filing = self._fetch_company_tenk_filing()
+        with _form_lock(self, "tenk"):
             if self._tenk_filing is None:
-                raise ValueError(f"No 10-K available for {self.ticker}")
-        return self._tenk_filing
+                self._tenk_filing = self._fetch_company_tenk_filing()
+                if self._tenk_filing is None:
+                    raise ValueError(f"No 10-K available for {self.ticker}")
+            return self._tenk_filing
 
     def get_tenq_filing(self):
-        if self._tenq_filing is None:
-            self._tenq_filing = self._fetch_company_tenq_filing()
+        with _form_lock(self, "tenq"):
             if self._tenq_filing is None:
-                raise ValueError(f"No 10-Q available for {self.ticker}")
-        return self._tenq_filing
+                self._tenq_filing = self._fetch_company_tenq_filing()
+                if self._tenq_filing is None:
+                    raise ValueError(f"No 10-Q available for {self.ticker}")
+            return self._tenq_filing
 
     # Lazy getters for filing objects (TenK/TenQ objects)
     def get_tenk(self):
-        if self._tenk_obj is None:
-            filing = self.get_tenk_filing()
-            self._tenk_obj = filing.obj()
-        return self._tenk_obj
+        with _form_lock(self, "tenk"):
+            if self._tenk_obj is None:
+                filing = self.get_tenk_filing()
+                self._tenk_obj = filing.obj()
+            return self._tenk_obj
 
     def get_tenq(self):
-        if self._tenq_obj is None:
-            filing = self.get_tenq_filing()
-            self._tenq_obj = filing.obj()
-        return self._tenq_obj
+        with _form_lock(self, "tenq"):
+            if self._tenq_obj is None:
+                filing = self.get_tenq_filing()
+                self._tenq_obj = filing.obj()
+            return self._tenq_obj
 
     def get_eightk_filing(self):
-        if self._eightk_filing is None:
-            self._eightk_filing = self._fetch_latest_eightk_filing()
+        with _form_lock(self, "eightk"):
             if self._eightk_filing is None:
-                raise ValueError(f"No 8-K available for {self.ticker}")
-        return self._eightk_filing
+                self._eightk_filing = self._fetch_latest_eightk_filing()
+                if self._eightk_filing is None:
+                    raise ValueError(f"No 8-K available for {self.ticker}")
+            return self._eightk_filing
 
     def get_eightk(self):
-        if self._eightk_obj is None:
-            filing = self.get_eightk_filing()
-            self._eightk_obj = filing.obj()
-        return self._eightk_obj
+        with _form_lock(self, "eightk"):
+            if self._eightk_obj is None:
+                filing = self.get_eightk_filing()
+                self._eightk_obj = filing.obj()
+            return self._eightk_obj
 
     def get_twentyf_filing(self):
-        if self._twentyf_filing is None:
-            self._twentyf_filing = self._fetch_company_twentyf_filing()
+        with _form_lock(self, "twentyf"):
             if self._twentyf_filing is None:
-                raise ValueError(f"No 20-F available for {self.ticker}")
-        return self._twentyf_filing
+                self._twentyf_filing = self._fetch_company_twentyf_filing()
+                if self._twentyf_filing is None:
+                    raise ValueError(f"No 20-F available for {self.ticker}")
+            return self._twentyf_filing
 
     def get_twentyf(self):
         """Return parsed TwentyF object.
@@ -189,85 +381,109 @@ class SECDataRetrieval:
         .management_discussion, .balance_sheet, .income_statement,
         .business, .key_information, .financial_information.
         """
-        if self._twentyf_obj is None:
-            filing = self.get_twentyf_filing()
-            self._twentyf_obj = filing.obj()
-        return self._twentyf_obj
+        with _form_lock(self, "twentyf"):
+            if self._twentyf_obj is None:
+                filing = self.get_twentyf_filing()
+                self._twentyf_obj = filing.obj()
+            return self._twentyf_obj
 
     # Private fetchers
-    def _fetch_company_tenk_filing(self):
-        filing = self.company.latest(form="10-K")
+    def _fetch_latest(self, form: str):
+        filing = _latest(self.company, form)
         if filing is None:
-            print(f"No 10-K filing found for {self.company.name}")
+            print(f"No {form} filing found for {self.company.name}")
             return None
-        print("10-K filing found")
-
-        # Extract metadata from the filing (EntityFiling object)
-        self._tenk_metadata = FilingMetadata(
-            form=filing.form,
-            cik=str(filing.cik),
-            accession=filing.accession_number,
-            filing_date=str(filing.filing_date),
-            period_of_report=str(filing.period_of_report),
-            company_name=filing.company,
-        )
+        print(f"{form} filing found")
+        setattr(self, f"_{_FORM_SLOTS[form]}_metadata", FilingMetadata.from_filing(filing))
         return filing
+
+    def _fetch_company_tenk_filing(self):
+        return self._fetch_latest("10-K")
 
     def _fetch_company_tenq_filing(self):
-        filing = self.company.latest(form="10-Q")
-        if filing is None:
-            print(f"No 10-Q filing found for {self.company.name}")
-            return None
-        print("10-Q filing found")
-
-        # Extract metadata from the filing (EntityFiling object)
-        self._tenq_metadata = FilingMetadata(
-            form=filing.form,
-            cik=str(filing.cik),
-            accession=filing.accession_number,
-            filing_date=str(filing.filing_date),
-            period_of_report=str(filing.period_of_report),
-            company_name=filing.company,
-        )
-        return filing
+        return self._fetch_latest("10-Q")
 
     def _fetch_company_twentyf_filing(self):
-        filing = self.company.latest(form="20-F")
-        if filing is None:
-            print(f"No 20-F filing found for {self.company.name}")
-            return None
-        print("20-F filing found")
-
-        self._twentyf_metadata = FilingMetadata(
-            form=filing.form,
-            cik=str(filing.cik),
-            accession=filing.accession_number,
-            filing_date=str(filing.filing_date),
-            period_of_report=str(filing.period_of_report),
-            company_name=filing.company,
-        )
-        return filing
+        return self._fetch_latest("20-F")
 
     def _fetch_latest_eightk_filing(self):
-        filing = self.company.get_filings(form="8-K").latest(1)
-        if filing is None:
-            print(f"No 8-K filing found for {self.company.name}")
-            return None
-        print("8-K filing found")
+        return self._fetch_latest("8-K")
 
-        self._eightk_metadata = FilingMetadata(
-            form=filing.form,
-            cik=str(filing.cik),
-            accession=filing.accession_number,
-            filing_date=str(filing.filing_date),
-            period_of_report=str(filing.period_of_report),
-            company_name=filing.company,
-        )
-        return filing
+    def refresh_latest_filing(self, form: Literal["10-K", "10-Q", "8-K", "20-F"]) -> Optional[FilingMetadata]:
+        """``refresh_latest_filings`` for one form."""
+        return self.refresh_latest_filings((form,))[form]
+
+    def refresh_latest_filings(
+        self, forms, reuse_company: bool = False,
+    ) -> Dict[str, Optional[FilingMetadata]]:
+        """Re-read the company's filing index from EDGAR and return each
+        form's latest filing metadata (None where the company has none).
+
+        edgartools' ``Company`` loads its submissions once and caches them, so a
+        long-lived retriever never sees a newly published filing. This builds
+        one fresh ``Company`` and reads only its recent submissions page (one
+        request, whatever the number of forms) and, for each form whose latest
+        accession differs from the cached one, swaps in the new filing and
+        drops that form's parsed object and memoized extractions so section
+        getters read the new filing. A form missing from the recent page is
+        resolved by ``_latest_beyond_recent``, which downloads the older pages
+        at most once per retriever. ``reuse_company`` skips the rebuild for a
+        retriever whose ``Company`` was built just now (it has not loaded its
+        submissions yet).
+        """
+        company = self.company if reuse_company else Company(self.ticker)
+        latest = {form: _latest_recent(company, form) for form in forms}
+        missing = [form for form, filing in latest.items() if filing is None]
+        if missing:
+            latest.update(self._latest_beyond_recent(company, missing))
+        self.company = company
+        metas: Dict[str, Optional[FilingMetadata]] = {}
+        for form, filing in latest.items():
+            if filing is None:
+                metas[form] = None
+                continue
+            slot = _FORM_SLOTS[form]
+            meta = FilingMetadata.from_filing(filing)
+            with _form_lock(self, slot):
+                current = getattr(self, f"_{slot}_metadata")
+                if current is None or current.accession != meta.accession:
+                    setattr(self, f"_{slot}_filing", filing)
+                    setattr(self, f"_{slot}_obj", None)
+                    setattr(self, f"_{slot}_metadata", meta)
+                    _forget_form(self, form)
+                metas[form] = getattr(self, f"_{slot}_metadata")
+        return metas
+
+    def _latest_beyond_recent(self, company, forms) -> Dict[str, Any]:
+        """Latest filing of each of ``forms``, none of which is on
+        ``company``'s recent page. New filings land on the recent page, so
+        the filing this retriever already holds is still the latest, and a
+        form the full history lacked is still absent; only a form with
+        neither downloads the older pages (once per ``Company``)."""
+        latest: Dict[str, Any] = {}
+        for form in forms:
+            held = getattr(self, f"_{_FORM_SLOTS[form]}_filing")
+            if held is not None or form in self._absent_forms:
+                latest[form] = held
+                continue
+            latest[form] = _latest(company, form)
+            if latest[form] is None:
+                self._absent_forms.add(form)
+        return latest
 
     # ── 8-K public methods ────────────────────────────────────────────────
+    #
+    # Each getter loads the retriever's current 8-K, unless given ``report``
+    # (from ``latest_8k``), which pins it to one already-loaded filing.
 
-    def get_8k_overview(self) -> Dict[str, Any]:
+    def latest_8k(self) -> "EightKReport":
+        """The latest 8-K, loaded once: its getters all read this filing,
+        even if a refresh moves the retriever to a newer 8-K meanwhile, so
+        an overview and the text read after it describe the same filing.
+        Raises if no 8-K is available."""
+        return EightKReport(self, _load_report(self, "8-K"))
+
+    def get_8k_overview(self, *, report=None) -> Dict[str, Any]:
         """Overview of the latest 8-K: items, content type, earnings flag, dates.
 
         The ``content_type`` field is rule-based (no LLM call) and classifies the
@@ -275,43 +491,63 @@ class SECDataRetrieval:
         ``to_context(detail="standard")`` returns a ~300-token LLM-friendly summary.
         """
         try:
-            eightk = self.get_eightk()
-            return {
-                "items": eightk.items,
-                "content_type": eightk.content_type,
-                "is_amendment": eightk.is_amendment,
-                "has_earnings": eightk.has_earnings,
-                "has_press_release": eightk.has_press_release,
-                "date_of_report": eightk.date_of_report,
-                "context": eightk.to_context(detail="standard"),
-                "metadata": self._eightk_metadata.to_dict() if self._eightk_metadata else {},
-                "found": True,
-            }
+            eightk, meta = _eightk_report(self, report)
+
+            def extract() -> Dict[str, Any]:
+                return {
+                    "items": eightk.items,
+                    "content_type": eightk.content_type,
+                    "is_amendment": eightk.is_amendment,
+                    "has_earnings": eightk.has_earnings,
+                    "has_press_release": eightk.has_press_release,
+                    "date_of_report": eightk.date_of_report,
+                    "context": eightk.to_context(detail="standard"),
+                    "metadata": meta.to_dict() if meta else {},
+                    "found": True,
+                }
+
+            return _memoized_extract(self, "8-K", eightk, meta, ("overview",), extract)
         except Exception as e:
             logger.warning("[%s] 8-K overview extraction failed: %s", self.ticker, e)
             return {"found": False, "text": f"Error fetching 8-K overview: {e}", "metadata": {}}
 
-    def get_8k_item(self, item: str) -> Dict[str, Any]:
+    def get_8k_item(self, item: str, *, report=None) -> Dict[str, Any]:
         """Extract text for a specific 8-K item number (e.g. '2.02', '1.01').
 
         Uses ``EightK.__getitem__`` which accepts formats like '2.02',
         'Item 2.02', or 'item_202'.  Returns the same dict shape as
         ``get_section`` for consistency.
         """
+        item = (item or "").strip()
+        if not item:
+            # A blank key would ask edgartools for item '' — a FutureWarning
+            # today and a SectionNotFoundError in edgartools 6.0.
+            meta = report[1] if report is not None else self._eightk_metadata
+            metadata = meta.to_dict() if meta else {}
+            return {"text": "No 8-K item number given (e.g. '2.02').", "metadata": metadata, "found": False}
         try:
-            eightk = self.get_eightk()
-            text = eightk[item]
-            found = text is not None and bool(str(text).strip())
-            return {
-                "text": str(text) if found else f"Item {item} not found in 8-K",
-                "metadata": self._eightk_metadata.to_dict() if self._eightk_metadata else {},
-                "found": found,
-            }
+            eightk, meta = _eightk_report(self, report)
+
+            def extract() -> Dict[str, Any]:
+                try:
+                    text = eightk[item]
+                except KeyError:
+                    # edgartools 6.0 raises SectionNotFoundError (a KeyError) for
+                    # an item the filing doesn't contain; today it returns None.
+                    text = None
+                found = text is not None and bool(str(text).strip())
+                return {
+                    "text": str(text) if found else f"Item {item} not found in 8-K",
+                    "metadata": meta.to_dict() if meta else {},
+                    "found": found,
+                }
+
+            return _memoized_extract(self, "8-K", eightk, meta, ("item", item), extract)
         except Exception as e:
             logger.warning("[%s] 8-K item %s extraction failed: %s", self.ticker, item, e)
             return {"text": f"Error extracting 8-K item {item}: {e}", "metadata": {}, "found": False}
 
-    def get_earnings_data(self) -> Dict[str, Any]:
+    def get_earnings_data(self, *, report=None) -> Dict[str, Any]:
         """Structured earnings from 8-K Item 2.02 + EX-99.1 press release.
 
         Uses edgartools v5 ``EarningsRelease`` to parse income statement,
@@ -320,39 +556,46 @@ class SECDataRetrieval:
         ``sec_llm_models.py`` handles interpretation.
         """
         try:
-            eightk = self.get_eightk()
-            metadata = self._eightk_metadata.to_dict() if self._eightk_metadata else {}
+            eightk, meta = _eightk_report(self, report)
 
-            if not eightk.has_earnings:
-                return {
-                    "has_earnings": False,
-                    "reason": "Latest 8-K does not contain Item 2.02 earnings or lacks parseable EX-99.1",
+            def extract() -> Dict[str, Any]:
+                metadata = meta.to_dict() if meta else {}
+
+                if not eightk.has_earnings:
+                    return {
+                        "has_earnings": False,
+                        "reason": "Latest 8-K does not contain Item 2.02 earnings or lacks parseable EX-99.1",
+                        "metadata": metadata,
+                    }
+
+                earnings = eightk.earnings
+                result: Dict[str, Any] = {
+                    "has_earnings": True,
+                    "detected_scale": str(earnings.detected_scale),
+                    "context": earnings.to_context(detail="standard"),
                     "metadata": metadata,
                 }
 
-            earnings = eightk.earnings
-            result: Dict[str, Any] = {
-                "has_earnings": True,
-                "detected_scale": str(earnings.detected_scale),
-                "context": earnings.to_context(detail="standard"),
-                "metadata": metadata,
-            }
+                # Each financial table is optional — some press releases omit them
+                if earnings.income_statement:
+                    result["income_statement"] = json.loads(
+                        earnings.income_statement.dataframe.to_json(orient="split")
+                    )
+                if earnings.balance_sheet:
+                    result["balance_sheet"] = json.loads(
+                        earnings.balance_sheet.dataframe.to_json(orient="split")
+                    )
+                if earnings.cash_flow_statement:
+                    result["cash_flow"] = json.loads(
+                        earnings.cash_flow_statement.dataframe.to_json(orient="split")
+                    )
 
-            # Each financial table is optional — some press releases omit them
-            if earnings.income_statement:
-                result["income_statement"] = json.loads(
-                    earnings.income_statement.dataframe.to_json(orient="split")
-                )
-            if earnings.balance_sheet:
-                result["balance_sheet"] = json.loads(
-                    earnings.balance_sheet.dataframe.to_json(orient="split")
-                )
-            if earnings.cash_flow_statement:
-                result["cash_flow"] = json.loads(
-                    earnings.cash_flow_statement.dataframe.to_json(orient="split")
-                )
+                return result
 
-            return result
+            return _memoized_extract(
+                self, "8-K", eightk, meta, ("earnings",), extract,
+                keep=lambda result: result.get("has_earnings") is True,
+            )
         except Exception as e:
             logger.warning("[%s] 8-K earnings extraction failed: %s", self.ticker, e)
             return {"has_earnings": False, "reason": f"Error parsing earnings: {e}", "metadata": {}}
@@ -375,14 +618,8 @@ class SECDataRetrieval:
         try:
             if form == "20-F":
                 return self._get_twentyf_section(item)
-            elif form == "10-K":
-                filing_obj = self.get_tenk()
-                metadata = self._tenk_metadata
-                key = _TENK_ITEM_KEYS.get(item)
-            else:
-                filing_obj = self.get_tenq()
-                metadata = self._tenq_metadata
-                key = _TENQ_ITEM_KEYS.get(item)
+            filing_obj, metadata = _load_report(self, form)
+            key = (_TENK_ITEM_KEYS if form == "10-K" else _TENQ_ITEM_KEYS).get(item)
 
             if key is None:
                 return {
@@ -391,16 +628,19 @@ class SECDataRetrieval:
                     "found": False,
                 }
 
-            text = filing_obj[key]
-            found = text is not None and bool(str(text).strip())
-            if not found:
-                text = f"Section {key} not found in {form} filing"
+            def extract() -> Dict[str, Any]:
+                text = filing_obj[key]
+                found = text is not None and bool(str(text).strip())
+                if not found:
+                    text = f"Section {key} not found in {form} filing"
 
-            return {
-                "text": str(text) if text else "",
-                "metadata": metadata.to_dict() if metadata else {},
-                "found": found,
-            }
+                return {
+                    "text": str(text) if text else "",
+                    "metadata": metadata.to_dict() if metadata else {},
+                    "found": found,
+                }
+
+            return _memoized_extract(self, form, filing_obj, metadata, ("section", item), extract)
 
         except Exception as e:
             logger.warning("[%s] %s Item %s extraction failed: %s", self.ticker, form, item, e)
@@ -430,16 +670,19 @@ class SECDataRetrieval:
             }
 
         try:
-            obj = self.get_twentyf()
-            metadata = self._twentyf_metadata
-            text = getattr(obj, accessor, None)
-            found = text is not None and bool(str(text).strip())
+            obj, metadata = _load_report(self, "20-F")
 
-            return {
-                "text": str(text) if found else f"Section {accessor} not found in 20-F filing",
-                "metadata": metadata.to_dict() if metadata else {},
-                "found": found,
-            }
+            def extract() -> Dict[str, Any]:
+                text = getattr(obj, accessor, None)
+                found = text is not None and bool(str(text).strip())
+
+                return {
+                    "text": str(text) if found else f"Section {accessor} not found in 20-F filing",
+                    "metadata": metadata.to_dict() if metadata else {},
+                    "found": found,
+                }
+
+            return _memoized_extract(self, "20-F", obj, metadata, ("section", item), extract)
         except Exception as e:
             logger.warning("[%s] 20-F Item %s extraction failed: %s", self.ticker, item, e)
             return {"text": f"Error extracting {item} from 20-F: {e}", "metadata": {}, "found": False}
@@ -522,6 +765,15 @@ class SECDataRetrieval:
             result = self.get_section(form, "2")
         return result["text"]
 
+    def balance_sheet_text(
+        self, form: Literal["10-K", "10-Q"] = "10-K"
+    ) -> tuple[str, Optional[FilingMetadata]]:
+        """``(balance sheet as text, metadata of the filing it came from)``,
+        read together so a concurrent refresh can't pair one filing's
+        balance sheet with another's accession."""
+        report, metadata = _load_report(self, form)
+        return report.financials.balance_sheet().to_dataframe().to_string(), metadata
+
     def extract_balance_sheet_as_str(
         self, which: Literal["tenk", "tenq", "both", "10-K", "10-Q"] = "both"
     ) -> dict[str, str]:
@@ -533,16 +785,10 @@ class SECDataRetrieval:
         include_tenq = which in ("tenq", "both", "10-Q")
 
         if include_tenk:
-            tenk = self.get_tenk()
-            out["tenk"] = (
-                tenk.financials.balance_sheet().to_dataframe().to_string()
-            )
+            out["tenk"], _ = self.balance_sheet_text("10-K")
         if include_tenq:
             try:
-                tenq = self.get_tenq()
-                out["tenq"] = (
-                    tenq.financials.balance_sheet().to_dataframe().to_string()
-                )
+                out["tenq"], _ = self.balance_sheet_text("10-Q")
             except Exception as e:
                 out["tenq_error"] = str(e)
         return out

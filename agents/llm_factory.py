@@ -16,11 +16,26 @@ Usage:
 import logging
 from dataclasses import dataclass
 
+from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
 
 from agents.model_registry import get_default_model, get_model
 
 logger = logging.getLogger(__name__)
+
+
+def structured_llm(llm: BaseChatModel, schema):
+    """``llm.with_structured_output(schema)`` using a method every provider accepts.
+
+    The default for Anthropic is forced tool calling (``tool_choice`` "tool"),
+    which newer Claude models with always-on adaptive thinking reject
+    ("tool_choice: type "tool" and "any" are not supported for this model").
+    Claude's native structured output (``method="json_schema"``) works on
+    them, so Anthropic models use it; other providers keep their default.
+    """
+    if isinstance(llm, ChatAnthropic):
+        return llm.with_structured_output(schema, method="json_schema")
+    return llm.with_structured_output(schema)
 
 
 # ---------------------------------------------------------------------------
@@ -32,6 +47,10 @@ _PROVIDER_KEY_KWARG: dict[str, str] = {
     "openai": "api_key",
     "anthropic": "anthropic_api_key",
 }
+
+# Minimum output-token limit for Anthropic models (thinking + answer). Models
+# langchain-anthropic profiles at a higher limit keep that limit.
+_ANTHROPIC_MIN_OUTPUT_TOKENS = 16_000
 
 # Thinking budget tiers for Anthropic (token counts per level)
 _ANTHROPIC_THINKING_BUDGETS: dict[str, int] = {
@@ -139,11 +158,22 @@ def create_llm(
     ):
         sampling_kwargs = {}
 
+    # langchain-anthropic only knows output limits for models it has a profile
+    # for; newer Claude models fall back to max_tokens=4096. With adaptive
+    # thinking a long synthesis spends that on thinking and stops before any
+    # answer text (stop_reason "max_tokens"), so lift the limit to a floor
+    # while never lowering what the library would have chosen itself.
+    output_kwargs = {}
+    if model.provider == "anthropic":
+        library_default = ChatAnthropic.set_default_max_tokens({"model": model.id})["max_tokens"]
+        output_kwargs = {"max_tokens": max(library_default, _ANTHROPIC_MIN_OUTPUT_TOKENS)}
+
     return init_chat_model(
         f"{model.provider}:{model.id}",
         **{key_kwarg_name: api_key},
         **sampling_kwargs,
         **thinking_kwargs,
+        **output_kwargs,
     )
 
 

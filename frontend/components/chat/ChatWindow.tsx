@@ -59,7 +59,7 @@ export function ChatWindow({ ticker, keys, initialSessionId }: ChatWindowProps) 
   }, [input]);
 
   // History loading is handled inside the hook — no callback needed here
-  const { messages, status, sendMessage, freeTrial } = useWebSocket({
+  const { messages, status, sendMessage, freeTrial, authFailed } = useWebSocket({
     ticker,
     keys,
     sessionId: initialSessionId,
@@ -108,6 +108,13 @@ export function ChatWindow({ ticker, keys, initialSessionId }: ChatWindowProps) 
           <span className="capitalize">{status}</span>
         </div>
       </div>
+
+      {authFailed && (
+        <div className="border-b border-border/60 bg-yellow-500/10 px-4 py-1.5 text-center text-[11px] text-muted-foreground">
+          Sign-in service didn&apos;t load, so chat is running anonymously and
+          won&apos;t be saved. Reload the page to sign in.
+        </div>
+      )}
 
       {freeTrial && (
         <div className="border-b border-border/60 bg-primary/5 px-4 py-1.5 text-center text-[11px] text-muted-foreground">

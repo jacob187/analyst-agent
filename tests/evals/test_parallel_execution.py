@@ -1,6 +1,7 @@
 """Tests for the Send-based fan-out worker and parallel get_all_summaries.
 
-Marker: eval_unit — no API keys needed, all tools are mocked.
+Marker: eval_unit — no API keys needed (fake tools; get_all_summaries runs the
+real SEC tools over an in-memory EDGAR with a fake LLM).
 
 These tests verify two performance/architecture properties:
 
@@ -34,13 +35,14 @@ from agents.planner import QueryPlan, AnalysisStep
 
 
 def _as_tool(name: str, func) -> Tool:
-    """Wrap a callable as a langchain Tool with an ``.invoke`` method.
+    """Wrap a callable as a langchain tool object.
 
-    The step executor calls ``tools_dict[name].invoke("")`` (rather than calling
-    the func directly) so LangChain's tracing context propagates to any LLM
-    calls inside. Tests must therefore expose ``Tool``-shaped objects, not raw
-    lambdas — wrapping via ``Tool.from_function`` mirrors how production code
-    builds the tools dict.
+    The worker awaits ``tools_dict[name].ainvoke("")`` (rather than calling the
+    func directly) so the run's callbacks and tracing reach any LLM calls
+    inside, so tests must expose tool objects, not raw lambdas. A single-input
+    ``Tool`` is enough for the worker's empty-string call; production tools are
+    ``StructuredTool``s, whose argument handling tests/test_tool_arg_schemas.py
+    covers.
     """
     return Tool.from_function(name=name, description=name, func=func)
 
@@ -336,42 +338,55 @@ class TestExtractFilingRef:
 # ===========================================================================
 
 
+@pytest.fixture
+async def sec_env(tmp_path, monkeypatch):
+    """Temp DB (the analysis cache's store) + an in-memory EDGAR; yields a fake
+    chat model at the LLM boundary that records its calls."""
+    import api.db as db_module
+    from tests.sec_fakes import CountingChatModel, FakeEdgar, eightk, tenk, tenq
+
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr(db_module, "_db", None)
+    monkeypatch.delenv("FILING_FRESHNESS_TTL_SECONDS", raising=False)
+    await db_module.init_db()
+    edgar = FakeEdgar()
+    edgar.publish(tenk("0000320193-25-000101", "2025-11-01", "10-K risk: supply chain."))
+    edgar.publish(tenq("0000320193-26-000111", "2026-02-01", "10-Q risk: new tariffs."))
+    edgar.publish(eightk("0000320193-26-000121", "2026-01-30"))
+    edgar.install(monkeypatch)
+    yield CountingChatModel()
+    await db_module.close_db()
+
+
+async def _all_summaries(llm) -> str:
+    from agents.tools.sec_tools import create_sec_tools
+
+    tools = {t.name: t for t in create_sec_tools("TEST", llm)}
+    return await tools["get_all_summaries"].ainvoke("")
+
+
 @pytest.mark.eval_unit
 class TestParallelAllSummaries:
-    """Test that _tool_all_summaries runs its three sub-calls concurrently."""
+    """get_all_summaries runs its three analyses concurrently (real tools over
+    a fake EDGAR; only the LLM is faked)."""
 
-    def test_output_structure_preserved(self, mocker):
-        """Output should contain all three section headers regardless of execution order."""
-        mocker.patch("agents.tools.sec_tools._tool_risk_factors_summary", return_value="risk data")
-        mocker.patch("agents.tools.sec_tools._tool_mda_summary", return_value="mda data")
-        mocker.patch("agents.tools.sec_tools._tool_balance_sheet_summary", return_value="balance data")
+    async def test_output_structure_preserved(self, sec_env):
+        """Each section header is followed by its own analysis."""
+        result = await _all_summaries(sec_env)
 
-        from agents.tools.sec_tools import _tool_all_summaries
+        risk, mda, balance = (
+            result.split(header, 1)[1]
+            for header in ("=== RISK ANALYSIS ===", "=== MANAGEMENT OUTLOOK ===", "=== FINANCIAL HEALTH ===")
+        )
+        assert "risk analysis" in risk.split("===", 1)[0]
+        assert "mda analysis" in mda.split("===", 1)[0]
+        assert "balance analysis" in balance
+        assert sec_env.calls == 3
 
-        result = _tool_all_summaries("TEST", None)
+    async def test_runs_concurrently(self, sec_env):
+        """All three LLM calls are in flight at once, not one after another."""
+        sec_env.delay = 0.2
 
-        assert "=== RISK ANALYSIS ===" in result
-        assert "=== MANAGEMENT OUTLOOK ===" in result
-        assert "=== FINANCIAL HEALTH ===" in result
-        assert "risk data" in result
-        assert "mda data" in result
-        assert "balance data" in result
+        await _all_summaries(sec_env)
 
-    def test_runs_concurrently(self, mocker):
-        """Three slow mocked summaries should complete in ~1x delay, not ~3x."""
-        def slow_summary(ticker, llm):
-            time.sleep(0.2)
-            return "summary"
-
-        mocker.patch("agents.tools.sec_tools._tool_risk_factors_summary", side_effect=slow_summary)
-        mocker.patch("agents.tools.sec_tools._tool_mda_summary", side_effect=slow_summary)
-        mocker.patch("agents.tools.sec_tools._tool_balance_sheet_summary", side_effect=slow_summary)
-
-        from agents.tools.sec_tools import _tool_all_summaries
-
-        start = time.monotonic()
-        result = _tool_all_summaries("TEST", None)
-        elapsed = time.monotonic() - start
-
-        assert "summary" in result
-        assert elapsed < 0.5, f"Took {elapsed:.2f}s — summaries likely ran sequentially"
+        assert sec_env.peak_in_flight == 3

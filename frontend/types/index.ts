@@ -21,6 +21,8 @@ export interface EnvKeysResponse {
   tavily: boolean;
   free_trial_model_id: string | null;
   free_trial_queries: number;
+  /** Model ids the operator's server keys cover for this caller. */
+  operator_models?: string[];
 }
 
 // ─── API Keys ──────────────────────────────────────────────────────────────────
@@ -202,8 +204,17 @@ export interface BriefingResponse {
 export interface FilingProgressEvent {
   type: "progress";
   step: string; // "edgar_fetch" | "10-K/risk_10k" | ...
-  status: "fetching" | "complete" | "processing" | "cached" | "done" | "failed" | "needs_key";
+  status:
+    | "fetching"
+    | "complete"
+    | "processing"
+    | "cached"
+    | "done"
+    | "failed"
+    | "needs_key"
+    | "budget_exceeded";
   duration?: number;
+  message?: string;
 }
 
 export interface FilingMetadataEvent {

@@ -6,17 +6,18 @@ import logging
 import os
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from api.db import (
     get_watchlist, get_watchlist_enriched, add_to_watchlist, remove_from_watchlist,
     save_briefing, get_recent_briefings, get_briefing_history,
 )
-from api.dependencies import ApiKeys, get_api_keys
+from api.dependencies import ApiKeys, get_api_keys, resolve_model
 from api.llm_concurrency import (
     LLMBudgetExceeded,
+    LLMCallCharger,
     LLMConcurrencyExceeded,
-    check_and_charge_budget,
+    ensure_budget_available,
     llm_slot,
 )
 from api.rate_limit import check_rest_rate_limit, rate_limit_key
@@ -76,7 +77,10 @@ async def remove_ticker(ticker: str, keys: ApiKeys = Depends(get_api_keys)):
 
 
 @router.get("/briefing")
-async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
+async def get_briefing(
+    keys: ApiKeys = Depends(get_api_keys),
+    x_model_id: str | None = Header(None),
+):
     """Generate AI briefing for the user's watchlist tickers."""
     user_id = keys.require_user_id()
     if not check_rest_rate_limit(
@@ -93,21 +97,29 @@ async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
 
     from agents.briefing.briefing_service import BriefingService
     from agents.llm_factory import ThinkingConfig, create_llm
-    from agents.model_registry import get_default_model, get_model
 
-    model_id = keys.model_id or get_default_model().id
-    model = get_model(model_id) or get_default_model()
-
-    api_key = keys.get_provider_key(model.provider)
+    # Same resolution as chat and filings: an explicit X-Model-Id wins; otherwise
+    # the default if the caller can run it, else a model they have a key for.
+    # BYOK works for any model; the operator's env key only for lendable ones.
+    model, api_key = resolve_model(keys, x_model_id)
+    model_id = model.id
     if not api_key:
         provider_display = model.provider.replace("_", " ").title()
-        raise HTTPException(status_code=400, detail=f"{provider_display} API key required for {model.display_name}")
+        if keys.get_provider_key(model.provider):
+            # Only the operator's key resolved, and it won't cover this model.
+            detail = f"{model.display_name} needs your own {provider_display} API key. Add it in Settings."
+        else:
+            detail = f"{provider_display} API key required for {model.display_name}"
+        raise HTTPException(status_code=400, detail=detail)
 
-    # Charge the daily budget only when the operator's env key is in use —
-    # BYOK requests spend the user's own provider quota.
-    if keys.is_operator_paid(model.provider):
+    # Operator-paid: refuse once today's budget is spent, then charge one unit
+    # per LLM call actually made (LLMCallCharger below). BYOK requests spend
+    # the user's own provider quota and are never charged.
+    operator_paid = keys.is_operator_paid(model.provider)
+    budget_used = 0
+    if operator_paid:
         try:
-            await check_and_charge_budget(user_id)
+            budget_used = await ensure_budget_available(user_id)
         except LLMBudgetExceeded as e:
             raise HTTPException(status_code=429, detail=str(e))
 
@@ -123,6 +135,8 @@ async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
     prior = await get_recent_briefings(user_id=user_id, limit=1)
     previous_briefing = prior[0] if prior else None
 
+    charger = LLMCallCharger(user_id, used=budget_used) if operator_paid else None
+    run_config = {"callbacks": [charger]} if charger else None
     try:
         # BriefingService.generate is sync (yfinance + LLM); offload so it doesn't
         # block other requests' progress on the asyncio loop during the ~10-30s call.
@@ -131,7 +145,7 @@ async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
         async with llm_slot():
             result = await asyncio.wait_for(
                 asyncio.to_thread(
-                    service.generate, tickers, user_id, model_id, previous_briefing
+                    service.generate, tickers, user_id, model_id, previous_briefing, run_config
                 ),
                 timeout=BRIEFING_TIMEOUT_SECONDS,
             )
@@ -144,8 +158,16 @@ async def get_briefing(keys: ApiKeys = Depends(get_api_keys)):
         raise HTTPException(status_code=504, detail="Briefing generation timed out")
     except LLMConcurrencyExceeded:
         raise HTTPException(status_code=503, detail="Server busy, retry shortly")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Briefing generation failed: {e}")
+    except Exception:
+        logger.exception("Briefing generation failed (tickers=%d)", len(tickers))
+        raise HTTPException(status_code=500, detail="Briefing generation failed")
+    finally:
+        # Wait for the charges of the calls made so far, also when the run
+        # failed or timed out. After a timeout the worker thread keeps going:
+        # a call it starts later is still charged (and a failed charge logged)
+        # by the charger, just not awaited here.
+        if charger:
+            await charger.settle()
 
     # Persist to database (non-blocking — don't fail the response if DB write fails)
     try:

@@ -9,15 +9,26 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
 
+import api.db as db_module
 from api import clerk_auth
+from agents.model_registry import get_default_model, get_free_tier_model
 from api.dependencies import (
     ApiKeys,
     _validate_user_id,
     free_trial_key,
     free_trial_model_id,
     get_api_keys,
+    resolve_ws_identity,
     resolve_ws_keys,
-    verify_ws_identity,
+)
+from tests.clerk_fakes import FakeJwksEndpoint
+from tests.conftest import (
+    byok_auth_field,
+    clear_operator_keys,
+    model_where,
+    one_per_provider,
+    other_model,
+    set_operator_key,
 )
 
 
@@ -33,6 +44,13 @@ def _disable_clerk_by_default(monkeypatch):
     monkeypatch.delenv("DISABLE_AUTH", raising=False)
     from api import dependencies
     dependencies._clerk_unconfigured_warned = False
+    monkeypatch.setattr(dependencies, "_ignored_token_warned", False, raising=False)
+
+
+def _ws_keys(auth: dict):
+    """resolve_ws_keys the way the chat route calls it: identity first."""
+    user_id, _reason = resolve_ws_identity(auth)
+    return resolve_ws_keys(auth, user_id=user_id)
 
 
 class TestGetApiKeys:
@@ -57,18 +75,19 @@ class TestGetApiKeys:
 
     @pytest.mark.eval_unit
     async def test_all_providers_resolved(self):
+        requested = other_model(than=get_default_model()).id
         result = await get_api_keys(
             x_google_api_key="g",
             x_openai_api_key="o",
             x_anthropic_api_key="a",
             x_tavily_api_key="tav",
-            x_model_id="gemini-3.6-flash",
+            x_model_id=requested,
         )
         assert result.google_api_key == "g"
         assert result.openai_api_key == "o"
         assert result.anthropic_api_key == "a"
         assert result.tavily_api_key == "tav"
-        assert result.model_id == "gemini-3.6-flash"
+        assert result.model_id == requested
 
     @pytest.mark.eval_unit
     @patch.dict("os.environ", {}, clear=True)
@@ -80,30 +99,31 @@ class TestGetApiKeys:
 class TestResolveWsKeys:
     @pytest.mark.eval_unit
     def test_resolves_from_auth_message(self):
+        requested = other_model(than=get_default_model()).id
         auth = {
             "google_api_key": "g",
             "openai_api_key": "o",
             "anthropic_api_key": "a",
             "tavily_api_key": "tav",
-            "model_id": "gpt-4.1-mini",
+            "model_id": requested,
         }
-        result = resolve_ws_keys(auth)
+        result = _ws_keys(auth)
         assert result.google_api_key == "g"
         assert result.openai_api_key == "o"
         assert result.anthropic_api_key == "a"
         assert result.tavily_api_key == "tav"
-        assert result.model_id == "gpt-4.1-mini"
+        assert result.model_id == requested
 
     @pytest.mark.eval_unit
     @patch.dict("os.environ", {"GOOGLE_API_KEY": "env-g"})
     def test_falls_back_to_env(self):
-        result = resolve_ws_keys({})
+        result = _ws_keys({})
         assert result.google_api_key == "env-g"
 
     @pytest.mark.eval_unit
     @patch.dict("os.environ", {"GOOGLE_API_KEY": "env-g"})
     def test_auth_takes_priority_over_env(self):
-        result = resolve_ws_keys({"google_api_key": "auth-g"})
+        result = _ws_keys({"google_api_key": "auth-g"})
         assert result.google_api_key == "auth-g"
 
 
@@ -196,12 +216,12 @@ class TestUserIdInGetApiKeys:
 class TestUserIdInWsKeys:
     @pytest.mark.eval_unit
     def test_resolves_user_id_from_auth(self):
-        result = resolve_ws_keys({"user_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"})
+        result = _ws_keys({"user_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"})
         assert result.user_id == "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
     @pytest.mark.eval_unit
     def test_invalid_user_id_in_auth(self):
-        result = resolve_ws_keys({"user_id": "garbage"})
+        result = _ws_keys({"user_id": "garbage"})
         assert result.user_id is None
 
 
@@ -275,29 +295,20 @@ def _make_token(private_pem: bytes, *, sub: str = TEST_SUB, exp_delta: int = 300
 
 @pytest.fixture
 def clerk_env(rsa_keypair, monkeypatch):
-    """Enable Clerk for the test and stub the JWKS fetch."""
+    """Enable Clerk for the test; the JWKS endpoint is a local fake serving
+    the test key. Yields the fake, so a test can make it fail."""
     _, jwk = rsa_keypair
     monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
     monkeypatch.setenv("CLERK_ISSUER_URL", TEST_ISSUER)
+    monkeypatch.delenv("CLERK_JWKS_URL", raising=False)
     monkeypatch.delenv("DISABLE_AUTH", raising=False)
     clerk_auth._reset_cache_for_tests()
-
-    class _FakeJWK:
-        def __init__(self, key):
-            self.key = key
-
-    def _fake_get_signing_key_from_jwt(self, token):
-        from jwt.algorithms import RSAAlgorithm
-        return _FakeJWK(RSAAlgorithm.from_jwk(jwk))
-
-    monkeypatch.setattr(
-        "jwt.PyJWKClient.get_signing_key_from_jwt",
-        _fake_get_signing_key_from_jwt,
-    )
+    jwks = FakeJwksEndpoint().install(monkeypatch)
+    jwks.serve_json({"keys": [jwk]})
     # Reset the one-time-warning flag so tests are independent.
     from api import dependencies
     dependencies._clerk_unconfigured_warned = False
-    yield
+    yield jwks
     clerk_auth._reset_cache_for_tests()
 
 
@@ -383,6 +394,223 @@ class TestClerkRestVerification:
         assert result.user_id is None
 
 
+class TestTokenIsIdentityRest:
+    """With Clerk enabled, a verified token alone identifies the caller."""
+
+    @pytest.mark.eval_unit
+    async def test_token_alone_yields_user_id(self, clerk_env, rsa_keypair):
+        priv, _ = rsa_keypair
+        result = await get_api_keys(x_user_id=None, x_clerk_session_token=_make_token(priv))
+        assert result.user_id == TEST_SUB
+
+    @pytest.mark.eval_unit
+    async def test_token_alone_verified_user_inherits_env_key(
+        self, clerk_env, rsa_keypair, monkeypatch
+    ):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        priv, _ = rsa_keypair
+        result = await get_api_keys(
+            x_google_api_key=None, x_openai_api_key=None,
+            x_anthropic_api_key=None, x_tavily_api_key=None,
+            x_user_id=None, x_clerk_session_token=_make_token(priv),
+        )
+        assert result.google_api_key == "env-key"
+        assert result.is_operator_paid("google_genai") is True
+
+    @pytest.mark.eval_unit
+    async def test_invalid_token_alone_degrades_to_anonymous(self, clerk_env, caplog):
+        # Session tokens are short-lived; an expired one must not break public
+        # endpoints. Failure is logged (never the token itself).
+        with caplog.at_level("INFO", logger="api.dependencies"):
+            result = await get_api_keys(x_user_id=None, x_clerk_session_token="not-a-jwt")
+        assert result.user_id is None
+        assert any("failed verification" in r.message for r in caplog.records)
+        assert all("not-a-jwt" not in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.eval_unit
+    async def test_expired_token_alone_degrades_to_anonymous(self, clerk_env, rsa_keypair):
+        priv, _ = rsa_keypair
+        token = _make_token(priv, exp_delta=-60)
+        result = await get_api_keys(x_user_id=None, x_clerk_session_token=token)
+        assert result.user_id is None
+
+    @pytest.mark.eval_unit
+    async def test_invalid_token_with_user_id_rejected(self, clerk_env):
+        with pytest.raises(HTTPException) as exc:
+            await get_api_keys(x_user_id=TEST_SUB, x_clerk_session_token="not-a-jwt")
+        assert exc.value.status_code == 401
+
+    @pytest.mark.eval_unit
+    async def test_invalid_token_alone_gets_no_env_key(self, clerk_env, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        result = await get_api_keys(
+            x_google_api_key=None, x_openai_api_key=None,
+            x_anthropic_api_key=None, x_tavily_api_key=None,
+            x_user_id=None, x_clerk_session_token="not-a-jwt",
+        )
+        assert result.google_api_key is None
+
+    @pytest.mark.eval_unit
+    async def test_legacy_uuid_user_id_conflicts_with_token(self, clerk_env, rsa_keypair):
+        priv, _ = rsa_keypair
+        with pytest.raises(HTTPException) as exc:
+            await get_api_keys(
+                x_user_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                x_clerk_session_token=_make_token(priv),
+            )
+        assert exc.value.status_code == 401
+
+    @pytest.mark.eval_unit
+    async def test_auth_disabled_ignores_token_and_keeps_user_id(
+        self, clerk_env, monkeypatch
+    ):
+        monkeypatch.setenv("DISABLE_AUTH", "true")
+        result = await get_api_keys(x_user_id=TEST_SUB, x_clerk_session_token="whatever")
+        assert result.user_id == TEST_SUB
+        result = await get_api_keys(x_user_id=None, x_clerk_session_token="whatever")
+        assert result.user_id is None
+
+
+@pytest.fixture
+def temp_db(tmp_path, monkeypatch):
+    """Throwaway SQLite file with the schema initialised (real DB, no mocks)."""
+    import asyncio
+
+    import api.db as db_module
+
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "deps.db")
+    monkeypatch.setattr(db_module, "_db", None)
+    asyncio.run(db_module.init_db())
+    yield db_module
+    asyncio.run(db_module.close_db())
+
+
+class TestTokenIdentityEndpoint:
+    """End-to-end through TestClient: `GET /sessions/{id}/messages` scopes the
+    session lookup to the user id derived from the Clerk token."""
+
+    @pytest.fixture
+    def seeded(self, temp_db):
+        import asyncio
+
+        async def _seed():
+            session_id = await temp_db.get_or_create_session("AAPL", TEST_SUB)
+            await temp_db.save_message(session_id, "user", "hello from the token user")
+            return session_id
+
+        return asyncio.run(_seed())
+
+    @pytest.fixture
+    def client(self):
+        from fastapi.testclient import TestClient
+
+        from api.main import app
+
+        return TestClient(app)
+
+    @pytest.mark.eval_unit
+    def test_token_only_returns_users_messages(self, clerk_env, rsa_keypair, seeded, client):
+        priv, _ = rsa_keypair
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-Clerk-Session-Token": _make_token(priv)},
+        )
+        assert resp.status_code == 200
+        assert [m["content"] for m in resp.json()["messages"]] == ["hello from the token user"]
+
+    @pytest.mark.eval_unit
+    def test_token_with_matching_user_id_also_works(self, clerk_env, rsa_keypair, seeded, client):
+        priv, _ = rsa_keypair
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-Clerk-Session-Token": _make_token(priv), "X-User-Id": TEST_SUB},
+        )
+        assert resp.status_code == 200
+
+    @pytest.mark.eval_unit
+    def test_user_id_disagreeing_with_token_is_401(self, clerk_env, rsa_keypair, seeded, client):
+        priv, _ = rsa_keypair
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-Clerk-Session-Token": _make_token(priv), "X-User-Id": "user_someoneElse"},
+        )
+        assert resp.status_code == 401
+
+    @pytest.mark.eval_unit
+    def test_other_users_token_cannot_read_session(self, clerk_env, rsa_keypair, seeded, client):
+        priv, _ = rsa_keypair
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-Clerk-Session-Token": _make_token(priv, sub="user_intruder")},
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.eval_unit
+    def test_invalid_token_alone_per_user_endpoint_is_422(self, clerk_env, seeded, client):
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-Clerk-Session-Token": "not-a-jwt"},
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.eval_unit
+    def test_expired_token_alone_public_endpoint_is_200(self, clerk_env, rsa_keypair, client):
+        priv, _ = rsa_keypair
+        resp = client.get(
+            "/models",
+            headers={"X-Clerk-Session-Token": _make_token(priv, exp_delta=-60)},
+        )
+        assert resp.status_code == 200
+
+    @pytest.mark.eval_unit
+    def test_invalid_token_with_user_id_is_401(self, clerk_env, seeded, client):
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-Clerk-Session-Token": "not-a-jwt", "X-User-Id": TEST_SUB},
+        )
+        assert resp.status_code == 401
+
+    @pytest.mark.eval_unit
+    def test_no_token_is_anonymous_422(self, clerk_env, seeded, client):
+        resp = client.get(f"/sessions/{seeded}/messages", params={"ticker": "AAPL"})
+        assert resp.status_code == 422
+
+    @pytest.mark.eval_unit
+    def test_user_id_without_token_is_401(self, clerk_env, seeded, client):
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-User-Id": TEST_SUB},
+        )
+        assert resp.status_code == 401
+
+    @pytest.mark.eval_unit
+    def test_auth_disabled_user_id_header_still_works(self, no_clerk_env, seeded, client):
+        resp = client.get(
+            f"/sessions/{seeded}/messages",
+            params={"ticker": "AAPL"},
+            headers={"X-User-Id": TEST_SUB},
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()["messages"]) == 1
+
+
+@pytest.fixture
+async def fresh_db(tmp_path, monkeypatch):
+    """Fresh temp SQLite so /env-keys never touches the real data/chats.db."""
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr(db_module, "_db", None)
+    await db_module.init_db()
+    yield
+    await db_module.close_db()
+
+
 class TestEnvKeyGate:
     """With Clerk enabled, the operator's env keys are lent only to verified
     signed-in users — never to anonymous callers. This is the cost boundary:
@@ -453,11 +681,11 @@ class TestEnvKeyGate:
     @pytest.mark.eval_unit
     def test_ws_anon_does_not_inherit_env_key(self, clerk_env, monkeypatch):
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
-        result = resolve_ws_keys({})
+        result = _ws_keys({})
         assert result.google_api_key is None
 
     @pytest.mark.eval_unit
-    async def test_env_keys_endpoint_hides_provider_from_anon(self, clerk_env, monkeypatch):
+    async def test_env_keys_endpoint_hides_provider_from_anon(self, clerk_env, fresh_db, monkeypatch):
         # /env-keys must not advertise the operator key to anonymous callers,
         # or the UI renders chat/filings affordances the backend then refuses.
         from api.routes.models import env_keys
@@ -469,9 +697,10 @@ class TestEnvKeyGate:
         )
         body = await env_keys(keys)
         assert body["google"] is False
+        assert body["operator_models"] == []
 
     @pytest.mark.eval_unit
-    async def test_env_keys_endpoint_shows_provider_to_verified(self, clerk_env, rsa_keypair, monkeypatch):
+    async def test_env_keys_endpoint_shows_provider_to_verified(self, clerk_env, rsa_keypair, fresh_db, monkeypatch):
         from api.routes.models import env_keys
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
         priv, _ = rsa_keypair
@@ -483,6 +712,7 @@ class TestEnvKeyGate:
         )
         body = await env_keys(keys)
         assert body["google"] is True
+        assert body["operator_models"]  # the lendable Gemini models
 
 
 class TestClerkWsVerification:
@@ -490,53 +720,104 @@ class TestClerkWsVerification:
     def test_valid_token_matching_user_ok(self, clerk_env, rsa_keypair):
         priv, _ = rsa_keypair
         token = _make_token(priv)
-        ok, reason = verify_ws_identity(TEST_SUB, {"clerk_session_token": token})
-        assert ok is True
+        user_id, reason = resolve_ws_identity(
+            {"user_id": TEST_SUB, "clerk_session_token": token}
+        )
+        assert user_id == TEST_SUB
+        assert reason is None
+
+    @pytest.mark.eval_unit
+    def test_token_alone_yields_user_id(self, clerk_env, rsa_keypair):
+        # The token's verified subject is the identity; user_id is optional.
+        priv, _ = rsa_keypair
+        token = _make_token(priv)
+        user_id, reason = resolve_ws_identity({"clerk_session_token": token})
+        assert user_id == TEST_SUB
         assert reason is None
 
     @pytest.mark.eval_unit
     def test_mismatched_user_ws_rejected(self, clerk_env, rsa_keypair):
         priv, _ = rsa_keypair
         token = _make_token(priv, sub="user_other")
-        ok, reason = verify_ws_identity(TEST_SUB, {"clerk_session_token": token})
-        assert ok is False
+        user_id, reason = resolve_ws_identity(
+            {"user_id": TEST_SUB, "clerk_session_token": token}
+        )
+        assert user_id is None
         assert "match" in (reason or "").lower()
 
     @pytest.mark.eval_unit
-    def test_missing_token_ws_rejected(self, clerk_env):
-        ok, reason = verify_ws_identity(TEST_SUB, {})
-        assert ok is False
-        assert "missing" in (reason or "").lower()
+    def test_invalid_token_ws_alone_is_anonymous(self, clerk_env):
+        assert resolve_ws_identity({"clerk_session_token": "not-a-jwt"}) == (None, None)
 
     @pytest.mark.eval_unit
-    def test_ws_clerk_unconfigured_ok(self, no_clerk_env):
-        ok, reason = verify_ws_identity(TEST_SUB, {})
-        assert ok is True
+    def test_invalid_token_ws_with_user_id_rejected(self, clerk_env):
+        user_id, reason = resolve_ws_identity(
+            {"user_id": TEST_SUB, "clerk_session_token": "not-a-jwt"}
+        )
+        assert user_id is None
+        assert "invalid" in (reason or "").lower()
+
+    @pytest.mark.eval_unit
+    def test_non_string_token_ws_treated_as_absent(self, clerk_env):
+        user_id, reason = resolve_ws_identity({"clerk_session_token": 123})
+        assert user_id is None
         assert reason is None
 
     @pytest.mark.eval_unit
-    def test_ws_disable_auth_ok(self, clerk_env, monkeypatch):
+    def test_missing_token_ws_rejected(self, clerk_env):
+        user_id, reason = resolve_ws_identity({"user_id": TEST_SUB})
+        assert user_id is None
+        assert "missing" in (reason or "").lower()
+
+    @pytest.mark.eval_unit
+    def test_no_credentials_ws_is_anonymous(self, clerk_env):
+        assert resolve_ws_identity({}) == (None, None)
+
+    @pytest.mark.eval_unit
+    def test_ws_clerk_unconfigured_trusts_user_id(self, no_clerk_env):
+        user_id, reason = resolve_ws_identity({"user_id": TEST_SUB})
+        assert user_id == TEST_SUB
+        assert reason is None
+
+    @pytest.mark.eval_unit
+    def test_ws_disable_auth_trusts_user_id(self, clerk_env, monkeypatch):
         monkeypatch.setenv("DISABLE_AUTH", "true")
-        ok, reason = verify_ws_identity(TEST_SUB, {})
-        assert ok is True
+        user_id, reason = resolve_ws_identity({"user_id": TEST_SUB})
+        assert user_id == TEST_SUB
         assert reason is None
 
     @pytest.mark.eval_unit
     def test_ws_anonymous_uuid_ok_without_token(self, clerk_env):
-        # A non-Clerk id connects as anonymous (no token needed) — but the
-        # identity itself is dropped in resolve_ws_keys (see below), so this
-        # only governs whether the connection is allowed, not who it acts as.
+        # A non-Clerk id connects as anonymous (no token needed) and is
+        # dropped to None so nothing persists under an unverifiable identity.
         anon = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-        ok, reason = verify_ws_identity(anon, {})
-        assert ok is True
-        assert reason is None
+        assert resolve_ws_identity({"user_id": anon}) == (None, None)
 
     @pytest.mark.eval_unit
     def test_ws_legacy_uuid_identity_dropped(self, clerk_env):
-        # The WS path mirrors REST: a legacy UUID is unverifiable under Clerk,
-        # so resolve_ws_keys drops it to anonymous (no persistence under it).
+        # resolve_ws_keys mirrors REST: a legacy UUID is unverifiable under
+        # Clerk, so it resolves to anonymous.
         anon = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-        result = resolve_ws_keys({"user_id": anon})
+        result = _ws_keys({"user_id": anon})
+        assert result.user_id is None
+
+    @pytest.mark.eval_unit
+    def test_ws_keys_token_only_gets_env_key(self, clerk_env, rsa_keypair, monkeypatch):
+        # Env-key lending keys off the verified id, not the user_id field.
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        priv, _ = rsa_keypair
+        auth = {"clerk_session_token": _make_token(priv)}
+        user_id, _reason = resolve_ws_identity(auth)
+        result = resolve_ws_keys(auth, user_id=user_id)
+        assert result.user_id == TEST_SUB
+        assert result.google_api_key == "env-key"
+        assert result.is_operator_paid("google_genai") is True
+
+    @pytest.mark.eval_unit
+    def test_ws_keys_takes_the_identity_it_is_given(self, clerk_env, rsa_keypair):
+        # No second verification path: the id comes only from the caller.
+        priv, _ = rsa_keypair
+        result = resolve_ws_keys({"clerk_session_token": _make_token(priv)}, user_id=None)
         assert result.user_id is None
 
 
@@ -614,20 +895,160 @@ class TestIsOperatorPaid:
     @pytest.mark.eval_unit
     def test_ws_auth_message_keys_are_user_provenance(self, monkeypatch):
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
-        keys = resolve_ws_keys({"google_api_key": "ws-user-key"})
+        keys = _ws_keys({"google_api_key": "ws-user-key"})
         assert keys.is_operator_paid("google_genai") is False
 
     @pytest.mark.eval_unit
     def test_ws_env_fallback_is_operator_paid(self, monkeypatch):
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
-        keys = resolve_ws_keys({})
+        keys = _ws_keys({})
         assert keys.is_operator_paid("google_genai") is True
 
     @pytest.mark.eval_unit
     def test_unknown_provider_returns_false(self, monkeypatch):
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
-        keys = resolve_ws_keys({})
+        keys = _ws_keys({})
         assert keys.is_operator_paid("not_a_real_provider") is False
+
+
+def _spy_verification_off_loop(monkeypatch) -> list[bool]:
+    """Wrap the real verify_clerk_token; record, per call, whether it ran on
+    a thread with a running event loop (True = blocking the loop)."""
+    import asyncio
+    from api import dependencies
+
+    on_loop: list[bool] = []
+    real = dependencies.verify_clerk_token
+
+    def spy(token):
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return real(token)
+
+    monkeypatch.setattr(dependencies, "verify_clerk_token", spy)
+    return on_loop
+
+
+class TestClerkVerificationOffLoop:
+    @pytest.mark.eval_unit
+    async def test_get_api_keys_verifies_token_off_the_event_loop(
+        self, clerk_env, rsa_keypair, monkeypatch
+    ):
+        on_loop = _spy_verification_off_loop(monkeypatch)
+        priv, _ = rsa_keypair
+        keys = await get_api_keys(
+            x_google_api_key=None, x_openai_api_key=None, x_anthropic_api_key=None,
+            x_tavily_api_key=None, x_model_id=None, x_user_id=None,
+            x_clerk_session_token=_make_token(priv),
+        )
+        assert keys.user_id == TEST_SUB
+        assert on_loop == [False]
+
+    @pytest.mark.eval_unit
+    async def test_get_api_keys_rejection_still_raises_401(self, clerk_env, monkeypatch):
+        on_loop = _spy_verification_off_loop(monkeypatch)
+        with pytest.raises(HTTPException) as exc:
+            await get_api_keys(
+                x_google_api_key=None, x_openai_api_key=None, x_anthropic_api_key=None,
+                x_tavily_api_key=None, x_model_id=None, x_user_id=TEST_SUB,
+                x_clerk_session_token="garbage",
+            )
+        assert exc.value.status_code == 401
+        assert on_loop == [False]
+
+    def test_ws_auth_verifies_token_off_the_event_loop(
+        self, clerk_env, rsa_keypair, monkeypatch, tmp_path
+    ):
+        import asyncio
+        import json as _json
+        from unittest.mock import MagicMock
+
+        import api.db as db_module
+        from fastapi.testclient import TestClient
+        from api.main import app
+        from api.routes import chat
+
+        monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "ws.db")
+        monkeypatch.setattr(db_module, "_db", None)
+        asyncio.run(db_module.init_db())
+        monkeypatch.setattr(chat, "create_llm_pair", lambda *a, **k: (MagicMock(), MagicMock()))
+        monkeypatch.setattr(
+            "agents.graph.analyst_graph.create_sec_qa_agent", lambda *a, **k: MagicMock()
+        )
+        on_loop = _spy_verification_off_loop(monkeypatch)
+        priv, _ = rsa_keypair
+        try:
+            with TestClient(app).websocket_connect("/ws/chat/AAPL") as ws:
+                ws.send_text(_json.dumps({
+                    "type": "auth", "google_api_key": "byok",
+                    "clerk_session_token": _make_token(priv),
+                }))
+                ok = ws.receive_json()
+            assert ok["type"] == "auth_success"
+            assert ok["session_id"]  # verified, signed-in
+            assert on_loop == [False]
+        finally:
+            asyncio.run(db_module.close_db())
+
+
+_NON_LENDABLE_PER_PROVIDER = one_per_provider(operator_lendable=False)
+
+
+def _by_provider(model):
+    return model.provider
+
+
+class TestKeyForModel:
+    """The operator's env key pays only for operator_lendable models (when
+    Clerk is enabled); a caller's own key runs any model."""
+
+    @pytest.mark.eval_unit
+    @pytest.mark.parametrize("non_lendable", _NON_LENDABLE_PER_PROVIDER, ids=_by_provider)
+    def test_env_key_withheld_for_non_lendable_model(
+        self, clerk_env, rsa_keypair, monkeypatch, non_lendable
+    ):
+        lendable = model_where(operator_lendable=True)
+        set_operator_key(monkeypatch, lendable, "env-key")
+        set_operator_key(monkeypatch, non_lendable, "env-key")
+        priv, _ = rsa_keypair
+        keys = _ws_keys({"clerk_session_token": _make_token(priv)})
+        assert keys.user_id == TEST_SUB
+        assert keys.key_for_model(lendable) == "env-key"
+        assert keys.key_for_model(non_lendable) is None
+
+    @pytest.mark.eval_unit
+    @pytest.mark.parametrize("non_lendable", _NON_LENDABLE_PER_PROVIDER, ids=_by_provider)
+    def test_own_key_runs_non_lendable_model(
+        self, clerk_env, rsa_keypair, monkeypatch, non_lendable
+    ):
+        set_operator_key(monkeypatch, non_lendable, "env-key")
+        priv, _ = rsa_keypair
+        keys = _ws_keys({
+            "clerk_session_token": _make_token(priv),
+            **byok_auth_field(non_lendable.provider, "user-key"),
+        })
+        assert keys.key_for_model(non_lendable) == "user-key"
+
+    @pytest.mark.eval_unit
+    @pytest.mark.parametrize("non_lendable", _NON_LENDABLE_PER_PROVIDER, ids=_by_provider)
+    def test_self_host_env_key_runs_any_model(self, monkeypatch, non_lendable):
+        # Clerk unconfigured (conftest default): the env keys are the
+        # operator's own, so the allowlist doesn't apply.
+        set_operator_key(monkeypatch, non_lendable, "env-key")
+        keys = _ws_keys({})
+        assert keys.key_for_model(non_lendable) == "env-key"
+
+    @pytest.mark.eval_unit
+    @pytest.mark.parametrize("non_lendable", _NON_LENDABLE_PER_PROVIDER, ids=_by_provider)
+    def test_auth_disabled_env_key_runs_any_model(self, monkeypatch, non_lendable):
+        monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
+        monkeypatch.setenv("DISABLE_AUTH", "true")
+        set_operator_key(monkeypatch, non_lendable, "env-key")
+        keys = _ws_keys({})
+        assert keys.key_for_model(non_lendable) == "env-key"
 
 
 class TestFreeTrial:
@@ -643,8 +1064,9 @@ class TestFreeTrial:
 
     @pytest.mark.eval_unit
     def test_respects_env_override(self, monkeypatch):
-        monkeypatch.setenv("ANON_FREE_MODEL_ID", "claude-sonnet-5")
-        assert free_trial_model_id() == "claude-sonnet-5"
+        override = other_model(than=get_free_tier_model())
+        monkeypatch.setenv("ANON_FREE_MODEL_ID", override.id)
+        assert free_trial_model_id() == override.id
 
     @pytest.mark.eval_unit
     def test_trial_disabled_when_no_model_flagged(self, monkeypatch):
@@ -652,7 +1074,7 @@ class TestFreeTrial:
         # lending the operator's key for the default model.
         import agents.model_registry as registry
         monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
-        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        set_operator_key(monkeypatch, get_default_model())
         monkeypatch.setattr(registry, "_FREE_TIER_MODEL", None)
         assert free_trial_model_id() is None
         assert free_trial_key() is None
@@ -660,37 +1082,37 @@ class TestFreeTrial:
     @pytest.mark.eval_unit
     def test_no_key_when_operator_has_not_configured_provider(self, monkeypatch):
         monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        clear_operator_keys(monkeypatch)
         assert free_trial_key() is None
 
     @pytest.mark.eval_unit
     def test_key_resolves_when_operator_has_configured_provider(self, monkeypatch):
         monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
-        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        set_operator_key(monkeypatch, get_free_tier_model(), "env-key")
         assert free_trial_key() == "env-key"
 
     @pytest.mark.eval_unit
-    async def test_env_keys_endpoint_reports_free_trial_to_anon(self, clerk_env, monkeypatch):
+    async def test_env_keys_endpoint_reports_free_trial_to_anon(self, clerk_env, fresh_db, monkeypatch):
         # Even though clerk_env gates the ordinary provider booleans away from
-        # anon (google=False), the free-trial model id is still surfaced — the
+        # anon (all False), the free-trial model id is still surfaced — the
         # one deliberate exception to that gate.
         from api.routes.models import env_keys
         monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
-        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        set_operator_key(monkeypatch, get_free_tier_model(), "env-key")
         keys = await get_api_keys(
             x_google_api_key=None, x_openai_api_key=None,
             x_anthropic_api_key=None, x_tavily_api_key=None,
             x_user_id=None, x_clerk_session_token=None,
         )
         body = await env_keys(keys)
-        assert body["google"] is False
+        assert (body["google"], body["openai"], body["anthropic"]) == (False, False, False)
         assert body["free_trial_model_id"] == free_trial_model_id()
 
     @pytest.mark.eval_unit
     async def test_env_keys_endpoint_omits_free_trial_without_operator_key(self, clerk_env, monkeypatch):
         from api.routes.models import env_keys
         monkeypatch.delenv("ANON_FREE_MODEL_ID", raising=False)
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        clear_operator_keys(monkeypatch)
         keys = await get_api_keys(
             x_google_api_key=None, x_openai_api_key=None,
             x_anthropic_api_key=None, x_tavily_api_key=None,
@@ -698,3 +1120,150 @@ class TestFreeTrial:
         )
         body = await env_keys(keys)
         assert body["free_trial_model_id"] is None
+
+
+class TestClerkMisconfiguration:
+    """A verifier that can't run (no issuer, JWKS unreachable) is an outage,
+    not an invalid token: it must surface instead of silently downgrading
+    every signed-in user to anonymous."""
+
+    @pytest.fixture
+    def no_issuer(self, clerk_env, monkeypatch):
+        monkeypatch.delenv("CLERK_ISSUER_URL", raising=False)
+        monkeypatch.delenv("CLERK_JWKS_URL", raising=False)
+
+    @pytest.fixture
+    def jwks_down(self, clerk_env):
+        clerk_env.fail()
+
+    @pytest.fixture
+    def jwks_not_json(self, clerk_env):
+        # A wrong CLERK_JWKS_URL pointing at a web page.
+        clerk_env.serve_raw(b"<!doctype html>")
+
+    @pytest.fixture
+    def jwks_no_keys(self, clerk_env):
+        clerk_env.serve_json({"keys": []})
+
+    @pytest.fixture
+    def schemeless_issuer(self, clerk_env, monkeypatch):
+        monkeypatch.setenv("CLERK_ISSUER_URL", "test.clerk.test")
+
+    @pytest.mark.eval_unit
+    @pytest.mark.parametrize(
+        "fault", ["no_issuer", "jwks_down", "jwks_not_json", "jwks_no_keys", "schemeless_issuer"]
+    )
+    async def test_rest_token_gets_503_and_an_error_log(
+        self, fault, request, rsa_keypair, caplog
+    ):
+        request.getfixturevalue(fault)
+        priv, _ = rsa_keypair
+        with caplog.at_level("ERROR"):
+            with pytest.raises(HTTPException) as exc:
+                await get_api_keys(x_user_id=None, x_clerk_session_token=_make_token(priv))
+        assert exc.value.status_code == 503
+        assert any(r.levelname == "ERROR" for r in caplog.records)
+
+    @pytest.mark.eval_unit
+    @pytest.mark.parametrize("fault", ["no_issuer", "jwks_down", "jwks_no_keys"])
+    def test_ws_token_gets_an_error_reason(self, fault, request, rsa_keypair):
+        request.getfixturevalue(fault)
+        priv, _ = rsa_keypair
+        user_id, reason = resolve_ws_identity({"clerk_session_token": _make_token(priv)})
+        assert user_id is None
+        assert "unavailable" in (reason or "").lower()
+
+    @pytest.mark.eval_unit
+    async def test_no_token_is_unaffected_by_a_broken_verifier(self, no_issuer):
+        keys = await get_api_keys(x_user_id=None, x_clerk_session_token=None)
+        assert keys.user_id is None
+
+    @pytest.mark.eval_unit
+    def test_endpoint_returns_503(self, no_issuer, rsa_keypair):
+        from fastapi.testclient import TestClient
+
+        from api.main import app
+
+        priv, _ = rsa_keypair
+        # The dependency refuses before the handler runs, so no DB is needed.
+        resp = TestClient(app).get(
+            "/env-keys", headers={"X-Clerk-Session-Token": _make_token(priv)}
+        )
+        assert resp.status_code == 503
+        assert "unavailable" in resp.json()["detail"].lower()
+
+
+class TestClerkTokenWithoutBackendClerk:
+    """Frontend signed in with Clerk, backend without CLERK_SECRET_KEY: the
+    token is ignored and the user is anonymous. Say so, once."""
+
+    def _token_warnings(self, caplog):
+        return [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and "Clerk session token" in r.getMessage()
+        ]
+
+    @pytest.mark.eval_unit
+    async def test_token_warns_once_naming_the_missing_setting(self, no_clerk_env, caplog):
+        with caplog.at_level("WARNING", logger="api.dependencies"):
+            for _ in range(2):
+                keys = await get_api_keys(x_user_id=None, x_clerk_session_token="some.jwt.token")
+                assert keys.user_id is None
+            resolve_ws_identity({"clerk_session_token": "some.jwt.token"})
+        warnings = self._token_warnings(caplog)
+        assert len(warnings) == 1
+        assert "CLERK_SECRET_KEY" in warnings[0].getMessage()
+        assert "some.jwt.token" not in warnings[0].getMessage()
+
+    @pytest.mark.eval_unit
+    async def test_no_token_no_warning(self, no_clerk_env, caplog):
+        with caplog.at_level("WARNING", logger="api.dependencies"):
+            await get_api_keys(x_user_id=None, x_clerk_session_token=None)
+        assert self._token_warnings(caplog) == []
+
+    @pytest.mark.eval_unit
+    async def test_auth_disabled_token_no_warning(self, no_clerk_env, monkeypatch, caplog):
+        monkeypatch.setenv("DISABLE_AUTH", "true")
+        with caplog.at_level("WARNING", logger="api.dependencies"):
+            await get_api_keys(x_user_id=None, x_clerk_session_token="some.jwt.token")
+        assert self._token_warnings(caplog) == []
+
+
+# ---------------------------------------------------------------------------
+# Free-trial caps read at import: a blank or malformed value must not crash it.
+# ---------------------------------------------------------------------------
+
+_ANON_CAPS = ("ANON_FREE_QUERIES", "ANON_FREE_DAILY_CAP", "ANON_FREE_SEARCH_DAILY_CAP")
+
+
+def _import_anon_caps(value: str):
+    """Import api.dependencies in a fresh interpreter (the caps are read once at
+    import) with every free-trial cap set to `value`; return the caps it read."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    env = {**os.environ, **{name: value for name in _ANON_CAPS}}
+    code = "import api.dependencies as d; print(" + ", ".join(f"d.{n}" for n in _ANON_CAPS) + ")"
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=Path(__file__).resolve().parent.parent,
+        env=env, capture_output=True, text=True, timeout=180,
+    )
+    assert result.returncode == 0, result.stderr
+    return tuple(map(int, result.stdout.split()[-3:])), result.stderr
+
+
+@pytest.mark.eval_unit
+@pytest.mark.parametrize("raw", ["", "abc", "3.5", "-1"])
+def test_malformed_anon_caps_fall_back_to_defaults(raw):
+    caps, stderr = _import_anon_caps(raw)
+    assert caps == (3, 200, 25)
+    if raw:
+        assert all(f"{name}=" in stderr for name in _ANON_CAPS)
+
+
+@pytest.mark.eval_unit
+def test_anon_caps_accept_zero_to_disable():
+    caps, _ = _import_anon_caps("0")
+    assert caps == (0, 0, 0)

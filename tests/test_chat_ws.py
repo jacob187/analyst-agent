@@ -15,20 +15,70 @@ import asyncio
 import json
 import logging
 import sqlite3
+import time
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage
 from starlette.websockets import WebSocketDisconnect
 
+from agents.model_registry import get_all_models, get_default_model, get_free_tier_model, get_model
 from api import dependencies
+from api.dependencies import _PROVIDER_KEY_FIELDS, PROVIDER_ENV_VARS
 from api.main import app
 from api.routes import chat
+from tests.conftest import (
+    byok_auth_field,
+    clear_operator_keys,
+    llm_usage,
+    model_where,
+    other_model,
+    set_operator_key,
+)
+from tests.test_dependencies import (  # noqa: F401  (clerk_env / rsa_keypair are fixtures)
+    TEST_SUB,
+    _make_token,
+    clerk_env,
+    rsa_keypair,
+)
 
 
 @pytest.fixture
 def client():
     return TestClient(app)
+
+
+class TestUserHash:
+    """Trace `user_hash` tags are keyed: a known Clerk id can't be confirmed
+    against exported spans by hashing it."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_key(self, monkeypatch):
+        monkeypatch.setattr(chat, "_trace_hash_key", None, raising=False)
+        monkeypatch.delenv("TRACE_HASH_SECRET", raising=False)
+
+    def test_keyed_by_trace_hash_secret(self, monkeypatch):
+        import hashlib
+        import hmac
+
+        monkeypatch.setenv("TRACE_HASH_SECRET", "s3cret")
+        expected = hmac.new(b"s3cret", b"user_abc", hashlib.sha256).hexdigest()[:16]
+        assert chat._user_hash("user_abc") == expected
+        assert chat._user_hash("user_abc") != hashlib.sha256(b"user_abc").hexdigest()[:16]
+
+    def test_without_secret_uses_a_stable_random_key_and_says_so_once(self, caplog):
+        import hashlib
+
+        with caplog.at_level(logging.INFO, logger="api.routes.chat"):
+            first = chat._user_hash("user_abc")
+            assert chat._user_hash("user_abc") == first
+        assert first != hashlib.sha256(b"user_abc").hexdigest()[:16]
+        notes = [r for r in caplog.records if "TRACE_HASH_SECRET" in r.getMessage()]
+        assert len(notes) == 1
+
+    def test_anonymous_has_no_hash(self):
+        assert chat._user_hash(None) is None
 
 
 class TestAuthFrameSizeCap:
@@ -194,9 +244,7 @@ def _row_count(db_path, table):
 # resolves; no user_id → anonymous.
 _BYOK_AUTH = {
     "type": "auth",
-    "google_api_key": "byok-key",
-    "openai_api_key": "byok-key",
-    "anthropic_api_key": "byok-key",
+    **{field: "byok-key" for field in _PROVIDER_KEY_FIELDS.values()},
 }
 
 
@@ -238,6 +286,227 @@ class TestAnonChatNoPersistence:
         assert _row_count(temp_db, "sessions") == 1
 
 
+# ── Token-derived identity ───────────────────────────────────────────────────
+
+
+class TestTokenDerivedIdentity:
+    """With Clerk enabled the verified `clerk_session_token` alone identifies
+    the user: no `user_id` field is required for persistence."""
+
+    def _persisted(self, db_path, expected_messages):
+        # Messages are written by fire-and-forget tasks; poll briefly.
+        deadline = time.monotonic() + 3
+        while True:
+            conn = sqlite3.connect(db_path)
+            try:
+                sessions = conn.execute("SELECT id, user_id FROM sessions").fetchall()
+                messages = conn.execute(
+                    "SELECT session_id, role, content FROM messages ORDER BY rowid"
+                ).fetchall()
+            finally:
+                conn.close()
+            if len(messages) >= expected_messages or time.monotonic() > deadline:
+                return sessions, messages
+            time.sleep(0.05)
+
+    def test_token_without_user_id_persists_session_and_messages(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+    ):
+        _patch_agent(monkeypatch)
+        priv, _ = rsa_keypair
+        auth = {**_BYOK_AUTH, "clerk_session_token": _make_token(priv)}  # no user_id
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            ok = _drain_until(ws, "auth_success")
+            assert ok["session_id"]
+
+            ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+            _drain_until(ws, "response")
+
+            # Polled before leaving the block: TestClient stops the server
+            # loop on exit, and the assistant row is written after the
+            # response frame is sent.
+            sessions, messages = self._persisted(temp_db, expected_messages=2)
+
+        assert sessions == [(ok["session_id"], TEST_SUB)]
+        assert [(m[0], m[1]) for m in messages] == [
+            (ok["session_id"], "user"),
+            (ok["session_id"], "assistant"),
+        ]
+
+    def test_failed_message_write_is_logged_not_dropped(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch, caplog
+    ):
+        _patch_agent(monkeypatch)
+        priv, _ = rsa_keypair
+        auth = {**_BYOK_AUTH, "clerk_session_token": _make_token(priv)}
+        caplog.set_level(logging.ERROR)
+
+        def write_errors():
+            return [
+                r for r in caplog.records
+                if r.name == "api.db" and r.levelno == logging.ERROR
+            ]
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            ok = _drain_until(ws, "auth_success")
+            conn = sqlite3.connect(temp_db)
+            conn.execute("DROP TABLE messages")
+            conn.commit()
+            conn.close()
+
+            ws.send_text(json.dumps({"type": "query", "message": "private question"}))
+            assert _drain_until(ws, "response")["message"] == "Analysis complete."
+
+            deadline = time.monotonic() + 3
+            while len(write_errors()) < 2 and time.monotonic() < deadline:
+                time.sleep(0.05)
+
+        messages = sorted(r.getMessage() for r in write_errors())
+        assert len(messages) == 2
+        assert "save_message:assistant" in messages[0]
+        assert "save_message:user" in messages[1]
+        for m in messages:
+            assert ok["session_id"] in m
+            assert "private question" not in m
+            assert "Analysis complete." not in m
+        assert not any("never retrieved" in r.getMessage() for r in caplog.records)
+
+    def _stored_model(self, db_path, session_id):
+        conn = sqlite3.connect(db_path)
+        try:
+            return conn.execute(
+                "SELECT model FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    def _connect(self, client, auth):
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            return _drain_until(ws, "auth_success")
+
+    def test_resume_by_ticker_records_the_new_model(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+    ):
+        _patch_agent(monkeypatch)
+        priv, _ = rsa_keypair
+        auth = {**_BYOK_AUTH, "clerk_session_token": _make_token(priv)}
+
+        old = get_default_model()
+        new = other_model(than=old)
+
+        first = self._connect(client, {**auth, "model_id": old.id})
+        second = self._connect(client, {**auth, "model_id": new.id})
+
+        assert first["session_id"] == second["session_id"]
+        assert self._stored_model(temp_db, second["session_id"]) == new.id
+
+    def test_resume_by_session_id_records_the_new_model(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+    ):
+        _patch_agent(monkeypatch)
+        priv, _ = rsa_keypair
+        auth = {**_BYOK_AUTH, "clerk_session_token": _make_token(priv)}
+
+        old = get_default_model()
+        new = other_model(than=old)
+
+        first = self._connect(client, {**auth, "model_id": old.id})
+        second = self._connect(client, {
+            **auth, "model_id": new.id, "session_id": first["session_id"],
+        })
+
+        assert second["session_id"] == first["session_id"]
+        assert self._stored_model(temp_db, first["session_id"]) == new.id
+
+    def test_foreign_session_id_does_not_change_its_model(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+    ):
+        import api.db as db_module
+
+        _patch_agent(monkeypatch)
+        priv, _ = rsa_keypair
+        old = get_default_model()
+        foreign = asyncio.run(
+            db_module.create_session("AAPL", "user_someoneElse", model=old.id)
+        )
+        auth = {
+            **_BYOK_AUTH, "clerk_session_token": _make_token(priv),
+            "model_id": other_model(than=old).id, "session_id": foreign,
+        }
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            assert ws.receive_json() == {"type": "error", "message": "Invalid session."}
+
+        assert self._stored_model(temp_db, foreign) == old.id
+
+    def test_user_id_disagreeing_with_token_is_rejected(
+        self, client, temp_db, clerk_env, rsa_keypair
+    ):
+        priv, _ = rsa_keypair
+        auth = {
+            **_BYOK_AUTH,
+            "user_id": "user_someoneElse",
+            "clerk_session_token": _make_token(priv),
+        }
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            err = ws.receive_json()
+            assert err["type"] == "error"
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_json()
+            assert exc.value.code == 1008
+        assert _row_count(temp_db, "sessions") == 0
+
+    def test_invalid_token_alone_connects_anonymously(
+        self, client, temp_db, clerk_env, monkeypatch
+    ):
+        # An expired/invalid token with no user_id must not break chat: the
+        # visitor connects as anonymous (BYOK key, nothing persisted).
+        _patch_agent(monkeypatch)
+        auth = {**_BYOK_AUTH, "clerk_session_token": "expired-or-garbage"}
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            ok = _drain_until(ws, "auth_success")
+            assert ok["session_id"] is None
+            ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+            _drain_until(ws, "response")
+
+        assert _row_count(temp_db, "sessions") == 0
+
+    def test_invalid_token_with_user_id_is_rejected(
+        self, client, temp_db, clerk_env
+    ):
+        auth = {**_BYOK_AUTH, "user_id": TEST_SUB, "clerk_session_token": "expired-or-garbage"}
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            err = ws.receive_json()
+            assert err["type"] == "error"
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_json()
+            assert exc.value.code == 1008
+        assert _row_count(temp_db, "sessions") == 0
+
+    def test_token_only_verified_user_borrows_env_key(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+    ):
+        # No BYOK key: the operator's env key resolves off the verified id.
+        _patch_agent(monkeypatch)
+        _set_operator_keys(monkeypatch)
+        priv, _ = rsa_keypair
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "clerk_session_token": _make_token(priv)}))
+            ok = _drain_until(ws, "auth_success")
+            assert ok["session_id"]
+            assert ok["free_trial"] is False
+
+
 # ── Anonymous free trial ─────────────────────────────────────────────────────
 
 
@@ -248,6 +517,11 @@ def _trial_query(ws):
         ev = ws.receive_json()
         if ev["type"] in ("response", "error"):
             return ev
+
+
+def _enable_trial(monkeypatch):
+    """Give the operator a key for the free-trial model's provider."""
+    set_operator_key(monkeypatch, get_free_tier_model())
 
 
 class TestAnonFreeTrial:
@@ -267,7 +541,7 @@ class TestAnonFreeTrial:
 
     def test_anon_no_key_uses_free_trial_model(self, client, temp_db, monkeypatch):
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
             ws.send_text(json.dumps({"type": "auth"}))  # no keys, no user_id
@@ -286,18 +560,19 @@ class TestAnonFreeTrial:
         # steered onto the free-trial model — they get the normal default,
         # paid for by their own key.
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
-            ws.send_text(json.dumps({"type": "auth", "google_api_key": "byok-key"}))
+            ws.send_text(json.dumps({
+                "type": "auth", **byok_auth_field(get_default_model().provider),
+            }))
             ok = _drain_until(ws, "auth_success")
             assert ok["free_trial"] is False
-            from agents.model_registry import get_default_model
             assert ok["model_id"] == get_default_model().id
 
     def test_anon_free_trial_quota_exhausted(self, client, temp_db, monkeypatch):
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -313,7 +588,7 @@ class TestAnonFreeTrial:
 
     def test_free_trial_served_query_is_logged(self, client, temp_db, monkeypatch, caplog):
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
 
         with caplog.at_level(logging.INFO, logger="api.routes.chat"):
             with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -327,9 +602,26 @@ class TestAnonFreeTrial:
         assert len(served) == 1
         assert "ticker=AAPL" in served[0].message
 
+    def test_free_trial_query_log_names_model_and_billing(
+        self, client, temp_db, monkeypatch, caplog
+    ):
+        _patch_agent(monkeypatch)
+        _enable_trial(monkeypatch)
+
+        with caplog.at_level(logging.INFO, logger="api.routes.chat"):
+            with client.websocket_connect("/ws/chat/AAPL") as ws:
+                ws.send_text(json.dumps({"type": "auth"}))
+                ok = _drain_until(ws, "auth_success")
+                ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+                _drain_until(ws, "response")
+
+        [record] = _query_logs(caplog)
+        assert f"model={ok['model_id']}" in record.getMessage()
+        assert "billing=free_trial" in record.getMessage()
+
     def test_free_trial_exhaustion_is_logged(self, client, temp_db, monkeypatch, caplog):
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
 
         with caplog.at_level(logging.INFO, logger="api.routes.chat"):
@@ -354,7 +646,7 @@ class TestAnonFreeTrial:
         # quota keyed on it, rotating the header would mint unlimited free
         # queries on the operator's key.
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
 
         with client.websocket_connect(
@@ -375,9 +667,9 @@ class TestAnonFreeTrial:
             assert "Free trial limit reached" in err["message"]
 
     def test_anon_without_operator_key_still_requires_byok(self, client, temp_db, monkeypatch):
-        # No GOOGLE_API_KEY configured → no free trial to fall back to.
+        # No operator key configured → no free trial to fall back to.
         _patch_agent(monkeypatch)
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        clear_operator_keys(monkeypatch)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
             ws.send_text(json.dumps({"type": "auth"}))
@@ -391,8 +683,8 @@ class TestAnonFreeTrial:
         # DEFAULT_MODEL_ID is an operator knob, not a caller's model choice —
         # setting it must not make the free-trial branch unreachable.
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
-        monkeypatch.setenv("DEFAULT_MODEL_ID", "gemini-3.1-pro-preview")
+        _enable_trial(monkeypatch)
+        monkeypatch.setenv("DEFAULT_MODEL_ID", model_where(operator_lendable=False).id)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
             ws.send_text(json.dumps({"type": "auth"}))
@@ -400,26 +692,28 @@ class TestAnonFreeTrial:
             assert ok["free_trial"] is True
             assert ok["model_id"] == chat.free_trial_model_id()
 
-    def test_anon_with_non_google_key_gets_a_model_for_that_provider(
+    def test_anon_with_non_default_provider_key_gets_a_model_for_that_provider(
         self, client, temp_db, monkeypatch
     ):
-        # They brought an OpenAI key and picked no model: use it, rather than
-        # steering them onto the Google default and refusing for a missing key.
+        # They brought a key for another provider and picked no model: use it,
+        # rather than steering them onto the default and refusing for a missing key.
         _patch_agent(monkeypatch)
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        clear_operator_keys(monkeypatch)
+        other_provider = next(
+            m.provider for m in get_all_models() if m.provider != get_default_model().provider
+        )
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
-            ws.send_text(json.dumps({"type": "auth", "openai_api_key": "byok-key"}))
+            ws.send_text(json.dumps({"type": "auth", **byok_auth_field(other_provider)}))
             ok = _drain_until(ws, "auth_success")
             assert ok["free_trial"] is False
-            from agents.model_registry import get_model
-            assert get_model(ok["model_id"]).provider == "openai"
+            assert get_model(ok["model_id"]).provider == other_provider
 
     def test_oversized_query_does_not_burn_a_trial_credit(
         self, client, temp_db, monkeypatch
     ):
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -443,7 +737,7 @@ class TestAnonFreeTrial:
         # len() of a list counts elements, so a list of huge strings would slip
         # past the length check and reach the operator's key.
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -461,17 +755,19 @@ class TestAnonFreeTrial:
     def test_stale_saved_model_id_does_not_block_the_trial(self, client, temp_db, monkeypatch):
         # An id saved before a model rename isn't an explicit choice.
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
+        stale_id = "model-retired-from-the-registry"
+        assert get_model(stale_id) is None
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
-            ws.send_text(json.dumps({"type": "auth", "model_id": "gemini-3-flash-preview"}))
+            ws.send_text(json.dumps({"type": "auth", "model_id": stale_id}))
             ok = _drain_until(ws, "auth_success")
             assert ok["free_trial"] is True
             assert ok["model_id"] == chat.free_trial_model_id()
 
     def test_trial_logs_never_contain_the_raw_ip(self, client, temp_db, monkeypatch, caplog):
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
 
         with caplog.at_level(logging.INFO, logger="api.routes.chat"):
@@ -491,11 +787,12 @@ class TestAnonFreeTrial:
         # The free trial only covers the one designated light model — picking
         # a different model without a key is still refused.
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "operator-anthropic-key")
+        _enable_trial(monkeypatch)
+        other = model_where(operator_lendable=False)
+        set_operator_key(monkeypatch, other)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
-            ws.send_text(json.dumps({"type": "auth", "model_id": "claude-opus-5"}))
+            ws.send_text(json.dumps({"type": "auth", "model_id": other.id}))
             err = ws.receive_json()
             assert err["type"] == "error"
             assert "API key required" in err["message"]
@@ -509,7 +806,7 @@ class TestAnonFreeTrial:
         import api.db as db_module
         from api.rate_limit import clear_rate_limits
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -530,7 +827,7 @@ class TestAnonFreeTrial:
     def test_per_ip_quota_resets_at_utc_midnight(self, client, temp_db, monkeypatch):
         import api.db as db_module
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
         monkeypatch.setattr(db_module, "_today_utc", lambda: "2026-09-24")
 
@@ -548,7 +845,7 @@ class TestAnonFreeTrial:
         # the last global credit, the second is refused mid-session even though
         # their own per-IP quota is untouched.
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_DAILY_CAP", 1)
         monkeypatch.setattr(dependencies, "ANON_FREE_DAILY_CAP", 1)
 
@@ -571,7 +868,7 @@ class TestAnonFreeTrial:
         # Refused per-IP queries must not count toward the global cap, or one
         # visitor hammering "send" could lock everyone else out.
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_QUERIES", 1)
         monkeypatch.setattr(chat, "ANON_FREE_DAILY_CAP", 2)
         monkeypatch.setattr(dependencies, "ANON_FREE_DAILY_CAP", 2)
@@ -595,7 +892,7 @@ class TestAnonFreeTrial:
     def test_connect_refused_once_global_cap_is_spent(self, client, temp_db, monkeypatch):
         import api.db as db_module
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_DAILY_CAP", 1)
         monkeypatch.setattr(dependencies, "ANON_FREE_DAILY_CAP", 1)
         asyncio.run(db_module.increment_llm_usage(chat.FREE_TRIAL_GLOBAL_USAGE_KEY))
@@ -609,20 +906,22 @@ class TestAnonFreeTrial:
     def test_global_cap_does_not_affect_byok(self, client, temp_db, monkeypatch):
         import api.db as db_module
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setattr(chat, "ANON_FREE_DAILY_CAP", 1)
         monkeypatch.setattr(dependencies, "ANON_FREE_DAILY_CAP", 1)
         asyncio.run(db_module.increment_llm_usage(chat.FREE_TRIAL_GLOBAL_USAGE_KEY))
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
-            ws.send_text(json.dumps({"type": "auth", "google_api_key": "byok-key"}))
+            ws.send_text(json.dumps({
+                "type": "auth", **byok_auth_field(get_free_tier_model().provider),
+            }))
             ok = _drain_until(ws, "auth_success")
             assert ok["free_trial"] is False
             assert _trial_query(ws)["type"] == "response"
 
     def test_quota_rows_do_not_store_raw_ips(self, client, temp_db, monkeypatch):
         _patch_agent(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
 
         with client.websocket_connect(
             "/ws/chat/AAPL", headers={"x-forwarded-for": "203.0.113.7"}
@@ -656,7 +955,7 @@ class TestAnonFreeTrial:
 
     def test_trial_borrows_operator_tavily_key_with_a_meter(self, client, temp_db, monkeypatch):
         captured = self._capture_agent_kwargs(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setenv("TAVILY_API_KEY", "operator-tavily")
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -670,7 +969,7 @@ class TestAnonFreeTrial:
 
     def test_trial_search_meter_enforces_the_daily_cap(self, client, temp_db, monkeypatch):
         captured = self._capture_agent_kwargs(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setenv("TAVILY_API_KEY", "operator-tavily")
         monkeypatch.setattr(chat, "ANON_FREE_SEARCH_DAILY_CAP", 2)
 
@@ -688,7 +987,7 @@ class TestAnonFreeTrial:
         # unavailable rather than plan steps that can only fail.
         import api.db as db_module
         captured = self._capture_agent_kwargs(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setenv("TAVILY_API_KEY", "operator-tavily")
         monkeypatch.setattr(chat, "ANON_FREE_SEARCH_DAILY_CAP", 1)
         asyncio.run(db_module.increment_llm_usage(chat.FREE_TRIAL_SEARCH_USAGE_KEY))
@@ -706,10 +1005,13 @@ class TestAnonFreeTrial:
         # The Tavily lend is part of the free trial only — an anonymous BYOK
         # user (not on the trial) still needs their own Tavily key.
         captured = self._capture_agent_kwargs(monkeypatch)
+        _enable_trial(monkeypatch)
         monkeypatch.setenv("TAVILY_API_KEY", "operator-tavily")
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
-            ws.send_text(json.dumps({"type": "auth", "google_api_key": "byok-key"}))
+            ws.send_text(json.dumps({
+                "type": "auth", **byok_auth_field(get_free_tier_model().provider),
+            }))
             ok = _drain_until(ws, "auth_success")
             assert ok["free_trial"] is False
             assert "Web research disabled" in ok["message"]
@@ -719,7 +1021,7 @@ class TestAnonFreeTrial:
 
     def test_trial_user_with_own_tavily_key_is_not_metered(self, client, temp_db, monkeypatch):
         captured = self._capture_agent_kwargs(monkeypatch)
-        monkeypatch.setenv("GOOGLE_API_KEY", "operator-key")
+        _enable_trial(monkeypatch)
         monkeypatch.setenv("TAVILY_API_KEY", "operator-tavily")
 
         with client.websocket_connect("/ws/chat/AAPL") as ws:
@@ -730,3 +1032,333 @@ class TestAnonFreeTrial:
 
         assert captured["tavily_api_key"] == "their-tavily"
         assert captured["search_budget"] is None
+
+
+# ── Operator key only pays for operator_lendable models ─────────────────────
+
+# The free-trial model is operator_lendable by registry validation; the
+# non-lendable one comes from the `non_lendable` fixture (tests/conftest.py).
+_LENDABLE_MODEL = get_free_tier_model()
+_LENDABLE = _LENDABLE_MODEL.id
+
+
+def _set_operator_keys(monkeypatch):
+    for var in PROVIDER_ENV_VARS.values():
+        monkeypatch.setenv(var, "operator-key")
+
+
+def _first_frame(client, auth):
+    with client.websocket_connect("/ws/chat/AAPL") as ws:
+        ws.send_text(json.dumps(auth))
+        return ws.receive_json()
+
+
+class TestOperatorKeyAllowlist:
+    def test_signed_in_non_lendable_model_without_own_key_is_refused(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch, non_lendable
+    ):
+        _patch_agent(monkeypatch)
+        _set_operator_keys(monkeypatch)
+        priv, _ = rsa_keypair
+        auth = {"type": "auth", "clerk_session_token": _make_token(priv), "model_id": non_lendable.id}
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps(auth))
+            err = ws.receive_json()
+            provider = non_lendable.provider.replace("_", " ").title()
+            assert err == {
+                "type": "error",
+                "message": (
+                    f"{provider} API key required for {non_lendable.display_name}. "
+                    "Add your key in Settings."
+                ),
+            }
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_json()
+        assert _row_count(temp_db, "sessions") == 0
+
+    def test_signed_in_lendable_model_runs_on_operator_key(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch
+    ):
+        _patch_agent(monkeypatch)
+        _set_operator_keys(monkeypatch)
+        priv, _ = rsa_keypair
+        auth = {"type": "auth", "clerk_session_token": _make_token(priv), "model_id": _LENDABLE}
+        ok = _first_frame(client, auth)
+        assert ok["type"] == "auth_success"
+        assert ok["model_id"] == _LENDABLE
+
+    def test_signed_in_byok_key_runs_non_lendable_model(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch, non_lendable
+    ):
+        _patch_agent(monkeypatch)
+        _set_operator_keys(monkeypatch)
+        priv, _ = rsa_keypair
+        auth = {
+            "type": "auth", "clerk_session_token": _make_token(priv),
+            "model_id": non_lendable.id,
+            **byok_auth_field(non_lendable.provider, "their-key"),
+        }
+        ok = _first_frame(client, auth)
+        assert ok["type"] == "auth_success"
+        assert ok["model_id"] == non_lendable.id
+
+    def test_anon_byok_key_runs_non_lendable_model(self, client, temp_db, clerk_env, monkeypatch, non_lendable):
+        _patch_agent(monkeypatch)
+        auth = {
+            "type": "auth", "model_id": non_lendable.id,
+            **byok_auth_field(non_lendable.provider, "their-key"),
+        }
+        ok = _first_frame(client, auth)
+        assert ok["type"] == "auth_success"
+        assert ok["model_id"] == non_lendable.id
+
+    def test_signed_in_without_model_choice_lands_on_a_lendable_model(
+        self, client, temp_db, clerk_env, rsa_keypair, monkeypatch, non_lendable
+    ):
+        # The operator's default points at a model it won't lend; the caller
+        # picked nothing, so they get a lendable model instead of a refusal.
+        _patch_agent(monkeypatch)
+        _set_operator_keys(monkeypatch)
+        monkeypatch.setenv("DEFAULT_MODEL_ID", non_lendable.id)
+        priv, _ = rsa_keypair
+        ok = _first_frame(client, {"type": "auth", "clerk_session_token": _make_token(priv)})
+        assert ok["type"] == "auth_success"
+        assert get_model(ok["model_id"]).operator_lendable is True
+
+    def test_self_host_may_use_any_model_on_env_keys(self, client, temp_db, monkeypatch, non_lendable):
+        # Clerk unconfigured (conftest default): the env keys are the
+        # self-hoster's own, so the allowlist doesn't apply.
+        _patch_agent(monkeypatch)
+        _set_operator_keys(monkeypatch)
+        ok = _first_frame(client, {"type": "auth", "model_id": non_lendable.id})
+        assert ok["type"] == "auth_success"
+        assert ok["model_id"] == non_lendable.id
+
+
+# ── Daily budget counts LLM calls ───────────────────────────────────────────
+
+
+def _wait_for_usage(user_id: str, expected: int) -> int:
+    """Charges settle after the response frame is sent; poll briefly."""
+    deadline = time.monotonic() + 3
+    while True:
+        used = llm_usage(user_id)
+        if used >= expected or time.monotonic() > deadline:
+            return used
+        time.sleep(0.05)
+
+
+def _wire_real_graph(monkeypatch):
+    """Real PlanningAgent + ReAct node over a scripted fake chat model: one
+    tool-call turn then an answer, i.e. exactly 2 LLM calls per query. Only
+    the model is fake (at the invoke boundary); callbacks flow through the
+    real graph."""
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.tools import tool
+    from langgraph.graph import END, StateGraph
+    from langgraph.prebuilt import create_react_agent
+
+    from agents.graph.analyst_graph import AnalysisState, PlanningAgent, create_react_node
+
+    class _ScriptedChatModel(FakeMessagesListChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    @tool
+    def add_numbers(a: int, b: int) -> int:
+        """Add two integers."""
+        return a + b
+
+    def make_pair(*_a, **_k):
+        llm = _ScriptedChatModel(responses=[
+            AIMessage(content="", tool_calls=[
+                {"name": "add_numbers", "args": {"a": 2, "b": 3}, "id": "call_1"},
+            ]),
+            AIMessage(content="The total is 5."),
+        ])
+        return llm, llm
+
+    def build_agent(ticker, llm, **_k):
+        workflow = StateGraph(AnalysisState)
+        workflow.add_node("react_agent", create_react_node(create_react_agent(llm, [add_numbers])))
+        workflow.set_entry_point("react_agent")
+        workflow.add_edge("react_agent", END)
+        return PlanningAgent(workflow.compile(), ticker)
+
+    monkeypatch.setattr(chat, "create_llm_pair", make_pair)
+    monkeypatch.setattr("agents.graph.analyst_graph.create_sec_qa_agent", build_agent)
+
+
+_SIGNED_IN = "user_percallbudget"
+
+
+class TestPerCallBudget:
+    def test_operator_paid_query_charges_each_llm_call(self, client, temp_db, monkeypatch):
+        _wire_real_graph(monkeypatch)
+        set_operator_key(monkeypatch, _LENDABLE_MODEL)
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE}))
+            _drain_until(ws, "auth_success")
+            ws.send_text(json.dumps({"type": "query", "message": "what is 2 + 3?"}))
+            assert _drain_until(ws, "response")["message"] == "The total is 5."
+
+            # Inside the block: TestClient stops the server loop on exit.
+            assert _wait_for_usage(_SIGNED_IN, 2) == 2
+
+    def test_history_compression_call_is_charged(self, client, temp_db, monkeypatch):
+        _wire_real_graph(monkeypatch)
+        set_operator_key(monkeypatch, _LENDABLE_MODEL)
+        monkeypatch.setattr(chat, "get_token_threshold", lambda _model_id: 0)
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE}))
+            _drain_until(ws, "auth_success")
+            ws.send_text(json.dumps({"type": "query", "message": "what is 2 + 3?"}))
+            _drain_until(ws, "response")
+
+            # 2 calls answering + 1 summarising the history. Checked before
+            # leaving the block: TestClient cancels the handler on exit, and
+            # the summary call is charged after the response frame is sent.
+            assert _wait_for_usage(_SIGNED_IN, 3) == 3
+
+    def test_query_refused_when_budget_already_spent(self, client, temp_db, monkeypatch):
+        import api.db as db_module
+        from api import llm_concurrency
+
+        _wire_real_graph(monkeypatch)
+        set_operator_key(monkeypatch, _LENDABLE_MODEL)
+        monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 3)
+        for _ in range(3):
+            asyncio.run(db_module.increment_llm_usage(_SIGNED_IN))
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE}))
+            _drain_until(ws, "auth_success")
+            err = _trial_query(ws)  # first response-or-error frame
+            assert err["type"] == "error"
+            assert err["message"].startswith("Daily LLM budget reached.")
+
+        assert llm_usage(_SIGNED_IN) == 3
+
+    def test_run_stops_once_the_budget_is_spent_mid_query(self, client, temp_db, monkeypatch):
+        import api.db as db_module
+        from api import llm_concurrency
+
+        _wire_real_graph(monkeypatch)
+        set_operator_key(monkeypatch, _LENDABLE_MODEL)
+        monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 3)
+        for _ in range(2):
+            asyncio.run(db_module.increment_llm_usage(_SIGNED_IN))
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE}))
+            _drain_until(ws, "auth_success")
+            # Admitted at 2 of 3: the first LLM call (the tool call) spends the
+            # last unit, the second is refused and the query ends with the
+            # budget message, not a generic error.
+            err = _trial_query(ws)
+            assert err["type"] == "error"
+            assert err["message"].startswith("Daily LLM budget reached.")
+
+            # The socket stays usable: the next query is refused up front.
+            err = _trial_query(ws)
+            assert err["message"].startswith("Daily LLM budget reached.")
+
+            assert _wait_for_usage(_SIGNED_IN, 3) == 3
+
+    def test_history_summary_refused_by_budget_keeps_the_session(self, client, temp_db, monkeypatch):
+        import api.db as db_module
+        from api import llm_concurrency
+
+        _wire_real_graph(monkeypatch)
+        set_operator_key(monkeypatch, _LENDABLE_MODEL)
+        monkeypatch.setattr(chat, "get_token_threshold", lambda _model_id: 0)
+        monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 3)
+        asyncio.run(db_module.increment_llm_usage(_SIGNED_IN))
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE}))
+            _drain_until(ws, "auth_success")
+            # 1 + 2 answering calls = 3: the summary call is refused, the
+            # answer still stands and the connection isn't torn down.
+            ws.send_text(json.dumps({"type": "query", "message": "what is 2 + 3?"}))
+            assert _drain_until(ws, "response")["message"] == "The total is 5."
+            err = _trial_query(ws)
+            assert err["message"].startswith("Daily LLM budget reached.")
+
+            assert _wait_for_usage(_SIGNED_IN, 3) == 3
+
+    def test_byok_query_charges_nothing(self, client, temp_db, monkeypatch):
+        _wire_real_graph(monkeypatch)
+        set_operator_key(monkeypatch, _LENDABLE_MODEL)
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({
+                "type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE,
+                **byok_auth_field(_LENDABLE_MODEL.provider, "their-key"),
+            }))
+            _drain_until(ws, "auth_success")
+            ws.send_text(json.dumps({"type": "query", "message": "what is 2 + 3?"}))
+            _drain_until(ws, "response")
+
+        time.sleep(0.2)
+        assert llm_usage(_SIGNED_IN) == 0
+
+
+# ── One INFO line per query: which model answered, and who paid ─────────────
+
+
+def _query_logs(caplog):
+    return [
+        r for r in caplog.records
+        if r.name == "api.routes.chat" and r.levelno == logging.INFO
+        and r.getMessage().startswith("Chat query")
+    ]
+
+
+class TestQueryLog:
+    def test_byok_query_logs_model_and_billing(self, client, temp_db, monkeypatch, caplog):
+        _patch_agent(monkeypatch)
+        asked = other_model(than=get_default_model())
+        auth = {**_BYOK_AUTH, "model_id": asked.id}
+
+        with caplog.at_level(logging.INFO, logger="api.routes.chat"):
+            with client.websocket_connect("/ws/chat/AAPL") as ws:
+                ws.send_text(json.dumps(auth))
+                _drain_until(ws, "auth_success")
+                ws.send_text(json.dumps({"type": "query", "message": "private question"}))
+                _drain_until(ws, "response")
+
+        [record] = _query_logs(caplog)
+        message = record.getMessage()
+        assert f"model={asked.id}" in message
+        assert "ticker=AAPL" in message
+        assert "billing=byok" in message
+        assert "session=None" in message
+        assert "private question" not in message
+        assert "byok-key" not in message
+
+    def test_operator_paid_query_logs_session_not_user(
+        self, client, temp_db, monkeypatch, caplog
+    ):
+        _patch_agent(monkeypatch)
+        set_operator_key(monkeypatch, _LENDABLE_MODEL)
+
+        with caplog.at_level(logging.INFO, logger="api.routes.chat"):
+            with client.websocket_connect("/ws/chat/AAPL") as ws:
+                ws.send_text(json.dumps(
+                    {"type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE}
+                ))
+                ok = _drain_until(ws, "auth_success")
+                ws.send_text(json.dumps({"type": "query", "message": "hi"}))
+                _drain_until(ws, "response")
+
+        [record] = _query_logs(caplog)
+        message = record.getMessage()
+        assert f"model={_LENDABLE}" in message
+        assert "billing=operator" in message
+        assert f"session={ok['session_id']}" in message
+        assert _SIGNED_IN not in message
+        assert "operator-key" not in message

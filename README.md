@@ -62,18 +62,24 @@ A full-stack AI-powered financial analysis application that combines SEC filings
 
 ## Supported Models
 
-You only need one provider — pick whichever you prefer.
+You only need one provider — pick whichever you prefer. The list comes from `agents/models.json`.
 
 | Model | Provider | Context | Thinking |
 |-------|----------|---------|----------|
-| **Gemini 3 Flash** (default) | Google | 1M | Yes |
+| Gemini 3.6 Flash | Google | 1M | Yes |
 | Gemini 3.1 Pro | Google | 1M | Yes |
+| Gemini 3.1 Flash-Lite | Google | 1M | Yes |
+| Gemini 3.8 Flash | Google | 1.05M | Yes |
 | GPT-5.4 | OpenAI | 1.05M | No |
 | GPT-4.1 Mini | OpenAI | 1M | No |
-| o4 Mini | OpenAI | 200K | Yes |
-| o3 | OpenAI | 200K | Yes |
-| Claude Sonnet 4.6 | Anthropic | 200K | Yes |
-| Claude Opus 4.6 | Anthropic | 200K | Yes |
+| GPT-5.4 Mini | OpenAI | 400K | Yes |
+| GPT-5.5 | OpenAI | 1.05M | Yes |
+| Claude Sonnet 4.6 | Anthropic | 1M | Yes |
+| Claude Opus 4.8 | Anthropic | 1M | Yes |
+| Claude Sonnet 5 | Anthropic | 1M | Yes |
+| Claude Opus 5 | Anthropic | 1M | Yes |
+| **Claude Haiku 5.5** (default, free trial) | Anthropic | 1M | Yes |
+| Claude Sonnet 5.5 | Anthropic | 1M | Yes |
 
 ## Quick Start
 
@@ -141,9 +147,9 @@ Open http://localhost:3000/settings and select your provider and model:
 
 | Provider | Get a key | Notes |
 |----------|-----------|-------|
-| Google Gemini | [Google AI Studio](https://aistudio.google.com/app/apikey) | Free tier available; Gemini 3 Flash is the default model |
+| Google Gemini | [Google AI Studio](https://aistudio.google.com/app/apikey) | Free tier available; Gemini 3.1 Flash-Lite is the cheapest model |
 | OpenAI | [OpenAI Platform](https://platform.openai.com/api-keys) | GPT-4.1 Mini is cost-effective |
-| Anthropic | [Anthropic Console](https://console.anthropic.com/settings/keys) | Claude Sonnet 4.6 recommended |
+| Anthropic | [Anthropic Console](https://console.anthropic.com/settings/keys) | Claude Haiku 5.5 is the default model |
 
 Also required:
 - **SEC Header** — Your name and email (SEC requires identification per their [fair access policy](https://www.sec.gov/os/webmaster-faq#code-support))
@@ -182,6 +188,21 @@ NEXT_PUBLIC_DISABLE_AUTH=true
 ```
 
 With both set, `<Show>`/`<UserButton>`/`<SignInButton>` become no-ops, the middleware lets every route through, and per-user data (watchlist, sessions) is keyed on a stable local-dev user id.
+
+### Deploying with Clerk
+
+The backend verifies Clerk session tokens against Clerk's published signing keys (JWKS). Set on the backend:
+
+```bash
+ENV=production
+CLERK_SECRET_KEY=<your Clerk secret key>   # turns verification on
+# The token issuer (`iss`). With the frontend proxying Clerk at /__clerk (the
+# production setup in frontend/proxy.ts), it is the proxied Frontend API URL:
+CLERK_ISSUER_URL=https://your-frontend.example.com/__clerk
+# CLERK_JWKS_URL=...           # optional; defaults to $CLERK_ISSUER_URL/.well-known/jwks.json
+```
+
+With `ENV=production` and `CLERK_SECRET_KEY` set, the backend refuses to start without `CLERK_ISSUER_URL`. If the JWKS can't be fetched or isn't a usable key set (wrong URL, outage), signed-in requests whose signing key isn't already known get `503` rather than being treated as signed out; keys already fetched keep working through an outage.
 
 ## API Documentation
 

@@ -10,6 +10,9 @@ jobs:
   eval-unit:
     name: Unit Evals
     runs-on: ubuntu-latest
+    # The suite takes under a minute; a hang (e.g. a leaked DB worker thread
+    # keeping pytest alive) should fail fast instead of burning the 6h default.
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v6
@@ -28,6 +31,7 @@ jobs:
   eval-fast:
     name: LLM Evals
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: github.event_name == 'pull_request'
 
     steps:

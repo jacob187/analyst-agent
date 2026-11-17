@@ -1,4 +1,4 @@
-"""Tests for 8-K routing in `_fetch_filing_data` and `_run_llm_analysis`.
+"""Tests for 8-K routing in `_fetch_filing_data` and `run_analysis`.
 
 Covers the three branches added to fix the dashboard 8-K visibility gap
 (issue #31). Uses small dataclass-shaped fakes for the SEC retriever
@@ -10,7 +10,9 @@ from unittest.mock import patch
 
 import pytest
 
+from agents.sec_workflow.analysis_cache import run_analysis
 from api.routes import company as company_module
+from tests.sec_fakes import CountingChatModel
 
 
 _TICKER = "AAPL"
@@ -50,6 +52,8 @@ class _FakeRetriever:
     `eightk` slot under test.
     """
 
+    ticker = _TICKER
+
     def __init__(
         self,
         overview: dict[str, Any],
@@ -70,6 +74,10 @@ class _FakeRetriever:
 
     def get_tenq_filing(self):
         raise ValueError("no tenq in this fixture")
+
+    def latest_8k(self) -> "_FakeRetriever":
+        # The pinned 8-K exposes the same getters, all reading one filing.
+        return self
 
     def get_8k_overview(self) -> dict[str, Any]:
         return self._overview
@@ -152,8 +160,8 @@ def test_fetch_filing_data_routes_material_event_eightk():
 
     assert eightk["kind"] == "event"
     raw = eightk["raw"]
-    # Shape must match what `_tool_material_event_summary` builds so
-    # `analyze_material_event` accepts it without adaptation.
+    # Built by the shared `eightk_input` the chat 8-K tool also uses, in the
+    # shape the material event analysis expects.
     assert raw["content_type"] == "director_change"
     assert raw["items"] == ["5.02"]
     assert raw["text"].startswith("On February 15")
@@ -192,11 +200,11 @@ def test_fetch_filing_data_eightk_none_when_overview_raises():
     assert "edgartools blew up" in eightk["reason"]
 
 
-# ── Dispatch: `_run_llm_analysis` event branch ─────────────────────────────
+# ── Dispatch: `run_analysis` event branch ──────────────────────────────────
 
 
-def test_run_llm_analysis_dispatches_event_to_material_event_analyzer():
-    """analysis_type='event' must call `processor.analyze_material_event`."""
+async def test_run_analysis_dispatches_event_to_material_event_analyzer():
+    """analysis_type='event' must run the material event analysis."""
     raw = {
         "content_type": "agreement",
         "items": ["1.01"],
@@ -204,39 +212,39 @@ def test_run_llm_analysis_dispatches_event_to_material_event_analyzer():
         "text": "Item 1.01 — material agreement...",
         "metadata": _EIGHTK_META,
     }
+    llm = CountingChatModel()
 
-    class _StubResult:
-        def model_dump(self):
-            return {"event_type": "Material Agreement", "summary": "ok"}
+    result = await run_analysis(llm, _TICKER, "event", raw)
 
-    class _StubProcessor:
-        def __init__(self, llm):
-            self.calls: list[tuple[str, dict[str, Any]]] = []
-
-        def analyze_material_event(self, ticker: str, data: dict[str, Any]):
-            self.calls.append((ticker, data))
-            return _StubResult()
-
-    with (
-        patch("agents.llm_factory.create_llm", return_value=object()),
-        patch(
-            "agents.sec_workflow.sec_llm_models.SECDocumentProcessor",
-            _StubProcessor,
-        ),
-    ):
-        result = company_module._run_llm_analysis(
-            _TICKER, "event", raw, "gemini-2.5-flash", "fake-key",
-        )
-
-    assert result == {"event_type": "Material Agreement", "summary": "ok"}
+    assert result["event_type"] == "leadership_change"
+    assert '"impact_assessment"' in llm.prompts[0]  # MaterialEventAnalysis schema
+    assert "Item 1.01 — material agreement..." in llm.prompts[0]
 
 
-def test_run_llm_analysis_unknown_type_still_raises():
-    with (
-        patch("agents.llm_factory.create_llm", return_value=object()),
-        patch("agents.sec_workflow.sec_llm_models.SECDocumentProcessor"),
-    ):
-        with pytest.raises(ValueError, match="Unknown analysis type"):
-            company_module._run_llm_analysis(
-                _TICKER, "not_a_real_type", {}, "gemini-2.5-flash", "fake-key",
-            )
+async def test_run_analysis_unknown_type_still_raises():
+    llm = CountingChatModel()
+    with pytest.raises(ValueError, match="Unknown analysis type"):
+        await run_analysis(llm, _TICKER, "not_a_real_type", {})
+    assert llm.calls == 0
+
+
+# ── One 8-K kind rule for chat and the company page ─────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("overview", "kind"),
+    [({"has_earnings": True}, "earnings"), ({"has_earnings": False}, "event"), ({}, "event")],
+)
+def test_eightk_kind(overview, kind):
+    from agents.sec_workflow.analysis_cache import eightk_kind
+
+    assert eightk_kind(overview) == kind
+
+
+def test_processor_has_only_the_async_analysis_entry_point():
+    # The sync analyze_* methods (and their "Error analyzing…" placeholder
+    # models) were dead once every caller moved to `aanalyze`.
+    from agents.sec_workflow.sec_llm_models import SECDocumentProcessor
+
+    assert not [name for name in vars(SECDocumentProcessor) if name.startswith("analyze_")]
+    assert callable(SECDocumentProcessor.aanalyze)

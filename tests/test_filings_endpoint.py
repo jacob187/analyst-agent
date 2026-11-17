@@ -1,7 +1,10 @@
 """Tests for the /api/company/{ticker}/filings endpoint.
 
-Mocks SEC data retrieval, LLM analysis, and DB layer so tests run
-without network access, API keys, or LLM calls.
+Mocks SEC data retrieval and the DB layer so tests run without network
+access; analyses run through the real SECDocumentProcessor against a fake
+chat model at the `create_llm` boundary (tests/sec_fakes.py). The endpoint's
+sharing of the analysis cache and freshness check with chat is covered
+against a real temp DB in tests/test_analysis_cache.py.
 """
 
 import json
@@ -11,6 +14,14 @@ from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 
 from api.main import app
+from tests.conftest import llm_usage, model_where, models_where
+from tests.sec_fakes import CountingChatModel
+from tests.test_dependencies import (  # noqa: F401  (clerk_env / rsa_keypair are fixtures)
+    TEST_SUB,
+    _make_token,
+    clerk_env,
+    rsa_keypair,
+)
 
 
 @pytest.fixture
@@ -58,55 +69,20 @@ _MOCK_RISK_ANALYSIS = {
     "comparison": None,
 }
 
-_MOCK_MDA_ANALYSIS = {
-    "summary": "Revenue grew 8% YoY driven by Services.",
-    "key_points": ["Services revenue up 15%"],
-    "financial_highlights": ["Revenue: $394B"],
-    "future_outlook": "Positive with AI investments.",
-    "sentiment_score": 6.0,
-    "sentiment_analysis": "Positive tone.",
-    "form_type": "10-K",
-    "filing_metadata": _MOCK_TENK_METADATA,
-    "comparison": None,
-}
 
-_MOCK_BALANCE_ANALYSIS = {
-    "summary": "Strong balance sheet.",
-    "key_metrics": ["Total assets: $352B"],
-    "liquidity_analysis": "Good liquidity.",
-    "solvency_analysis": "Low leverage.",
-    "growth_trends": "Steady growth.",
-    "financial_highlights": ["Cash: $62B"],
-    "red_flags": [],
-    "comparison": None,
-}
+# ── Fixture: SEC retrieval + DB mocked, LLM faked at its boundary ──────────
 
-_MOCK_EARNINGS_ANALYSIS = {
-    "summary": "Revenue beat estimates by 3%.",
-    "key_metrics": ["Revenue: $94.9B", "EPS: $2.40"],
-    "beats_misses": ["Revenue beat by $2.8B"],
-    "guidance": "Q2 revenue $90-92B",
-    "sentiment_score": 7.5,
-    "sentiment_analysis": "Strong results.",
-    "filing_metadata": _MOCK_8K_METADATA,
-}
-
-_MOCK_EVENT_ANALYSIS = {
-    "summary": "CEO transition announced.",
-    "event_type": "Leadership Change",
-    "key_points": ["CEO stepping down effective immediately", "CFO named interim CEO"],
-    "impact_assessment": "Short-term volatility expected; long-term impact depends on successor.",
-    "sentiment_score": -2.0,
-    "sentiment_analysis": "Mildly negative pending clarity on succession.",
-    "filing_metadata": _MOCK_8K_METADATA,
-}
+def _found(text):
+    return {"text": text, "metadata": _MOCK_TENK_METADATA, "found": True}
 
 
-# ── Fixture that mocks all dependencies ───────────────────────────────────
+_STATEMENT = {"columns": ["2025-09-30"], "index": ["Revenue"], "data": [[391_035]]}
+
 
 @pytest.fixture
 def mock_filings_deps():
-    """Patch SEC retrieval, LLM analysis, DB, and model registry."""
+    """Patch SEC retrieval and the DB; `create_llm` returns a fake chat model
+    (yielded as "llm") that answers every analysis the real processor asks."""
     # Mock the FilingMetadata objects used inside _fetch_filing_data
     mock_tenk_meta = MagicMock()
     mock_tenk_meta.to_dict.return_value = _MOCK_TENK_METADATA
@@ -123,22 +99,13 @@ def mock_filings_deps():
     mock_8k_meta.cik = "320193"
     mock_8k_meta.accession = "0000320193-26-000789"
 
+    llm = CountingChatModel()
     with (
         patch("agents.sec_workflow.get_SEC_data.SECDataRetrieval") as MockSEC,
-        patch("agents.llm_factory.create_llm") as MockCreateLLM,
-        patch("agents.sec_workflow.sec_llm_models.SECDocumentProcessor") as MockProcessor,
+        patch("agents.llm_factory.create_llm", return_value=llm),
         patch("api.db.get_filing_analysis", new_callable=AsyncMock) as mock_get_cache,
         patch("api.db.save_filing_analysis", new_callable=AsyncMock) as mock_save_cache,
-        patch("agents.model_registry.get_model") as mock_get_model,
-        patch("agents.model_registry.get_default_model") as mock_default_model,
     ):
-        # Model registry
-        model = MagicMock()
-        model.id = "gemini-2.5-flash"
-        model.provider = "google_genai"
-        mock_get_model.return_value = model
-        mock_default_model.return_value = model
-
         # SEC retriever instance
         sec_instance = MagicMock()
         sec_instance._tenk_metadata = mock_tenk_meta
@@ -146,13 +113,17 @@ def mock_filings_deps():
         sec_instance._eightk_metadata = mock_8k_meta
         sec_instance.get_tenk_filing.return_value = MagicMock()
         sec_instance.get_tenq_filing.return_value = MagicMock()
-        sec_instance.get_risk_factors_raw.return_value = {
-            "text": "Risk factor text...", "metadata": _MOCK_TENK_METADATA, "found": True,
+        # Like the real getters, a section reports the filing it was read from.
+        form_metadata = {"10-K": _MOCK_TENK_METADATA, "10-Q": _MOCK_TENQ_METADATA}
+        sec_instance.get_risk_factors_raw.side_effect = lambda form="10-K": {
+            "text": "Risk factor text...", "metadata": form_metadata[form], "found": True,
         }
-        sec_instance.get_mda_raw.return_value = {
-            "text": "MD&A text...", "metadata": _MOCK_TENK_METADATA, "found": True,
+        sec_instance.get_mda_raw.side_effect = lambda form="10-K": {
+            "text": "MD&A text...", "metadata": form_metadata[form], "found": True,
         }
-        sec_instance.extract_balance_sheet_as_str.return_value = {"10-K": "Balance sheet text"}
+        sec_instance.balance_sheet_text.return_value = ("Balance sheet text", mock_tenk_meta)
+        # The pinned 8-K (`latest_8k`) answers with the same 8-K getters.
+        sec_instance.latest_8k.return_value = sec_instance
         sec_instance.get_8k_overview.return_value = {
             "found": True,
             "has_earnings": True,
@@ -173,29 +144,14 @@ def mock_filings_deps():
             "detected_scale": "millions",
             "metadata": _MOCK_8K_METADATA,
         }
+        # Conditional 10-K sections (Item 1/1C/3/7A) and XBRL statements.
+        sec_instance.get_business_raw.return_value = _found("Item 1 business text")
+        sec_instance.get_cybersecurity_raw.return_value = _found("Item 1C cybersecurity text")
+        sec_instance.get_legal_proceedings_raw.return_value = _found("Item 3 legal text")
+        sec_instance.get_market_risk_raw.return_value = _found("Item 7A market risk text")
+        sec_instance.get_income_statement.return_value = _STATEMENT
+        sec_instance.get_cashflow_statement.return_value = _STATEMENT
         MockSEC.return_value = sec_instance
-
-        # LLM + processor
-        mock_llm = MagicMock()
-        MockCreateLLM.return_value = mock_llm
-
-        processor_instance = MagicMock()
-        processor_instance.analyze_risk_factors.return_value = MagicMock(
-            model_dump=lambda: _MOCK_RISK_ANALYSIS
-        )
-        processor_instance.analyze_mda.return_value = MagicMock(
-            model_dump=lambda: _MOCK_MDA_ANALYSIS
-        )
-        processor_instance.analyze_balance_sheet.return_value = MagicMock(
-            model_dump=lambda: _MOCK_BALANCE_ANALYSIS
-        )
-        processor_instance.analyze_earnings.return_value = MagicMock(
-            model_dump=lambda: _MOCK_EARNINGS_ANALYSIS
-        )
-        processor_instance.analyze_material_event.return_value = MagicMock(
-            model_dump=lambda: _MOCK_EVENT_ANALYSIS
-        )
-        MockProcessor.return_value = processor_instance
 
         # DB cache — default to cache miss (None)
         mock_get_cache.return_value = None
@@ -203,10 +159,9 @@ def mock_filings_deps():
 
         yield {
             "sec": sec_instance,
-            "processor": processor_instance,
+            "llm": llm,
             "get_cache": mock_get_cache,
             "save_cache": mock_save_cache,
-            "model": model,
         }
 
 
@@ -236,7 +191,27 @@ class TestFilingsEndpointSuccess:
         assert "risk_10k" in tenk
         assert "mda_10k" in tenk
         assert "balance" in tenk
-        assert tenk["risk_10k"]["summary"] == "Key risks include supply chain and regulation."
+        assert tenk["risk_10k"]["key_risks"] == ["Supply chain"]
+
+    def test_every_section_gets_its_own_analysis(self, client, mock_filings_deps):
+        """Each planned section runs the processor's analysis for its type: a
+        section dispatched to another type's prompt would lack its field."""
+        data = client.get(
+            "/api/company/AAPL/filings",
+            headers={"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"},
+        ).json()
+        served = {**data["tenk"], **{f"{k}@10q": v for k, v in data["tenq"].items()}}
+        expected_field = {
+            "risk_10k": "key_risks", "mda_10k": "future_outlook", "balance": "liquidity_analysis",
+            "business": "business_segments", "cybersecurity": "governance_overview",
+            "legal": "key_cases", "market_risk": "key_exposures",
+            "income_stmt": "revenue_analysis", "cashflow": "operating_cash_flow_analysis",
+            "risk_10q@10q": "key_risks", "mda_10q@10q": "future_outlook",
+        }
+        for key, field in expected_field.items():
+            assert field in served[key], key
+        assert "beats_misses" in data["eightk"]["analysis"]
+        assert mock_filings_deps["llm"].calls == len(expected_field) + 1
 
     def test_earnings_section_when_present(self, client, mock_filings_deps):
         data = client.get(
@@ -246,7 +221,22 @@ class TestFilingsEndpointSuccess:
         eightk = data["eightk"]
         assert eightk["kind"] == "earnings"
         assert "analysis" in eightk
-        assert eightk["analysis"]["summary"] == "Revenue beat estimates by 3%."
+        assert eightk["analysis"]["beats_misses"] == ["Beat"]
+
+    def test_each_analysis_cites_its_filing(self, client, mock_filings_deps):
+        data = client.get(
+            "/api/company/AAPL/filings",
+            headers={"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"},
+        ).json()
+        for section, key, meta in [
+            ("tenk", "risk_10k", _MOCK_TENK_METADATA),
+            ("tenq", "mda_10q", _MOCK_TENQ_METADATA),
+        ]:
+            ref = data[section][key]["filing_reference"]
+            assert ref["accession"] == meta["accession"]
+            assert ref["filing_date"] == meta["filing_date"]
+            assert ref["analyzed_at"]
+        assert data["eightk"]["analysis"]["filing_reference"]["accession"] == _MOCK_8K_METADATA["accession"]
 
     def test_edgar_url_construction(self, client, mock_filings_deps):
         data = client.get(
@@ -289,10 +279,7 @@ class TestFilingsCaching:
             headers={"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"},
         )
         assert resp.status_code == 200
-        # Processor should not be called since everything is cached
-        mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
-        mock_filings_deps["processor"].analyze_mda.assert_not_called()
-        mock_filings_deps["processor"].analyze_balance_sheet.assert_not_called()
+        assert mock_filings_deps["llm"].calls == 0  # everything is cached
 
 
 # ── No earnings ────────────────────────────────────────────────────────────
@@ -330,11 +317,11 @@ class TestFilings8K:
             headers={"X-Google-Api-Key": "test-key", "X-User-Id": "user_testfilings"},
         ).json()
         assert data["eightk"]["kind"] == "event"
-        assert data["eightk"]["analysis"]["event_type"] == "Leadership Change"
-        assert data["eightk"]["analysis"]["impact_assessment"].startswith("Short-term")
-        # Event analyzer should have been invoked, earnings analyzer should not
-        mock_filings_deps["processor"].analyze_material_event.assert_called_once()
-        mock_filings_deps["processor"].analyze_earnings.assert_not_called()
+        assert "impact_assessment" in data["eightk"]["analysis"]
+        # The event analysis ran, the earnings analysis did not.
+        analyses = mock_filings_deps["llm"].analyses
+        assert analyses.count("impact_assessment") == 1
+        assert "beats_misses" not in analyses
 
     def test_event_not_analyzed_when_item_extraction_fails(self, client, mock_filings_deps):
         """Item text failed to extract. edgartools' overview context is always
@@ -357,7 +344,7 @@ class TestFilings8K:
         ).json()
         assert data["eightk"]["kind"] == "none"
         assert "could not be extracted" in data["eightk"]["reason"]
-        mock_filings_deps["processor"].analyze_material_event.assert_not_called()
+        assert "impact_assessment" not in mock_filings_deps["llm"].analyses
         saved_types = {c.args[3] for c in mock_filings_deps["save_cache"].call_args_list}
         assert "event" not in saved_types
 
@@ -383,7 +370,7 @@ class TestFilings8K:
         ).json()
         assert data["eightk"]["kind"] == "event"
         assert data["eightk"]["analysis"]["event_type"] == "Leadership Change"
-        mock_filings_deps["processor"].analyze_material_event.assert_not_called()
+        assert mock_filings_deps["llm"].calls == 0
 
 
 # ── Error cases ────────────────────────────────────────────────────────────
@@ -421,7 +408,7 @@ class TestFilingsAnonAccess:
                 resp = client.get("/api/company/AAPL/filings")
         assert resp.status_code == 200
         assert resp.json()["tenk"]["risk_10k"]["summary"] == _MOCK_RISK_ANALYSIS["summary"]
-        mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
+        assert mock_filings_deps["llm"].calls == 0
 
     def test_keyless_cache_miss_skips_llm(self, client, mock_filings_deps):
         # Keyless caller + cache miss → 200, but no analysis generated and no
@@ -434,7 +421,7 @@ class TestFilingsAnonAccess:
                 )
         assert resp.status_code == 200
         assert "risk_10k" not in resp.json().get("tenk", {})
-        mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
+        assert mock_filings_deps["llm"].calls == 0
 
 
 # ── Rate limiting ─────────────────────────────────────────────────────────
@@ -472,24 +459,25 @@ class TestFilingsPartialData:
 # ── Daily LLM budget (operator-paid only) ─────────────────────────────────
 
 
+@pytest.fixture
+def budget_db(tmp_path, monkeypatch):
+    import api.db as db_module
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "budget.db")
+    monkeypatch.setattr(db_module, "_db", None)
+    # init_db is async, but TestClient drives the FastAPI app which has
+    # init_db in its lifespan. Force the connection open eagerly so
+    # increment_llm_usage finds the table on the very first call.
+    # asyncio.run owns its loop: get_event_loop() here picks up whatever
+    # loop the previous test left behind, which may be closed.
+    import asyncio as _asyncio
+    _asyncio.run(db_module.init_db())
+    yield
+    _asyncio.run(db_module.close_db())
+
+
 class TestFilingsLLMBudget:
     """The daily budget gate fires when the request's provider key comes from
     server env (operator pays). BYOK requests bypass it."""
-
-    @pytest.fixture
-    def budget_db(self, tmp_path, monkeypatch):
-        import api.db as db_module
-        monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "budget.db")
-        monkeypatch.setattr(db_module, "_db", None)
-        # init_db is async, but TestClient drives the FastAPI app which has
-        # init_db in its lifespan. Force the connection open eagerly so
-        # increment_llm_usage finds the table on the very first call.
-        # asyncio.run owns its loop: get_event_loop() here picks up whatever
-        # loop the previous test left behind, which may be closed.
-        import asyncio as _asyncio
-        _asyncio.run(db_module.init_db())
-        yield
-        _asyncio.run(db_module.close_db())
 
     def test_byok_bypasses_budget(self, client, mock_filings_deps, budget_db, monkeypatch):
         """Header-supplied key (BYOK) is not charged against the operator's budget."""
@@ -501,19 +489,145 @@ class TestFilingsLLMBudget:
         for _ in range(5):
             resp = client.get("/api/company/AAPL/filings", headers=headers)
             assert resp.status_code == 200
+        assert llm_usage("user_byoktest") == 0
 
     def test_env_key_subject_to_budget(self, client, mock_filings_deps, budget_db, monkeypatch):
-        """When the key resolves from env (no header), the daily budget applies."""
+        """When the key resolves from env (no header), the daily budget applies:
+        a request generates sections until the budget is spent and lists the
+        rest in `budget_exceeded`; the next one has every uncached section
+        refused."""
         from api import llm_concurrency
+        _core_only(mock_filings_deps)  # 6 sections: 10-K x3, 10-Q x2, 8-K
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
         monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 2)
         headers = {"X-User-Id": "user_envbudget"}
-        # First two succeed; third crosses the limit and returns 429.
-        assert client.get("/api/company/AAPL/filings", headers=headers).status_code == 200
-        assert client.get("/api/company/AAPL/filings", headers=headers).status_code == 200
+
         resp = client.get("/api/company/AAPL/filings", headers=headers)
-        assert resp.status_code == 429
-        assert "budget" in resp.json()["detail"].lower()
+        assert resp.status_code == 200
+        body = resp.json()
+        served = [k for s in ("tenk", "tenq") for k in body[s] if k != "metadata"]
+        served += ["8-K"] if "analysis" in body["eightk"] else []
+        assert len(served) == 2
+        assert len(body["budget_exceeded"]) == 4
+        assert mock_filings_deps["llm"].calls == 2
+        assert llm_usage("user_envbudget") == 2
+
+        resp = client.get("/api/company/AAPL/filings", headers=headers)
+        assert resp.status_code == 200
+        assert len(resp.json()["budget_exceeded"]) == 6
+        assert mock_filings_deps["llm"].calls == 2
+        assert llm_usage("user_envbudget") == 2
+
+    def test_stream_stops_generating_when_budget_runs_out(
+        self, client, mock_filings_deps, budget_db, monkeypatch
+    ):
+        """Sections past the budget are refused with their own status; the
+        ones generated before it ran out still stream, and the stream completes."""
+        from api import llm_concurrency
+        _core_only(mock_filings_deps)  # 6 sections
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 2)
+
+        events = _stream_events(
+            client, "/api/company/AAPL/filings/stream", {"X-User-Id": "user_streambudget"}
+        )
+        refused = [e for e in events if e.get("status") == "budget_exceeded"]
+        assert len(_generated(events)) == 2
+        assert len([e for e in events if e.get("type") == "section"]) == 2
+        assert len(refused) == 4
+        assert all("budget" in e["message"].lower() for e in refused)
+        assert events[-1]["type"] == "complete"
+        assert llm_usage("user_streambudget") == 2
+
+    def test_stream_over_budget_refuses_each_uncached_section(
+        self, client, mock_filings_deps, budget_db, monkeypatch
+    ):
+        import asyncio as _asyncio
+        import api.db as db_module
+        from api import llm_concurrency
+        _core_only(mock_filings_deps)
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 1)
+        _asyncio.run(db_module.increment_llm_usage("user_streamover"))
+
+        events = _stream_events(
+            client, "/api/company/AAPL/filings/stream", {"X-User-Id": "user_streamover"}
+        )
+        refused = [e for e in events if e.get("status") == "budget_exceeded"]
+        assert len(refused) == 6
+        assert all("budget" in e["message"].lower() for e in refused)
+        assert events[-1]["type"] == "complete"
+        assert mock_filings_deps["llm"].calls == 0
+        assert llm_usage("user_streamover") == 1
+
+
+# ── #10/#11: spent budget serves cached sections, reports refused ones ─────
+
+
+def _spent_budget(deps, monkeypatch, user_id):
+    """Operator-paid caller whose daily budget is already spent."""
+    import asyncio as _asyncio
+    import api.db as db_module
+    from api import llm_concurrency
+    _core_only(deps)  # risk/mda/balance 10-K, risk/mda 10-Q, 8-K earnings
+    monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+    monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 1)
+    _asyncio.run(db_module.increment_llm_usage(user_id))
+
+
+_UNCACHED_STEPS = {"10-K/balance", "10-Q/risk_10q", "10-Q/mda_10q", "8-K/earnings"}
+
+
+class TestSpentBudgetServesCache:
+    def test_stream_serves_cached_sections_and_refuses_the_rest(
+        self, client, mock_filings_deps, budget_db, monkeypatch
+    ):
+        _spent_budget(mock_filings_deps, monkeypatch, "user_spentstream")
+        _cached_only(mock_filings_deps, {"risk_10k", "mda_10k"})
+
+        events = _stream_events(
+            client, "/api/company/AAPL/filings/stream", {"X-User-Id": "user_spentstream"}
+        )
+        sections = {e["key"] for e in events if e.get("type") == "section"}
+        refused = {e["step"] for e in events if e.get("status") == "budget_exceeded"}
+        assert sections == {"risk_10k", "mda_10k"}
+        assert refused == _UNCACHED_STEPS
+        assert events[-1]["type"] == "complete"
+        assert mock_filings_deps["llm"].calls == 0
+        assert llm_usage("user_spentstream") == 1
+
+    def test_json_serves_cached_sections_and_lists_refused_ones(
+        self, client, mock_filings_deps, budget_db, monkeypatch
+    ):
+        _spent_budget(mock_filings_deps, monkeypatch, "user_spentjson")
+        _cached_only(mock_filings_deps, {"risk_10k", "mda_10k"})
+
+        resp = client.get("/api/company/AAPL/filings", headers={"X-User-Id": "user_spentjson"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert set(body["tenk"]) == {"metadata", "risk_10k", "mda_10k"}
+        assert set(body["budget_exceeded"]) == _UNCACHED_STEPS
+        assert llm_usage("user_spentjson") == 1
+
+    def test_json_refused_eightk_reports_the_budget_not_missing_data(
+        self, client, mock_filings_deps, budget_db, monkeypatch
+    ):
+        _spent_budget(mock_filings_deps, monkeypatch, "user_spent8k")
+
+        body = client.get(
+            "/api/company/AAPL/filings", headers={"X-User-Id": "user_spent8k"}
+        ).json()
+        eightk = body["eightk"]
+        assert eightk["kind"] == "earnings"
+        assert "budget" in eightk["reason"].lower()
+        assert "no 8-k" not in eightk["reason"].lower()
+        assert eightk["metadata"]["accession"] == _MOCK_8K_METADATA["accession"]
+        assert "analysis" not in eightk
+
+    def test_json_lists_nothing_when_nothing_was_refused(self, client, mock_filings_deps):
+        _core_only(mock_filings_deps)
+        body = client.get("/api/company/AAPL/filings", headers=_KEYED).json()
+        assert body["budget_exceeded"] == []
 
 
 # ── Process-wide LLM dispatch concurrency cap ────────────────────────────
@@ -525,35 +639,18 @@ class TestFilingsConcurrencyCap:
         in-flight LLM dispatches process-wide.
 
         Drives the app via httpx.AsyncClient (TestClient is sync) so we can
-        actually fire requests in parallel. Patches `_run_llm_analysis` with
-        a sleep stub that tracks max in-flight.
+        actually fire requests in parallel. The fake chat model answers after
+        a delay and records the most calls ever in flight at once.
         """
         import asyncio as _asyncio
-        import threading
-        import time as _time
 
         import httpx
         from api import llm_concurrency
-        from api.routes import company as company_route
 
         monkeypatch.setattr(llm_concurrency, "LLM_DISPATCH_CONCURRENCY", 3)
         llm_concurrency._rebuild_semaphore()
-
-        in_flight = 0
-        peak = 0
-        lock = threading.Lock()
-
-        def slow_analysis(ticker, analysis_type, raw_data, model_id, api_key):
-            nonlocal in_flight, peak
-            with lock:
-                in_flight += 1
-                peak = max(peak, in_flight)
-            _time.sleep(0.05)
-            with lock:
-                in_flight -= 1
-            return {"summary": "stub", "filing_metadata": {"accession": "x"}}
-
-        monkeypatch.setattr(company_route, "_run_llm_analysis", slow_analysis)
+        llm = mock_filings_deps["llm"]
+        llm.delay = 0.05
 
         headers = {"X-Google-Api-Key": "test-key", "X-User-Id": "user_conccap"}
 
@@ -567,6 +664,7 @@ class TestFilingsConcurrencyCap:
                 for i in range(5)
             ])
 
+        peak = llm.peak_in_flight
         assert peak <= 3, f"observed peak {peak} > cap 3"
         assert peak >= 2, f"test setup didn't actually exercise concurrency (peak={peak})"
 
@@ -605,7 +703,7 @@ def _stream_events(client, path, headers=None):
 def _core_only(deps):
     """Restrict the SEC mock to core sections so the stream's conditional
     (Item 1/1C/3/7A) and XBRL sections produce no tasks — keeps the event set
-    predictable. Unconfigured MagicMock getters otherwise look 'found'."""
+    predictable."""
     sec = deps["sec"]
     for m in ("get_business_raw", "get_cybersecurity_raw",
               "get_legal_proceedings_raw", "get_market_risk_raw"):
@@ -631,6 +729,8 @@ class TestFilingsStream:
         assert {"risk_10k", "mda_10k", "balance"} <= section_keys
         statuses = {e["status"] for e in events if e.get("type") == "progress"}
         assert "done" in statuses
+        risk = next(e for e in events if e.get("type") == "section" and e["key"] == "risk_10k")
+        assert risk["data"]["filing_reference"]["accession"] == _MOCK_TENK_METADATA["accession"]
 
     def test_stream_serves_cached_without_llm(self, client, mock_filings_deps):
         _core_only(mock_filings_deps)
@@ -641,7 +741,7 @@ class TestFilingsStream:
         statuses = {e["status"] for e in events if e.get("type") == "progress"}
         assert "cached" in statuses
         assert "done" not in statuses  # nothing generated
-        mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
+        assert mock_filings_deps["llm"].calls == 0
 
     def test_stream_keyless_emits_needs_key(self, client, mock_filings_deps):
         _core_only(mock_filings_deps)
@@ -650,7 +750,7 @@ class TestFilingsStream:
         statuses = {e["status"] for e in events if e.get("type") == "progress"}
         assert "needs_key" in statuses
         assert not any(e.get("type") == "section" for e in events)
-        mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
+        assert mock_filings_deps["llm"].calls == 0
 
 
 # ── failed extraction must never reach the LLM or the cache ────────────────
@@ -659,7 +759,7 @@ class TestFilingsStream:
 class TestFailedExtractionNotAnalyzed:
     def test_stream_skips_section_whose_extraction_failed(self, client, mock_filings_deps):
         _core_only(mock_filings_deps)
-        mock_filings_deps["sec"].get_risk_factors_raw.return_value = {
+        mock_filings_deps["sec"].get_risk_factors_raw.side_effect = lambda form: {
             "text": "Error extracting 1A from 10-K: boom", "metadata": {}, "found": False,
         }
         events = _stream_events(client, "/api/company/AAPL/filings/stream", _KEYED)
@@ -668,7 +768,7 @@ class TestFailedExtractionNotAnalyzed:
         section_keys = {e["key"] for e in events if e.get("type") == "section"}
         assert "risk_10k" not in section_keys and "risk_10q" not in section_keys
         assert "mda_10k" in section_keys
-        mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
+        assert "key_risks" not in mock_filings_deps["llm"].analyses
         saved_types = {c.args[3] for c in mock_filings_deps["save_cache"].call_args_list}
         assert not saved_types & {"risk_10k", "risk_10q"}
 
@@ -677,7 +777,7 @@ class TestFailedExtractionNotAnalyzed:
         """Keyed caller + transient extraction failure still gets the cached analysis,
         exactly as a keyless caller would."""
         _core_only(mock_filings_deps)
-        mock_filings_deps["sec"].get_risk_factors_raw.return_value = {
+        mock_filings_deps["sec"].get_risk_factors_raw.side_effect = lambda form: {
             "text": "Error extracting 1A from 10-K: boom", "metadata": {}, "found": False,
         }
         mock_filings_deps["get_cache"].return_value = {
@@ -687,7 +787,64 @@ class TestFailedExtractionNotAnalyzed:
 
         section_keys = {e["key"] for e in events if e.get("type") == "section"}
         assert {"risk_10k", "risk_10q"} <= section_keys
-        mock_filings_deps["processor"].analyze_risk_factors.assert_not_called()
+        assert "key_risks" not in mock_filings_deps["llm"].analyses
+
+
+# ── unusable 8-K: both endpoints must report the same kind ─────────────────
+
+
+def _unusable_event_8k(deps):
+    """Event 8-K whose item text failed to extract (kept as kind 'event', empty
+    raw text, so _plan_sections marks it cache_only)."""
+    _core_only(deps)
+    deps["sec"].get_8k_overview.return_value = {
+        "found": True,
+        "has_earnings": False,
+        "items": ["5.02"],
+        "content_type": "director_change",
+        "context": "8K: Apple Inc. Current Report",
+        "metadata": _MOCK_8K_METADATA,
+    }
+    deps["sec"].get_8k_item.return_value = {
+        "text": "Error extracting 8-K item 5.02: boom", "metadata": {}, "found": False,
+    }
+
+
+def _cached_event_only(deps):
+    """Cache holds an analysis for the 8-K event only; all other sections miss."""
+    async def lookup(ticker, form_type, accession, analysis_type):
+        if form_type == "8-K" and analysis_type == "event":
+            return {"analysis_json": json.dumps({"event_type": "Leadership Change"})}
+        return None
+    deps["get_cache"].side_effect = lookup
+
+
+class TestUnusableEightKKindParity:
+    def _both(self, client):
+        json_kind = client.get("/api/company/AAPL/filings", headers=_KEYED).json()["eightk"]["kind"]
+        events = _stream_events(client, "/api/company/AAPL/filings/stream", _KEYED)
+        metadata = next(e for e in events if e.get("type") == "metadata")
+        return json_kind, metadata, events
+
+    def test_stream_reports_none_when_unusable_and_uncached(self, client, mock_filings_deps):
+        _unusable_event_8k(mock_filings_deps)
+        json_kind, metadata, events = self._both(client)
+        assert metadata["eightk_kind"] == "none"
+        assert metadata["eightk_metadata"] is None
+        assert not any(e.get("type") == "section" and e["form"] == "8-K" for e in events)
+        assert json_kind == metadata["eightk_kind"]
+
+    def test_stream_reports_event_and_emits_cached_section(self, client, mock_filings_deps):
+        _unusable_event_8k(mock_filings_deps)
+        _cached_event_only(mock_filings_deps)
+        json_kind, metadata, events = self._both(client)
+        assert metadata["eightk_kind"] == "event"
+        assert metadata["eightk_metadata"] is not None
+        sections = [e for e in events if e.get("type") == "section" and e["form"] == "8-K"]
+        assert len(sections) == 1
+        assert sections[0]["data"]["event_type"] == "Leadership Change"
+        assert json_kind == metadata["eightk_kind"]
+        assert "impact_assessment" not in mock_filings_deps["llm"].analyses
 
 
 # ── #5: keyless callers must not pay for raw section extraction ────────────
@@ -701,7 +858,7 @@ class TestKeylessSkipsRawExtraction:
         sec = mock_filings_deps["sec"]
         sec.get_risk_factors_raw.assert_not_called()
         sec.get_mda_raw.assert_not_called()
-        sec.extract_balance_sheet_as_str.assert_not_called()
+        sec.balance_sheet_text.assert_not_called()
         sec.get_earnings_data.assert_not_called()
 
     def test_get_keyless_skips_raw_extraction(self, client, mock_filings_deps):
@@ -710,64 +867,189 @@ class TestKeylessSkipsRawExtraction:
         sec = mock_filings_deps["sec"]
         sec.get_risk_factors_raw.assert_not_called()
         sec.get_mda_raw.assert_not_called()
-        sec.extract_balance_sheet_as_str.assert_not_called()
+        sec.balance_sheet_text.assert_not_called()
 
 
-# ── #6: budget charged only when an LLM call actually happens ──────────────
+# ── #6: budget charged per LLM analysis actually run ───────────────────────
+
+_ENV_USER = "user_perSection"
 
 
-class TestBudgetChargedOnlyOnGeneration:
-    def test_fully_cached_does_not_charge_budget(self, client, mock_filings_deps, monkeypatch):
-        from unittest.mock import AsyncMock as _AsyncMock
-        from api.routes import company as company_route
+def _cached_only(deps, cached_types):
+    """Cache holds analyses for `cached_types` only; every other section misses."""
+    async def lookup(ticker, form_type, accession, analysis_type):
+        if analysis_type in cached_types:
+            return {"analysis_json": json.dumps(_MOCK_RISK_ANALYSIS)}
+        return None
+    deps["get_cache"].side_effect = lookup
 
-        mock_charge = _AsyncMock()
-        monkeypatch.setattr(company_route, "check_and_charge_budget", mock_charge)
-        # Operator-paid (env key, no header) + every section cached.
+
+def _generated(events):
+    return [e["step"] for e in events if e.get("type") == "progress" and e.get("status") == "done"]
+
+
+class TestBudgetChargedPerSection:
+    def test_n_uncached_sections_charge_n(self, client, mock_filings_deps, budget_db, monkeypatch):
+        _core_only(mock_filings_deps)  # risk/mda/balance 10-K, risk/mda 10-Q, 8-K earnings
+        _cached_only(mock_filings_deps, {"risk_10k", "mda_10k"})
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
-        mock_filings_deps["get_cache"].return_value = {
-            "analysis_json": json.dumps(_MOCK_RISK_ANALYSIS)
-        }
-        resp = client.get("/api/company/AAPL/filings", headers={"X-User-Id": "user_cachedbudget"})
+
+        resp = client.get("/api/company/AAPL/filings", headers={"X-User-Id": _ENV_USER})
         assert resp.status_code == 200
-        mock_charge.assert_not_called()
+        assert llm_usage(_ENV_USER) == 4
 
-    def test_stream_fully_cached_does_not_charge_budget(self, client, mock_filings_deps, monkeypatch):
-        from unittest.mock import AsyncMock as _AsyncMock
-        from api.routes import company as company_route
-
+    def test_stream_n_uncached_sections_charge_n(self, client, mock_filings_deps, budget_db, monkeypatch):
         _core_only(mock_filings_deps)
-        mock_charge = _AsyncMock()
-        monkeypatch.setattr(company_route, "check_and_charge_budget", mock_charge)
+        _cached_only(mock_filings_deps, {"balance"})
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+
+        events = _stream_events(client, "/api/company/AAPL/filings/stream", {"X-User-Id": _ENV_USER})
+        assert events[-1]["type"] == "complete"
+        assert len(_generated(events)) == 5
+        assert llm_usage(_ENV_USER) == 5
+
+    def test_section_refused_a_dispatch_slot_charges_nothing(
+        self, client, mock_filings_deps, budget_db, monkeypatch
+    ):
+        from api import llm_concurrency
+        _core_only(mock_filings_deps)
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        monkeypatch.setattr(llm_concurrency, "LLM_DISPATCH_CONCURRENCY", 0)
+        monkeypatch.setattr(llm_concurrency, "LLM_DISPATCH_WAIT_SECONDS", 0.01)
+        llm_concurrency._rebuild_semaphore()
+
+        resp = client.get("/api/company/AAPL/filings", headers={"X-User-Id": _ENV_USER})
+        assert resp.status_code == 200
+        assert mock_filings_deps["llm"].calls == 0
+        assert llm_usage(_ENV_USER) == 0
+
+    def test_fully_cached_charges_nothing(self, client, mock_filings_deps, budget_db, monkeypatch):
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
         mock_filings_deps["get_cache"].return_value = {
             "analysis_json": json.dumps(_MOCK_RISK_ANALYSIS)
         }
-        events = _stream_events(
-            client, "/api/company/AAPL/filings/stream", {"X-User-Id": "user_streamcached"}
-        )
-        assert events[-1]["type"] == "complete"
-        mock_charge.assert_not_called()
+        resp = client.get("/api/company/AAPL/filings", headers={"X-User-Id": _ENV_USER})
+        assert resp.status_code == 200
+        assert llm_usage(_ENV_USER) == 0
 
-    def test_stream_cache_only_miss_does_not_charge_budget(self, client, mock_filings_deps, monkeypatch):
-        """Failed-extraction sections never generate, so their cache misses cost nothing."""
-        from unittest.mock import AsyncMock as _AsyncMock
-        from api.routes import company as company_route
+    def test_fully_cached_served_even_when_over_budget(self, client, mock_filings_deps, budget_db, monkeypatch):
+        import asyncio as _asyncio
+        import api.db as db_module
+        from api import llm_concurrency
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 1)
+        _asyncio.run(db_module.increment_llm_usage(_ENV_USER))
+        mock_filings_deps["get_cache"].return_value = {
+            "analysis_json": json.dumps(_MOCK_RISK_ANALYSIS)
+        }
+        resp = client.get("/api/company/AAPL/filings", headers={"X-User-Id": _ENV_USER})
+        assert resp.status_code == 200
+        assert llm_usage(_ENV_USER) == 1
 
+    def test_stream_fully_cached_charges_nothing(self, client, mock_filings_deps, budget_db, monkeypatch):
         _core_only(mock_filings_deps)
-        mock_charge = _AsyncMock()
-        monkeypatch.setattr(company_route, "check_and_charge_budget", mock_charge)
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        mock_filings_deps["get_cache"].return_value = {
+            "analysis_json": json.dumps(_MOCK_RISK_ANALYSIS)
+        }
+        events = _stream_events(client, "/api/company/AAPL/filings/stream", {"X-User-Id": _ENV_USER})
+        assert events[-1]["type"] == "complete"
+        assert llm_usage(_ENV_USER) == 0
+
+    def test_stream_cache_only_miss_charges_nothing(self, client, mock_filings_deps, budget_db, monkeypatch):
+        """Failed-extraction sections never generate, so their cache misses cost nothing."""
+        _core_only(mock_filings_deps)
         monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
         failed = {"text": "Error extracting: boom", "metadata": {}, "found": False}
         sec = mock_filings_deps["sec"]
-        sec.get_risk_factors_raw.return_value = failed
-        sec.get_mda_raw.return_value = failed
-        sec.extract_balance_sheet_as_str.return_value = ""
+        sec.get_risk_factors_raw.side_effect = lambda form: failed
+        sec.get_mda_raw.side_effect = lambda form: failed
+        sec.balance_sheet_text.side_effect = ValueError("no XBRL balance sheet")
         sec.get_8k_overview.return_value = {"found": False, "text": "No 8-K", "metadata": {}}
 
-        events = _stream_events(
-            client, "/api/company/AAPL/filings/stream", {"X-User-Id": "user_streamcacheonly"}
-        )
+        events = _stream_events(client, "/api/company/AAPL/filings/stream", {"X-User-Id": _ENV_USER})
         assert events[-1]["type"] == "complete"
         assert not any(e.get("type") == "section" for e in events)
-        mock_charge.assert_not_called()
+        assert llm_usage(_ENV_USER) == 0
+
+
+# ── Operator key only pays for operator_lendable models ─────────────────────
+
+
+class _NamedCountingChatModel(CountingChatModel):
+    """Reports `model` as its model name, as real provider chat models do."""
+
+    model: str
+
+
+def _google_model(*, lendable: bool):
+    # Google, to match the GOOGLE_API_KEY the `signed_in` fixture sets.
+    return model_where(provider="google_genai", operator_lendable=lendable)
+
+
+class TestFilingsOperatorKeyAllowlist:
+    """With Clerk enabled, a signed-in user without their own key gets the
+    operator's key only for operator_lendable models; an explicitly requested
+    model the operator won't lend is `needs_key`, exactly like a keyless caller.
+    (Without an explicit request the endpoint falls back to a lendable model
+    instead — see tests/test_filings_model_fallback.py.)"""
+
+    @pytest.fixture
+    def signed_in(self, clerk_env, rsa_keypair, monkeypatch):
+        for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEFAULT_MODEL_ID"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+        priv, _ = rsa_keypair
+        return {"X-Clerk-Session-Token": _make_token(priv)}
+
+    def test_non_lendable_model_needs_own_key(self, client, mock_filings_deps, budget_db, signed_in):
+        _core_only(mock_filings_deps)
+        headers = {**signed_in, "X-Model-Id": _google_model(lendable=False).id}
+
+        resp = client.get("/api/company/AAPL/filings", headers=headers)
+        assert resp.status_code == 200
+        assert set(resp.json()["tenk"]) == {"metadata"}  # no analyses generated
+        events = _stream_events(client, "/api/company/AAPL/filings/stream", headers)
+        statuses = {e["status"] for e in events if e.get("type") == "progress" and e["step"] != "edgar_fetch"}
+        assert statuses == {"needs_key"}
+
+        sec = mock_filings_deps["sec"]
+        sec.get_risk_factors_raw.assert_not_called()  # treated as keyless
+        assert mock_filings_deps["llm"].calls == 0
+        assert llm_usage(TEST_SUB) == 0
+
+    def test_lendable_model_runs_on_operator_key(self, client, mock_filings_deps, budget_db, signed_in):
+        _core_only(mock_filings_deps)
+        headers = {**signed_in, "X-Model-Id": _google_model(lendable=True).id}
+
+        events = _stream_events(client, "/api/company/AAPL/filings/stream", headers)
+        assert len(_generated(events)) == 6
+        assert llm_usage(TEST_SUB) == 6
+
+    def test_sections_are_charged_by_the_models_price(self, client, mock_filings_deps, budget_db, signed_in):
+        """One budget unit is one default-model call: a pricier lendable
+        model's section costs its price ratio in units."""
+        from tests.test_llm_budget import budget_units
+        _core_only(mock_filings_deps)
+        pricier = [m for m in models_where(provider="google_genai", operator_lendable=True) if budget_units(m) > 1]
+        if not pricier:
+            pytest.skip("no lendable Google model priced above the default model")
+        model = pricier[0]
+        llm = _NamedCountingChatModel(model=model.id)
+
+        with patch("agents.llm_factory.create_llm", return_value=llm):
+            events = _stream_events(
+                client, "/api/company/AAPL/filings/stream", {**signed_in, "X-Model-Id": model.id},
+            )
+        assert len(_generated(events)) == 6
+        assert llm_usage(TEST_SUB) == 6 * budget_units(model)
+
+    def test_own_key_runs_non_lendable_model(self, client, mock_filings_deps, budget_db, signed_in):
+        _core_only(mock_filings_deps)
+
+        events = _stream_events(
+            client, "/api/company/AAPL/filings/stream",
+            {**signed_in, "X-Model-Id": _google_model(lendable=False).id, "X-Google-Api-Key": "their-key"},
+        )
+        assert len(_generated(events)) == 6
+        assert llm_usage(TEST_SUB) == 0  # BYOK: operator not charged

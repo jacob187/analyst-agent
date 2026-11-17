@@ -1,8 +1,8 @@
 """LLM dispatch concurrency tests.
 
 `llm_slot()` wraps every actual LLM call via the analyst_graph
-`_run_with_timeout` helper plus the two `_run_llm_analysis` sites in
-`api/routes/company.py`. The semaphore caps process-wide in-flight
+`_run_with_timeout` helper plus the filings endpoint's section generator
+(`_analyze_or_cache` in `api/routes/company.py`). The semaphore caps process-wide in-flight
 dispatches; saturation past the wait timeout raises
 `LLMConcurrencyExceeded`.
 """

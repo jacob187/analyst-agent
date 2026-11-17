@@ -1,9 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { WS_BASE, API_BASE } from "@/lib/constants";
-import { getClerkToken } from "@/lib/api";
-import { getUserId } from "@/hooks/useUserId";
+import { WS_BASE, DEV_USER_ID } from "@/lib/constants";
+import { api, getClerkIdentity } from "@/lib/api";
+import { useAuthReady } from "@/hooks/useAuthReady";
 import type { ApiKeys, StreamingMessage, WsMessage } from "@/types";
 
 export type WsStatus = "connecting" | "connected" | "disconnected" | "error";
@@ -22,7 +22,19 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
   );
   const [freeTrial, setFreeTrial] = useState<{ queries: number } | null>(null);
 
+  // Identity gate: the socket must not open until Clerk has resolved, or it
+  // would authenticate anonymously for its whole life (chat never saved). The
+  // wait is bounded: if Clerk never loads, the socket opens anonymously so BYOK
+  // and free-trial chat still work. `userId` is in connect's deps so a
+  // sign-in/out (or a late Clerk load) reconnects with the new identity.
+  const { userId, ready, authFailed } = useAuthReady();
+
   const wsRef = useRef<WebSocket | null>(null);
+  // Identity the transcript on screen belongs to. When it changes, the new
+  // server session knows nothing of that transcript, so connect() drops it.
+  const identityRef = useRef<string | null | undefined>(undefined);
+  // The session id prop was resolved for the previous identity once this is set.
+  const dropSessionIdRef = useRef(false);
   // Id of the assistant bubble currently being filled. Set and cleared
   // synchronously in the WS handler (never inside a setMessages updater): React
   // runs updaters lazily, so a ref mutated or read there can be stale by the
@@ -42,9 +54,24 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
   });
 
   // ── connect ─────────────────────────────────────────────────────────────────
-  // Only depends on `ticker` — a stable string from the route param.
+  // Depends on `ticker` and the resolved identity; keys/sessionId come from refs.
   const connect = useCallback(() => {
+    if (!ready) {
+      setStatus("connecting");
+      return;
+    }
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
+
+    const identity = userId ?? null;
+    if (identityRef.current !== undefined && identityRef.current !== identity) {
+      // Signed in/out mid-chat: the superseded socket's in-flight bubble will
+      // never complete and its transcript isn't the new session's history.
+      streamingIdRef.current = null;
+      dropSessionIdRef.current = true;
+      setMessages([]);
+      setActiveSessionId(null);
+    }
+    identityRef.current = identity;
 
     setStatus("connecting");
     const ws = new WebSocket(`${WS_BASE}/ws/chat/${ticker}`);
@@ -52,18 +79,25 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
 
     ws.onopen = async () => {
       const k = keysRef.current;
-      const clerkToken = await getClerkToken();
+      const clerk = await getClerkIdentity();
+      // Superseded while awaiting the token (ticker/identity change).
+      if (wsRef.current !== ws || ws.readyState !== WebSocket.OPEN) return;
       ws.send(
         JSON.stringify({
           type: "auth",
-          user_id: getUserId() || undefined,
-          clerk_session_token: clerkToken || undefined,
+          // Clerk token plus the user id it was issued to (the backend rejects
+          // an id that differs from the token's subject; older backends read
+          // only the id). DEV_USER_ID stands in when auth is disabled.
+          user_id: DEV_USER_ID ?? clerk.userId,
+          clerk_session_token: clerk.token,
           google_api_key: k.google_api_key || undefined,
           openai_api_key: k.openai_api_key || undefined,
           anthropic_api_key: k.anthropic_api_key || undefined,
           tavily_api_key: k.tavily_api_key || undefined,
           model_id: k.model_id || undefined,
-          session_id: sessionIdRef.current || undefined,
+          session_id: dropSessionIdRef.current
+            ? undefined
+            : sessionIdRef.current || undefined,
         })
       );
     };
@@ -81,18 +115,11 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
             setActiveSessionId(data.session_id);
             // If resuming, fetch and display prior messages
             if (data.resumed) {
-              getClerkToken().then((tok) => {
-                const id = getUserId();
-                const headers: Record<string, string> = {};
-                if (id) headers["X-User-Id"] = id;
-                if (tok) headers["X-Clerk-Session-Token"] = tok;
-                return fetch(
-                  `${API_BASE}/sessions/${data.session_id}/messages?ticker=${ticker}`,
-                  { headers }
-                );
-              })
-                .then((r) => r.json())
-                .then((body: { messages: Array<{ role: "user" | "assistant"; content: string }> }) => {
+              api
+                .messages(data.session_id, ticker)
+                .then((body) => {
+                  // The socket was superseded (identity change) while fetching.
+                  if (wsRef.current !== ws) return;
                   setMessages(
                     body.messages.map((m) => ({
                       id: crypto.randomUUID(),
@@ -101,7 +128,18 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
                     }))
                   );
                 })
-                .catch(() => null);
+                .catch(() => {
+                  // Non-2xx (or malformed body): say so rather than show a blank chat.
+                  setMessages((prev) => [
+                    ...prev,
+                    {
+                      id: crypto.randomUUID(),
+                      role: "assistant",
+                      content: "Couldn't load previous messages.",
+                      isStreaming: false,
+                    },
+                  ]);
+                });
             }
           }
           break;
@@ -259,16 +297,22 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
     };
 
     ws.onclose = () => {
+      // A superseded socket (ticker/identity change) closes after its
+      // replacement is already open; don't clobber the new socket's state.
+      if (wsRef.current !== ws) return;
       setStatus("disconnected");
       streamingIdRef.current = null;
     };
 
-    ws.onerror = () => setStatus("error");
+    ws.onerror = () => {
+      if (wsRef.current === ws) setStatus("error");
+    };
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ticker]); // ← only ticker; keys/sessionId read from refs at call time
+  }, [ticker, ready, userId]); // keys/sessionId read from refs at call time
 
   useEffect(() => {
+    // Opens the external WebSocket and mirrors its status into state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     connect();
 
     const handleVisibility = () => {
@@ -294,5 +338,5 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
     wsRef.current.send(JSON.stringify({ type: "query", message: text }));
   }, []);
 
-  return { messages, status, activeSessionId, sendMessage, freeTrial };
+  return { messages, status, activeSessionId, sendMessage, freeTrial, authFailed };
 }

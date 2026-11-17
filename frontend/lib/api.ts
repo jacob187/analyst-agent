@@ -1,5 +1,4 @@
-import { API_BASE } from "./constants";
-import { getUserId } from "@/hooks/useUserId";
+import { API_BASE, DEV_USER_ID } from "./constants";
 import type {
   ApiKeys,
   BriefingResponse,
@@ -29,31 +28,44 @@ function keyHeaders(keys: Partial<ApiKeys>): Record<string, string> {
   return h;
 }
 
-function userIdHeader(): Record<string, string> {
-  const id = getUserId();
-  return id ? { "X-User-Id": id } : {};
+interface ClerkBrowser {
+  user?: { id: string } | null;
+  session?: { getToken: () => Promise<string | null> } | null;
 }
 
 /**
- * Read a Clerk session JWT, if a Clerk session exists.
- * Returns null when Clerk hasn't loaded yet or the user is signed out.
- * In dev/self-host with Clerk disabled, the backend ignores the missing token.
+ * Read the Clerk identity from the browser, if a Clerk session exists: the
+ * session JWT plus the signed-in user's id (the token's subject). Returns `{}`
+ * when Clerk hasn't loaded yet or the user is signed out. In dev/self-host with
+ * Clerk disabled, the backend ignores the missing token.
  */
-export async function getClerkToken(): Promise<string | null> {
-  if (typeof window === "undefined") return null;
-  const clerk = (window as unknown as { Clerk?: { session?: { getToken: () => Promise<string | null> } } }).Clerk;
+export async function getClerkIdentity(): Promise<{ token?: string; userId?: string }> {
+  if (typeof window === "undefined") return {};
+  const clerk = (window as unknown as { Clerk?: ClerkBrowser }).Clerk;
   try {
-    const token = (await clerk?.session?.getToken()) ?? null;
-    return token;
+    const token = await clerk?.session?.getToken();
+    // The id only travels with a token: the backend rejects an id it can't verify.
+    return token ? { token, userId: clerk?.user?.id } : {};
   } catch {
-    return null;
+    return {};
   }
 }
 
+/**
+ * Identity headers for browser calls. With Clerk enabled the session token is
+ * sent together with the signed-in user's id, which the backend requires to
+ * equal the token's subject (older backends read only the id). In
+ * auth-disabled mode X-User-Id is the configured dev id. Server components pass
+ * `serverAuthHeaders()` instead.
+ */
 async function authHeaders(): Promise<Record<string, string>> {
-  const headers: Record<string, string> = { ...userIdHeader() };
-  const token = await getClerkToken();
-  if (token) headers["X-Clerk-Session-Token"] = token;
+  const headers: Record<string, string> = {};
+  if (DEV_USER_ID) headers["X-User-Id"] = DEV_USER_ID;
+  const { token, userId } = await getClerkIdentity();
+  if (token) {
+    headers["X-Clerk-Session-Token"] = token;
+    if (userId) headers["X-User-Id"] = userId;
+  }
   return headers;
 }
 
@@ -188,15 +200,16 @@ export const api = {
   tickers: () =>
     get<{ tickers: TickerSummary[] }>("/tickers"),
 
-  sessions: (ticker: string) =>
-    get<{ sessions: Session[] }>(`/sessions?ticker=${ticker}`),
+  sessions: (ticker: string, headers?: Record<string, string>) =>
+    get<{ sessions: Session[] }>(`/sessions?ticker=${ticker}`, headers),
 
-  sessionByTicker: (ticker: string) =>
-    get<{ session: Session | null }>(`/sessions/by-ticker/${ticker}`),
+  sessionByTicker: (ticker: string, headers?: Record<string, string>) =>
+    get<{ session: Session | null }>(`/sessions/by-ticker/${ticker}`, headers),
 
-  messages: (sessionId: string, ticker: string) =>
+  messages: (sessionId: string, ticker: string, headers?: Record<string, string>) =>
     get<{ messages: Message[] }>(
-      `/sessions/${sessionId}/messages?ticker=${ticker}`
+      `/sessions/${sessionId}/messages?ticker=${ticker}`,
+      headers
     ),
 
   deleteSession: (sessionId: string, ticker: string) =>
@@ -205,7 +218,8 @@ export const api = {
     ),
 
   // Watchlist
-  watchlist: () => get<WatchlistResponse>("/watchlist"),
+  watchlist: (headers?: Record<string, string>) =>
+    get<WatchlistResponse>("/watchlist", headers),
 
   addToWatchlist: (ticker: string) =>
     post<{ success: boolean; ticker: string }>("/watchlist", { ticker }),

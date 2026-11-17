@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Eye, EyeOff, CheckCircle2 } from "lucide-react";
+import { Eye, EyeOff, CheckCircle2, KeyRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,12 +13,19 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { useApiKeys } from "@/hooks/useApiKeys";
+import {
+  PROVIDER_KEY_FIELD,
+  modelHasKey,
+  operatorModelIds,
+  useApiKeys,
+} from "@/hooks/useApiKeys";
 import { useModels } from "@/hooks/useModels";
-import { PROVIDER_LABELS, type Provider } from "@/lib/constants";
-import type { ApiKeys } from "@/types";
+import { useAuth } from "@/lib/auth";
+import { AUTH_DISABLED, PROVIDER_LABELS, type Provider } from "@/lib/constants";
+import type { ApiKeys, Model } from "@/types";
 
 export function ApiKeyForm() {
+  const { isSignedIn } = useAuth();
   const { keys, setKeys } = useApiKeys();
   const { models, envKeys } = useModels();
   const [local, setLocal] = useState<ApiKeys | null>(null);
@@ -44,11 +51,18 @@ export function ApiKeyForm() {
   }
 
   const providers: Provider[] = ["google_genai", "openai", "anthropic"];
-  const keyField: Record<Provider, keyof ApiKeys> = {
-    google_genai: "google_api_key",
-    openai: "openai_api_key",
-    anthropic: "anthropic_api_key",
-  };
+  const keyField = PROVIDER_KEY_FIELD;
+
+  // Which models the server's keys pay for comes from the server
+  // (`operator_models`); signed-in users on a hosted deploy need their own key
+  // for any other model. Self-host (auth disabled) uses the server's keys.
+  const enforcesOwnKey = !!isSignedIn && !AUTH_DISABLED && !!envKeys;
+  const operatorModels = envKeys ? operatorModelIds(envKeys, models) : new Set<string>();
+  const needsOwnKey = (m: Model) =>
+    enforcesOwnKey && !modelHasKey(m, draft, operatorModels);
+  // Only an explicit choice is held to its own key: with "Default model" the
+  // backend runs whichever model a key can run.
+  const selectedModel = models.find((m) => m.id === draft.model_id);
 
   return (
     <form onSubmit={handleSave} className="space-y-6">
@@ -147,10 +161,19 @@ export function ApiKeyForm() {
                     {m.display_name}
                     {m.default ? " (default)" : ""}
                     {m.thinking_capable ? " ✦" : ""}
+                    {needsOwnKey(m) ? " — your key required" : ""}
                   </option>
                 ))}
               </select>
-              <p className="text-xs text-muted-foreground">✦ = supports extended thinking</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-xs text-muted-foreground">✦ = supports extended thinking</p>
+                {selectedModel && needsOwnKey(selectedModel) && (
+                  <Badge variant="outline" className="text-xs">
+                    <KeyRound className="mr-1 h-3 w-3" />
+                    Your {PROVIDER_LABELS[selectedModel.provider]} key required
+                  </Badge>
+                )}
+              </div>
             </div>
           )}
         </CardContent>

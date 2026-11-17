@@ -1,14 +1,31 @@
 """Tests for watchlist REST endpoints."""
 
+import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
+import api.db as db_module
+from agents.model_registry import get_default_model
+from api import llm_concurrency
 from api.main import app
+from tests.conftest import CLERK_USER, byok_header, llm_usage, set_operator_key
 
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _temp_db(tmp_path, monkeypatch):
+    """Routes that reach the DB (e.g. ticker enrichment) must not open data/chats.db."""
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "default.db")
+    monkeypatch.setattr(db_module, "_db", None)
+    asyncio.run(db_module.init_db())
+    yield
+    asyncio.run(db_module.close_db())
+
 
 USER_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 HEADERS = {"X-User-Id": USER_ID}
@@ -117,7 +134,7 @@ class TestBriefingTimeout:
             def __init__(self, llm, tavily_api_key=None):
                 pass
 
-            def generate(self, tickers, user_id, model_id, previous_briefing=None):
+            def generate(self, tickers, user_id, model_id, previous_briefing=None, config=None):
                 time.sleep(0.5)  # > timeout, < test budget
                 return None
 
@@ -134,7 +151,7 @@ class TestBriefingTimeout:
 
         resp = client.get(
             "/watchlist/briefing",
-            headers={**HEADERS, "X-Google-Api-Key": "test"},
+            headers={**HEADERS, **byok_header(get_default_model().provider)},
         )
 
         assert resp.status_code == 504
@@ -152,7 +169,7 @@ class TestBriefingTimeout:
             def __init__(self, llm, tavily_api_key=None):
                 pass
 
-            def generate(self, tickers, user_id, model_id, previous_briefing=None):
+            def generate(self, tickers, user_id, model_id, previous_briefing=None, config=None):
                 # Mimic the BriefingResult shape minimally for the persist path.
                 analysis = MagicMock()
                 analysis.model_dump_json.return_value = "{}"
@@ -180,7 +197,7 @@ class TestBriefingTimeout:
         with patch("api.routes.watchlist.save_briefing", new_callable=AsyncMock):
             resp = client.get(
                 "/watchlist/briefing",
-                headers={**HEADERS, "X-Google-Api-Key": "test"},
+                headers={**HEADERS, **byok_header(get_default_model().provider)},
             )
         assert resp.status_code == 200
 
@@ -277,3 +294,151 @@ class TestBriefingHistoryDaysValidation:
         )
         assert resp.status_code == 200
         mock_hist.assert_called_once_with("AAPL", USER_ID, days=365)
+
+
+# ---------------------------------------------------------------------------
+# Operator-key cost guard: lendable models only, one budget unit per LLM call
+# ---------------------------------------------------------------------------
+
+SIGNED_IN = {"X-Clerk-Session-Token": "good-token"}
+
+
+class _CountingFakeLLM:
+    """Records how many times the LLM boundary was invoked."""
+
+    def __init__(self):
+        self.created = 0
+
+
+@pytest.fixture
+def budget_env(monkeypatch):
+    """Temp DB (the autouse `_temp_db`), a one-ticker watchlist, and a fake LLM at the provider boundary.
+
+    The real BriefingService and route run; only the LLM (FakeListChatModel)
+    and the yfinance/Tavily/regime fetches are faked.
+    """
+    from langchain_core.language_models import FakeListChatModel
+
+    import agents.briefing.briefing_service as briefing_mod
+    import agents.llm_factory as llm_factory
+    from agents.briefing.briefing_service import (
+        BriefingService,
+        DailyBriefingAnalysis,
+        TickerBriefing,
+    )
+
+    analysis = DailyBriefingAnalysis(
+        market_regime="Neutral",
+        market_positioning="Balanced.",
+        tickers=[TickerBriefing(
+            ticker="AAPL", price=180.0, change_pct=0.5,
+            technical_signal="RSI neutral.", outlook="mixed",
+        )],
+        alerts=[],
+    )
+    fake = _CountingFakeLLM()
+
+    def _create_llm(model_id, api_key, thinking=None):
+        fake.created += 1
+        return FakeListChatModel(responses=[analysis.model_dump_json()] * 5)
+
+    monkeypatch.setattr(llm_factory, "create_llm", _create_llm)
+    monkeypatch.setattr(
+        BriefingService, "_gather_ticker_data",
+        lambda self, tickers: [{"ticker": t, "price": 180.0} for t in tickers],
+    )
+    monkeypatch.setattr(BriefingService, "_get_market_regime", lambda self: {"error": "skip"})
+    monkeypatch.setattr(BriefingService, "_gather_news", lambda self, tickers: {t: [] for t in tickers})
+    briefing_mod._briefing_cache.clear()
+
+    for uid in (CLERK_USER, USER_ID):
+        asyncio.run(db_module.add_to_watchlist("AAPL", uid))
+
+    yield fake
+    briefing_mod._briefing_cache.clear()
+    asyncio.run(db_module.close_db())
+
+
+class TestBriefingOperatorKeyGuard:
+    @pytest.fixture(autouse=True)
+    def _operator_env(self, monkeypatch, lendable, non_lendable):
+        set_operator_key(monkeypatch, lendable, "operator-key")
+        set_operator_key(monkeypatch, non_lendable, "operator-key")
+
+    @pytest.mark.eval_unit
+    def test_lendable_model_on_operator_key_charges_one_unit_per_call(self, budget_env, clerk_on, lendable):
+        resp = client.get("/watchlist/briefing", headers={**SIGNED_IN, "X-Model-Id": lendable.id})
+        assert resp.status_code == 200
+        assert llm_usage(CLERK_USER) == 1  # one LLM call in the briefing chain
+
+    @pytest.mark.eval_unit
+    def test_cached_briefing_makes_no_llm_call_and_is_not_charged(self, budget_env, clerk_on, lendable):
+        headers = {**SIGNED_IN, "X-Model-Id": lendable.id}
+        assert client.get("/watchlist/briefing", headers=headers).status_code == 200
+        assert client.get("/watchlist/briefing", headers=headers).status_code == 200
+        assert llm_usage(CLERK_USER) == 1
+
+    @pytest.mark.eval_unit
+    def test_non_lendable_model_refused_on_operator_key(self, budget_env, clerk_on, non_lendable):
+        resp = client.get("/watchlist/briefing", headers={**SIGNED_IN, "X-Model-Id": non_lendable.id})
+        assert resp.status_code == 400
+        assert "own" in resp.json()["detail"].lower()
+        assert budget_env.created == 0  # never reached the LLM
+        assert llm_usage(CLERK_USER) == 0
+
+    @pytest.mark.eval_unit
+    def test_byok_works_for_non_lendable_model_and_is_not_charged(self, budget_env, clerk_on, non_lendable):
+        resp = client.get(
+            "/watchlist/briefing",
+            headers={**SIGNED_IN, "X-Model-Id": non_lendable.id, **byok_header(non_lendable.provider, "mine")},
+        )
+        assert resp.status_code == 200
+        assert budget_env.created == 1
+        assert llm_usage(CLERK_USER) == 0
+
+    @pytest.mark.eval_unit
+    def test_budget_spent_refuses_before_any_llm_call(self, budget_env, clerk_on, monkeypatch, lendable):
+        monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 1)
+        asyncio.run(db_module.increment_llm_usage(CLERK_USER))
+        resp = client.get("/watchlist/briefing", headers={**SIGNED_IN, "X-Model-Id": lendable.id})
+        assert resp.status_code == 429
+        assert budget_env.created == 0
+        assert llm_usage(CLERK_USER) == 1
+
+    @pytest.mark.eval_unit
+    def test_byok_ignores_spent_budget(self, budget_env, clerk_on, monkeypatch, lendable):
+        monkeypatch.setattr(llm_concurrency, "LLM_DAILY_BUDGET", 1)
+        asyncio.run(db_module.increment_llm_usage(CLERK_USER))
+        resp = client.get(
+            "/watchlist/briefing",
+            headers={**SIGNED_IN, "X-Model-Id": lendable.id, **byok_header(lendable.provider, "mine")},
+        )
+        assert resp.status_code == 200
+        assert llm_usage(CLERK_USER) == 1
+
+    @pytest.mark.eval_unit
+    def test_generation_failure_detail_is_generic_and_logged(
+        self, budget_env, monkeypatch, lendable, caplog
+    ):
+        from agents.briefing.briefing_service import BriefingService
+
+        def _boom(self, tickers):
+            raise RuntimeError("upstream rejected key tvly-secret-123")
+
+        monkeypatch.setattr(BriefingService, "_gather_news", _boom)
+        with caplog.at_level("ERROR", logger="analyst.watchlist"):
+            resp = client.get(
+                "/watchlist/briefing",
+                headers={**HEADERS, "X-Model-Id": lendable.id, **byok_header(lendable.provider)},
+            )
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "Briefing generation failed"
+        assert "tvly-secret-123" not in resp.text
+        assert any(r.exc_info and "tvly-secret-123" in str(r.exc_info[1]) for r in caplog.records)
+
+    @pytest.mark.eval_unit
+    def test_self_host_lends_operator_key_for_any_model(self, budget_env, non_lendable):
+        # Clerk unconfigured: the operator is the user, every model is lendable.
+        resp = client.get("/watchlist/briefing", headers={**HEADERS, "X-Model-Id": non_lendable.id})
+        assert resp.status_code == 200
+        assert llm_usage(USER_ID) == 1

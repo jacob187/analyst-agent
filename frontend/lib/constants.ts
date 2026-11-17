@@ -1,6 +1,23 @@
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+/** True for self-hosters running without Clerk (pair with DISABLE_AUTH=true on the backend). */
+export const AUTH_DISABLED = process.env.NEXT_PUBLIC_DISABLE_AUTH === "true";
+
+/** Stable user_id used when auth is disabled — matches the backend's USER_ID_RE. */
+export const LOCAL_DEV_USER_ID = "user_localdev";
+
+/**
+ * Configured identity sent as X-User-Id / user_id in auth-disabled mode, where
+ * there is no Clerk session to take one from. With Clerk enabled this is
+ * undefined: the id sent is the signed-in Clerk user's (alongside the session
+ * token; see getClerkIdentity in lib/api.ts and lib/server-auth.ts), which the
+ * backend requires to equal the token's subject — a mismatch is rejected (401).
+ */
+export const DEV_USER_ID: string | undefined = AUTH_DISABLED
+  ? (process.env.NEXT_PUBLIC_DEV_USER_ID ?? LOCAL_DEV_USER_ID)
+  : undefined;
+
 export const WS_BASE =
   process.env.NEXT_PUBLIC_WS_URL ??
   API_BASE.replace(/^http/, "ws");
