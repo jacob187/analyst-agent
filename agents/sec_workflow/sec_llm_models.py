@@ -327,10 +327,15 @@ class SECDocumentProcessor:
             ]
         )
 
+        # Label each filing's balance sheet and leave out an absent one, so the
+        # model never sees an empty ``{}`` presented as a filing.
+        def _section(label: str, data: dict) -> str:
+            return f"{label} balance sheet:\n{data}" if data else ""
+
         return prompt.partial(
             ticker=ticker,
-            tenk=tenk,
-            tenq=tenq,
+            tenk=_section("10-K (annual)", tenk),
+            tenq=_section("10-Q (quarterly)", tenq),
             format_instructions=self.balance_sheet_parser.get_format_instructions(),
         )
 
