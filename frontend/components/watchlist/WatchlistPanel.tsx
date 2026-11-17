@@ -12,6 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import { useApiKeys } from "@/hooks/useApiKeys";
+import { useAuthReady } from "@/hooks/useAuthReady";
 import { formatCurrency, formatPercent, tickerValid, cn } from "@/lib/utils";
 import type { WatchlistItem, Quote } from "@/types";
 
@@ -34,8 +35,12 @@ export function WatchlistPanel({ initialItems, initialQuotes }: WatchlistPanelPr
   const [briefingOpen, setBriefingOpen] = useState(false);
 
   // Re-sync on mount in case the RSC payload was served from the router cache
-  // and didn't reflect tickers added on another page (or in another tab).
+  // and didn't reflect tickers added on another page (or in another tab). Waits
+  // for Clerk (and re-runs if the identity changes): before it has a session the
+  // request is anonymous, gets a 422 and would leave the list empty.
+  const { ready: authReady, userId } = useAuthReady();
   useEffect(() => {
+    if (!authReady) return;
     let cancelled = false;
     api.watchlist().then(({ tickers }) => {
       if (cancelled) return;
@@ -47,7 +52,7 @@ export function WatchlistPanel({ initialItems, initialQuotes }: WatchlistPanelPr
       }
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, []);
+  }, [authReady, userId]);
 
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault();

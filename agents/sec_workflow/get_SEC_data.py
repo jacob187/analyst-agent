@@ -109,6 +109,12 @@ def _load_report(retriever, form: str):
         return report, getattr(retriever, f"_{slot}_metadata")
 
 
+def _eightk_report(retriever, report):
+    """``report`` (a pinned ``(EightK, FilingMetadata)``), else the
+    retriever's current 8-K via ``_load_report``."""
+    return report if report is not None else _load_report(retriever, "8-K")
+
+
 def _forget_form(retriever, form: str) -> None:
     """Drop every memoized extraction for ``form``. A thread still extracting
     under a dropped key finishes into its own flight, unreachable from here."""
@@ -206,11 +212,41 @@ class FilingMetadata:
             return f"Form {self.form} filed {self.filing_date}, Period: {self.period_of_report}"
 
 
+# A ``Company``'s submissions are a recent page (at least the last year or
+# 1000 filings), fetched in one request on first use, plus older pages that
+# edgartools downloads one request each on a full load: ``get_filings``
+# defaults to ``trigger_full_load=True``. New filings only ever land on the
+# recent page.
+
+
 def _latest(company, form: str):
-    """The company's latest ``form`` filing (None if it has none)."""
-    if form == "8-K":
-        return company.get_filings(form="8-K").latest(1)
+    """The company's latest ``form`` filing (None if it has none): from the
+    recent page, loading the older pages only when it has none."""
     return company.latest(form=form)
+
+
+def _latest_recent(company, form: str):
+    """The latest ``form`` filing on the company's recent page (None if it
+    has none there). Never downloads the older pages."""
+    return company.get_filings(form=form, trigger_full_load=False).latest(1)
+
+
+class EightKReport:
+    """One loaded 8-K (``SECDataRetrieval.latest_8k``) with the retriever's
+    8-K getters, all reading this filing and citing its metadata."""
+
+    def __init__(self, retriever: "SECDataRetrieval", report):
+        self._retriever = retriever
+        self._report = report  # (EightK, FilingMetadata), read together
+
+    def get_8k_overview(self) -> Dict[str, Any]:
+        return self._retriever.get_8k_overview(report=self._report)
+
+    def get_8k_item(self, item: str) -> Dict[str, Any]:
+        return self._retriever.get_8k_item(item, report=self._report)
+
+    def get_earnings_data(self) -> Dict[str, Any]:
+        return self._retriever.get_earnings_data(report=self._report)
 
 
 class SECDataRetrieval:
@@ -238,6 +274,8 @@ class SECDataRetrieval:
         self._tenq_metadata = None
         self._eightk_metadata = None
         self._twentyf_metadata = None
+        # Forms a full-history lookup found no filing of (see refresh).
+        self._absent_forms: set[str] = set()
 
     def check_filing_availability(self) -> Dict[str, Any]:
         """Check what filings are available for this company.
@@ -383,15 +421,21 @@ class SECDataRetrieval:
 
         edgartools' ``Company`` loads its submissions once and caches them, so a
         long-lived retriever never sees a newly published filing. This builds
-        one fresh ``Company`` (one submissions request, whatever the number of
-        forms) and, for each form whose latest accession differs from the
-        cached one, swaps in the new filing and drops that form's parsed
-        object and memoized extractions so section getters read the new filing.
-        ``reuse_company`` skips the rebuild for a retriever whose ``Company``
-        was built just now (it has not loaded its submissions yet).
+        one fresh ``Company`` and reads only its recent submissions page (one
+        request, whatever the number of forms) and, for each form whose latest
+        accession differs from the cached one, swaps in the new filing and
+        drops that form's parsed object and memoized extractions so section
+        getters read the new filing. A form missing from the recent page is
+        resolved by ``_latest_beyond_recent``, which downloads the older pages
+        at most once per retriever. ``reuse_company`` skips the rebuild for a
+        retriever whose ``Company`` was built just now (it has not loaded its
+        submissions yet).
         """
         company = self.company if reuse_company else Company(self.ticker)
-        latest = {form: _latest(company, form) for form in forms}
+        latest = {form: _latest_recent(company, form) for form in forms}
+        missing = [form for form, filing in latest.items() if filing is None]
+        if missing:
+            latest.update(self._latest_beyond_recent(company, missing))
         self.company = company
         metas: Dict[str, Optional[FilingMetadata]] = {}
         for form, filing in latest.items():
@@ -410,9 +454,36 @@ class SECDataRetrieval:
                 metas[form] = getattr(self, f"_{slot}_metadata")
         return metas
 
-    # ── 8-K public methods ────────────────────────────────────────────────
+    def _latest_beyond_recent(self, company, forms) -> Dict[str, Any]:
+        """Latest filing of each of ``forms``, none of which is on
+        ``company``'s recent page. New filings land on the recent page, so
+        the filing this retriever already holds is still the latest, and a
+        form the full history lacked is still absent; only a form with
+        neither downloads the older pages (once per ``Company``)."""
+        latest: Dict[str, Any] = {}
+        for form in forms:
+            held = getattr(self, f"_{_FORM_SLOTS[form]}_filing")
+            if held is not None or form in self._absent_forms:
+                latest[form] = held
+                continue
+            latest[form] = _latest(company, form)
+            if latest[form] is None:
+                self._absent_forms.add(form)
+        return latest
 
-    def get_8k_overview(self) -> Dict[str, Any]:
+    # ── 8-K public methods ────────────────────────────────────────────────
+    #
+    # Each getter loads the retriever's current 8-K, unless given ``report``
+    # (from ``latest_8k``), which pins it to one already-loaded filing.
+
+    def latest_8k(self) -> "EightKReport":
+        """The latest 8-K, loaded once: its getters all read this filing,
+        even if a refresh moves the retriever to a newer 8-K meanwhile, so
+        an overview and the text read after it describe the same filing.
+        Raises if no 8-K is available."""
+        return EightKReport(self, _load_report(self, "8-K"))
+
+    def get_8k_overview(self, *, report=None) -> Dict[str, Any]:
         """Overview of the latest 8-K: items, content type, earnings flag, dates.
 
         The ``content_type`` field is rule-based (no LLM call) and classifies the
@@ -420,7 +491,7 @@ class SECDataRetrieval:
         ``to_context(detail="standard")`` returns a ~300-token LLM-friendly summary.
         """
         try:
-            eightk, meta = _load_report(self, "8-K")
+            eightk, meta = _eightk_report(self, report)
 
             def extract() -> Dict[str, Any]:
                 return {
@@ -440,7 +511,7 @@ class SECDataRetrieval:
             logger.warning("[%s] 8-K overview extraction failed: %s", self.ticker, e)
             return {"found": False, "text": f"Error fetching 8-K overview: {e}", "metadata": {}}
 
-    def get_8k_item(self, item: str) -> Dict[str, Any]:
+    def get_8k_item(self, item: str, *, report=None) -> Dict[str, Any]:
         """Extract text for a specific 8-K item number (e.g. '2.02', '1.01').
 
         Uses ``EightK.__getitem__`` which accepts formats like '2.02',
@@ -448,13 +519,14 @@ class SECDataRetrieval:
         ``get_section`` for consistency.
         """
         item = (item or "").strip()
-        metadata = self._eightk_metadata.to_dict() if self._eightk_metadata else {}
         if not item:
             # A blank key would ask edgartools for item '' — a FutureWarning
             # today and a SectionNotFoundError in edgartools 6.0.
+            meta = report[1] if report is not None else self._eightk_metadata
+            metadata = meta.to_dict() if meta else {}
             return {"text": "No 8-K item number given (e.g. '2.02').", "metadata": metadata, "found": False}
         try:
-            eightk, meta = _load_report(self, "8-K")
+            eightk, meta = _eightk_report(self, report)
 
             def extract() -> Dict[str, Any]:
                 try:
@@ -475,7 +547,7 @@ class SECDataRetrieval:
             logger.warning("[%s] 8-K item %s extraction failed: %s", self.ticker, item, e)
             return {"text": f"Error extracting 8-K item {item}: {e}", "metadata": {}, "found": False}
 
-    def get_earnings_data(self) -> Dict[str, Any]:
+    def get_earnings_data(self, *, report=None) -> Dict[str, Any]:
         """Structured earnings from 8-K Item 2.02 + EX-99.1 press release.
 
         Uses edgartools v5 ``EarningsRelease`` to parse income statement,
@@ -484,7 +556,7 @@ class SECDataRetrieval:
         ``sec_llm_models.py`` handles interpretation.
         """
         try:
-            eightk, meta = _load_report(self, "8-K")
+            eightk, meta = _eightk_report(self, report)
 
             def extract() -> Dict[str, Any]:
                 metadata = meta.to_dict() if meta else {}

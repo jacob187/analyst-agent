@@ -1,11 +1,16 @@
 import { WatchlistPanel } from "@/components/watchlist/WatchlistPanel";
 import { api } from "@/lib/api";
+import { serverAuthHeaders } from "@/lib/server-auth";
 import type { Quote } from "@/types";
 
 export const dynamic = "force-dynamic";
 
 export default async function WatchlistPage() {
-  const { tickers } = await api.watchlist().catch(() => ({ tickers: [] }));
+  // The browser helpers can't see Clerk here; forward the request's session.
+  const authHeaders = await serverAuthHeaders();
+  const { tickers } = await api
+    .watchlist(authHeaders)
+    .catch(() => ({ tickers: [] }));
 
   // Fetch quotes for all watchlist tickers in the same server request
   const initialQuotes: Record<string, Quote> =

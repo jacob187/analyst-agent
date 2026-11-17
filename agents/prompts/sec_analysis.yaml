@@ -203,7 +203,7 @@ prompts:
       User message template for balance sheet analysis requests.
     input_variables: [tenk, tenq, format_instructions]
     template: |
-      Analyze the following Balance Sheet section from {ticker}'s 10-K and 10-Q SEC filings:
+      Analyze the following Balance Sheet data from {ticker}'s SEC filings:
 
       {tenk}
 

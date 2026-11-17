@@ -7,8 +7,8 @@ from typing import Callable, Dict, Any
 from agents.sec_workflow.analysis_cache import (
     CachedAnalysis,
     FilingRef,
-    eightk_input,
     eightk_kind,
+    eightk_overview_and_input,
     get_or_analyze,
     get_retriever,
     latest_filing,
@@ -92,10 +92,6 @@ async def _fresh_retriever(ticker: str, *forms: str) -> SECDataRetrieval:
     """The shared retriever, synced with EDGAR's latest ``forms`` filings."""
     await _fresh_refs(ticker, forms)
     return await asyncio.to_thread(get_retriever, ticker)
-
-
-async def _latest_10k(ticker: str) -> FilingRef:
-    return (await _fresh_refs(ticker, ("10-K",)))["10-K"]
 
 
 def _read_ref(form: str, read: Dict[str, Any], looked_up: FilingRef) -> FilingRef:
@@ -229,17 +225,33 @@ async def _tool_raw_balance_sheets(ticker: str, llm: BaseChatModel) -> str:
 
 
 async def _tool_balance_sheet_summary(ticker: str, llm: BaseChatModel) -> str:
-    """Return summarized balance sheet analysis for the given ticker (cached)."""
+    """Analysis of the latest balance sheet (cached): the 10-Q's when the
+    10-Q is newer than the 10-K and has one, else the 10-K's.
 
-    def load_input() -> tuple[FilingRef, Dict[str, Any]]:
-        # The company page's "balance" input: the latest 10-K's balance sheet,
-        # keyed by the accession of the 10-K it was read from.
-        text, meta = get_retriever(ticker).balance_sheet_text("10-K")
-        return FilingRef("10-K", meta.accession, meta.filing_date), {"tenk": text}
+    Each is keyed by the filing it was read from. The 10-K's shares the
+    company page's ``balance`` key (the same 10-K-only input); the 10-Q's is
+    ``balance_10q`` under the 10-Q, so it never overwrites the page's.
+    """
+
+    def load(form: str, key: str) -> Callable[[], tuple[FilingRef, Dict[str, Any]]]:
+        def load_input() -> tuple[FilingRef, Dict[str, Any]]:
+            try:
+                text, meta = get_retriever(ticker).balance_sheet_text(form)
+            except Exception as e:
+                raise _SectionUnavailable(f"No {form} balance sheet: {e}") from e
+            return FilingRef(form, meta.accession, meta.filing_date), {key: text}
+
+        return load_input
 
     try:
-        tenk = await _latest_10k(ticker)
-        return await _serve_analysis(ticker, llm, tenk, "balance", load_input)
+        refs = await _fresh_refs(ticker, ("10-K", "10-Q"))
+        tenk, tenq = refs["10-K"], refs["10-Q"]
+        if tenq is not None and tenq.filing_date > tenk.filing_date:
+            try:
+                return await _serve_analysis(ticker, llm, tenq, "balance_10q", load("10-Q", "tenq"))
+            except _SectionUnavailable:
+                pass  # e.g. no XBRL balance sheet: fall back to the 10-K's
+        return await _serve_analysis(ticker, llm, tenk, "balance", load("10-K", "tenk"))
     except Exception as e:
         return f"Failed to analyze balance sheet for {ticker}: {e}"
 
@@ -373,6 +385,7 @@ async def _tool_analyze_latest_8k(ticker: str, llm: BaseChatModel) -> str:
     try:
         filing = await latest_filing(ticker, "8-K")
         overview: Dict[str, Any] = {"found": False}
+        raw: Dict[str, Any] = {}
         if filing is not None:
             # The kind is fixed per filing, so a stored analysis of either
             # kind is this 8-K's: served without loading the filing.
@@ -383,7 +396,8 @@ async def _tool_analyze_latest_8k(ticker: str, llm: BaseChatModel) -> str:
             if len(hits) == 1:
                 return _served(hits[0])
             retriever = await asyncio.to_thread(get_retriever, ticker)
-            overview = await asyncio.to_thread(retriever.get_8k_overview)
+            # Kind, cache key and input all from one filing (one read).
+            overview, raw = await asyncio.to_thread(eightk_overview_and_input, retriever)
         if not overview.get("found"):
             return json.dumps(
                 {"found": False, "reason": f"No 8-K filing found for {ticker}"},
@@ -399,7 +413,6 @@ async def _tool_analyze_latest_8k(ticker: str, llm: BaseChatModel) -> str:
     read = _read_ref("8-K", overview, filing)
 
     def load_input() -> tuple[FilingRef, Dict[str, Any]]:
-        _, raw = eightk_input(retriever, overview, overview.get("metadata", {}))
         if kind == "earnings" and raw.get("has_earnings") is False:
             raise _SectionUnavailable(
                 f"No earnings data in latest 8-K for {ticker}. "
@@ -540,7 +553,12 @@ def create_sec_tools(ticker: str, llm: BaseChatModel) -> list[StructuredTool]:
                 "Pass the item number as `item`."
             ),
             func=None,
-            coroutine=lambda item=DEFAULT_8K_ITEM: _tool_8k_item(ticker, item),
+            # LangChain validates a bare-string call (the plan worker's
+            # ``ainvoke("")``) but passes the raw string on, so normalise it
+            # through the schema here too: blank means the default item.
+            coroutine=lambda item=DEFAULT_8K_ITEM: _tool_8k_item(
+                ticker, EightKItemArgs(item=item).item
+            ),
             args_schema=EightKItemArgs,
         ),
     ]

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { WS_BASE, DEV_USER_ID } from "@/lib/constants";
 import { api, getClerkIdentity } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
+import { useAuthReady } from "@/hooks/useAuthReady";
 import type { ApiKeys, StreamingMessage, WsMessage } from "@/types";
 
 export type WsStatus = "connecting" | "connected" | "disconnected" | "error";
@@ -23,9 +23,11 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
   const [freeTrial, setFreeTrial] = useState<{ queries: number } | null>(null);
 
   // Identity gate: the socket must not open until Clerk has resolved, or it
-  // would authenticate anonymously for its whole life (chat never saved).
-  // `userId` is in connect's deps so a sign-in/out reconnects with the new identity.
-  const { userId, isLoaded: loaded } = useAuth();
+  // would authenticate anonymously for its whole life (chat never saved). The
+  // wait is bounded: if Clerk never loads, the socket opens anonymously so BYOK
+  // and free-trial chat still work. `userId` is in connect's deps so a
+  // sign-in/out (or a late Clerk load) reconnects with the new identity.
+  const { userId, ready, authFailed } = useAuthReady();
 
   const wsRef = useRef<WebSocket | null>(null);
   // Identity the transcript on screen belongs to. When it changes, the new
@@ -54,7 +56,10 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
   // ── connect ─────────────────────────────────────────────────────────────────
   // Depends on `ticker` and the resolved identity; keys/sessionId come from refs.
   const connect = useCallback(() => {
-    if (!loaded) return;
+    if (!ready) {
+      setStatus("connecting");
+      return;
+    }
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     const identity = userId ?? null;
@@ -303,7 +308,7 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
       if (wsRef.current === ws) setStatus("error");
     };
 
-  }, [ticker, loaded, userId]); // keys/sessionId read from refs at call time
+  }, [ticker, ready, userId]); // keys/sessionId read from refs at call time
 
   useEffect(() => {
     // Opens the external WebSocket and mirrors its status into state.
@@ -333,5 +338,5 @@ export function useWebSocket({ ticker, keys, sessionId }: UseWebSocketOptions) {
     wsRef.current.send(JSON.stringify({ type: "query", message: text }));
   }, []);
 
-  return { messages, status, activeSessionId, sendMessage, freeTrial };
+  return { messages, status, activeSessionId, sendMessage, freeTrial, authFailed };
 }

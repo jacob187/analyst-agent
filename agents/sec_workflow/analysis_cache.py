@@ -41,6 +41,12 @@ logger = logging.getLogger(__name__)
 # submissions requests at ~6 per (ticker, form) per day.
 DEFAULT_FRESHNESS_TTL_SECONDS = 4 * 3600
 
+# After a failed latest-filing lookup, callers that can be served a stale ref
+# get it without asking EDGAR again for this long: during an outage or 429s
+# each call would otherwise re-run the failing request (edgartools retries
+# timeouts for up to ~45s), one after another under the per-ticker lock.
+DEFAULT_LOOKUP_FAILURE_BACKOFF_SECONDS = 60
+
 FORMS = ("10-K", "10-Q", "8-K", "20-F")
 
 _MISS = object()
@@ -52,6 +58,8 @@ _shared_retrievers: LRUCache = LRUCache(maxsize=128)
 # (TICKER, form) -> (FilingRef | None, looked_up_at monotonic seconds,
 #                    weakref to the retriever the lookup refreshed)
 _latest_filings: LRUCache = LRUCache(maxsize=1024)
+# TICKER -> monotonic seconds of its last failed lookup (cleared on success).
+_failed_lookups: LRUCache = LRUCache(maxsize=1024)
 
 # Per-key asyncio locks (event loop only). TTL eviction bounds growth; a
 # request already holding an evicted lock keeps it alive.
@@ -99,12 +107,20 @@ def freshness_ttl_seconds() -> float:
     )
 
 
+def lookup_failure_backoff_seconds() -> float:
+    """``FILING_LOOKUP_FAILURE_BACKOFF_SECONDS`` (read per call), else the default."""
+    return env_float(
+        "FILING_LOOKUP_FAILURE_BACKOFF_SECONDS", DEFAULT_LOOKUP_FAILURE_BACKOFF_SECONDS, minimum=0
+    )
+
+
 def clear_caches() -> None:
     """Drop every process-wide cache and per-key lock in this module, as a
     process restart would. For test and benchmark isolation, not request paths."""
     with _lock:
         _shared_retrievers.clear()
         _latest_filings.clear()
+        _failed_lookups.clear()
     _latest_locks.clear()
     _analysis_locks.clear()
 
@@ -162,7 +178,8 @@ def _fresh_ref(key: tuple[str, str]) -> Any:
 
 def _refresh(ticker: str):
     """Point the shared retriever at EDGAR's latest filing of every form —
-    one submissions request for all of them. A retriever built just now
+    one submissions request (the recent page) for all of them; older pages
+    are downloaded at most once per retriever. A retriever built just now
     already holds a fresh ``Company``, so it is reused."""
     with _lock:
         existed = ticker in _shared_retrievers
@@ -175,11 +192,13 @@ async def latest_filings(ticker: str, forms) -> dict[str, FilingRef | None]:
     has none).
 
     Asks SEC EDGAR only when an entry is older than the freshness TTL, and
-    then refreshes every form in one submissions request; concurrent callers
+    then refreshes every form in one submissions request (see
+    ``SECDataRetrieval.refresh_latest_filings``); concurrent callers
     for a ticker share that lookup. When the lookup fails, a form whose
     expired ref is still backed by the current retriever is served stale
-    (logged) — its stored analyses stay reachable through an EDGAR outage.
-    Otherwise the failure raises and is not cached.
+    (logged) — its stored analyses stay reachable through an EDGAR outage —
+    and for ``lookup_failure_backoff_seconds()`` afterwards such callers are
+    served stale without asking EDGAR again. Otherwise the failure raises.
     """
     for form in forms:
         if form not in FORMS:
@@ -187,19 +206,42 @@ async def latest_filings(ticker: str, forms) -> dict[str, FilingRef | None]:
     key = ticker.upper()
     refs = {form: _fresh_ref((key, form)) for form in forms}
     if any(ref is _MISS for ref in refs.values()):
+        if (stale := _stale_while_backing_off(key, forms)) is not None:
+            return stale
         async with _lock_for(_latest_locks, (key,)):
             refs = {form: _fresh_ref((key, form)) for form in forms}
             if any(ref is _MISS for ref in refs.values()):
+                # Callers queued behind a lookup that just failed.
+                if (stale := _stale_while_backing_off(key, forms)) is not None:
+                    return stale
                 refs = await _lookup(key, forms)
     return refs
+
+
+def _stale_refs(key: str, forms) -> dict[str, FilingRef | None] | None:
+    """Every form's cached ref whatever its age, or None if any has none."""
+    stale = {form: _cached_ref((key, form), None) for form in forms}
+    return None if any(ref is _MISS for ref in stale.values()) else stale
+
+
+def _stale_while_backing_off(key: str, forms) -> dict[str, FilingRef | None] | None:
+    """The stale refs, while ``key``'s last lookup failed less than the
+    backoff ago; None (ask EDGAR) otherwise or when there is nothing stale."""
+    with _lock:
+        failed_at = _failed_lookups.get(key)
+    if failed_at is None or _clock() - failed_at >= lookup_failure_backoff_seconds():
+        return None
+    return _stale_refs(key, forms)
 
 
 async def _lookup(key: str, forms) -> dict[str, FilingRef | None]:
     try:
         retriever, metas = await asyncio.to_thread(_refresh, key)
     except Exception as e:
-        stale = {form: _cached_ref((key, form), None) for form in forms}
-        if any(ref is _MISS for ref in stale.values()):
+        with _lock:
+            _failed_lookups[key] = _clock()
+        stale = _stale_refs(key, forms)
+        if stale is None:
             raise
         logger.warning(
             "[%s] latest-filing lookup failed (%s); serving the cached %s refs",
@@ -210,6 +252,7 @@ async def _lookup(key: str, forms) -> dict[str, FilingRef | None]:
     looked_up_with = weakref.ref(retriever)
     refs: dict[str, FilingRef | None] = {}
     with _lock:
+        _failed_lookups.pop(key, None)
         for form in FORMS:
             meta = metas[form]
             ref = None if meta is None else FilingRef(form, meta.accession, meta.filing_date)
@@ -317,6 +360,8 @@ def eightk_kind(overview: dict[str, Any]) -> str:
 def eightk_input(retriever, overview: dict[str, Any], metadata: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """``(kind, raw)`` LLM input for the latest 8-K (kind per ``eightk_kind``;
     an event's primary item text is empty when it failed to extract).
+    ``retriever`` is a ``SECDataRetrieval`` or, so the input is read from the
+    same filing as ``overview``, the ``EightKReport`` it came from.
     Blocking (edgartools)."""
     kind = eightk_kind(overview)
     if kind == "earnings":
@@ -334,3 +379,20 @@ def eightk_input(retriever, overview: dict[str, Any], metadata: dict[str, Any]) 
         "text": item_text,
         "metadata": metadata,
     }
+
+
+def eightk_overview_and_input(retriever) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(overview, raw)`` for the latest 8-K, both read from one loaded
+    filing, so a concurrent refresh can't pair a newer 8-K's text with the
+    overview's accession and kind (the analysis key). ``raw`` is ``{}`` when
+    the overview is not found. Blocking (edgartools)."""
+    try:
+        report = retriever.latest_8k()
+    except Exception as e:
+        logger.warning("[%s] 8-K load failed: %s", retriever.ticker, e)
+        return {"found": False, "text": f"Error fetching 8-K overview: {e}", "metadata": {}}, {}
+    overview = report.get_8k_overview()
+    if not overview.get("found"):
+        return overview, {}
+    _, raw = eightk_input(report, overview, overview.get("metadata", {}))
+    return overview, raw

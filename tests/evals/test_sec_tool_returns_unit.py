@@ -47,11 +47,11 @@ EIGHTK_ACC = "0000320193-26-000121"
 
 # Which (form, accession, analysis_type) row each tool reads for the fake
 # EDGAR below: risk falls back to the 10-K (10-Q risk text is boilerplate),
-# MD&A uses the substantive 10-Q.
+# MD&A uses the substantive 10-Q, the balance sheet the newer 10-Q's.
 _ROW = {
     "risk": ("10-K", TENK_ACC, "risk_10k"),
     "mda": ("10-Q", TENQ_ACC, "mda_10q"),
-    "balance": ("10-K", TENK_ACC, "balance"),
+    "balance": ("10-Q", TENQ_ACC, "balance_10q"),
     "earnings": ("8-K", EIGHTK_ACC, "earnings"),
     "event": ("8-K", EIGHTK_ACC, "event"),
 }
