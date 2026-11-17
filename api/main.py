@@ -145,8 +145,10 @@ def check_production_auth_config() -> None:
         # request would fail with 503.
         raise RuntimeError(
             "Refusing to start: ENV=production with CLERK_SECRET_KEY set but "
-            "CLERK_ISSUER_URL unset. Set it to the Clerk frontend API origin, "
-            "or set ANALYST_ALLOW_DISABLED_AUTH=1 to override."
+            "CLERK_ISSUER_URL unset. Set it to the Clerk Frontend API URL that "
+            "issues session tokens (for a proxied instance, "
+            "https://<frontend>/__clerk), or set ANALYST_ALLOW_DISABLED_AUTH=1 "
+            "to override."
         )
 
 

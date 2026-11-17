@@ -12,7 +12,9 @@ uniformly across REST and WebSocket contexts.
 
 Configure via env:
   CLERK_SECRET_KEY  — presence of this enables verification (any non-empty value)
-  CLERK_ISSUER_URL  — Clerk frontend API origin, e.g. https://your-app.clerk.accounts.dev
+  CLERK_ISSUER_URL  — Clerk Frontend API URL (the tokens' `iss`), e.g.
+                      https://your-app.clerk.accounts.dev, or
+                      https://<frontend>/__clerk for a proxied instance
   CLERK_JWKS_URL    — optional override; defaults to {issuer}/.well-known/jwks.json
 """
 
