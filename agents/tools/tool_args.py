@@ -10,7 +10,7 @@ first field and hands it to the tool positionally).
 
 from typing import Annotated, Any
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
 
 DEFAULT_BRIEFING_DAYS = 7
 MIN_DAYS = 1
@@ -90,3 +90,10 @@ class EightKItemArgs(ToolArgs):
         if isinstance(data, dict) and "item" not in data and "query" in data:
             return {**data, "item": data["query"]}
         return data
+
+    @field_validator("item")
+    @classmethod
+    def _blank_means_default(cls, item: str) -> str:
+        # The plan worker calls every tool as ``ainvoke("")``, which LangChain
+        # maps onto ``item``; a blank item names no item, so use the default.
+        return item.strip() or DEFAULT_8K_ITEM

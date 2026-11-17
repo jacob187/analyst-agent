@@ -540,7 +540,12 @@ def create_sec_tools(ticker: str, llm: BaseChatModel) -> list[StructuredTool]:
                 "Pass the item number as `item`."
             ),
             func=None,
-            coroutine=lambda item=DEFAULT_8K_ITEM: _tool_8k_item(ticker, item),
+            # LangChain validates a bare-string call (the plan worker's
+            # ``ainvoke("")``) but passes the raw string on, so normalise it
+            # through the schema here too: blank means the default item.
+            coroutine=lambda item=DEFAULT_8K_ITEM: _tool_8k_item(
+                ticker, EightKItemArgs(item=item).item
+            ),
             args_schema=EightKItemArgs,
         ),
     ]
