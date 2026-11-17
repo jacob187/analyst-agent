@@ -21,6 +21,7 @@ from api.dependencies import (
     resolve_ws_identity,
     resolve_ws_keys,
 )
+from tests.clerk_fakes import FakeJwksEndpoint
 from tests.conftest import (
     byok_auth_field,
     clear_operator_keys,
@@ -294,29 +295,20 @@ def _make_token(private_pem: bytes, *, sub: str = TEST_SUB, exp_delta: int = 300
 
 @pytest.fixture
 def clerk_env(rsa_keypair, monkeypatch):
-    """Enable Clerk for the test and stub the JWKS fetch."""
+    """Enable Clerk for the test; the JWKS endpoint is a local fake serving
+    the test key. Yields the fake, so a test can make it fail."""
     _, jwk = rsa_keypair
     monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_xxx")
     monkeypatch.setenv("CLERK_ISSUER_URL", TEST_ISSUER)
+    monkeypatch.delenv("CLERK_JWKS_URL", raising=False)
     monkeypatch.delenv("DISABLE_AUTH", raising=False)
     clerk_auth._reset_cache_for_tests()
-
-    class _FakeJWK:
-        def __init__(self, key):
-            self.key = key
-
-    def _fake_get_signing_key_from_jwt(self, token):
-        from jwt.algorithms import RSAAlgorithm
-        return _FakeJWK(RSAAlgorithm.from_jwk(jwk))
-
-    monkeypatch.setattr(
-        "jwt.PyJWKClient.get_signing_key_from_jwt",
-        _fake_get_signing_key_from_jwt,
-    )
+    jwks = FakeJwksEndpoint().install(monkeypatch)
+    jwks.serve_json({"keys": [jwk]})
     # Reset the one-time-warning flag so tests are independent.
     from api import dependencies
     dependencies._clerk_unconfigured_warned = False
-    yield
+    yield jwks
     clerk_auth._reset_cache_for_tests()
 
 
@@ -1141,26 +1133,26 @@ class TestClerkMisconfiguration:
         monkeypatch.delenv("CLERK_JWKS_URL", raising=False)
 
     @pytest.fixture
-    def jwks_down(self, clerk_env, monkeypatch):
-        from jwt.exceptions import PyJWKClientConnectionError
-
-        def _unreachable(self, token):
-            raise PyJWKClientConnectionError("Fail to fetch data from the url")
-
-        monkeypatch.setattr("jwt.PyJWKClient.get_signing_key_from_jwt", _unreachable)
+    def jwks_down(self, clerk_env):
+        clerk_env.fail()
 
     @pytest.fixture
-    def jwks_not_json(self, clerk_env, monkeypatch):
-        # What PyJWKClient.fetch_data lets escape when the URL serves HTML.
-        import json
+    def jwks_not_json(self, clerk_env):
+        # A wrong CLERK_JWKS_URL pointing at a web page.
+        clerk_env.serve_raw(b"<!doctype html>")
 
-        def _html(self, token):
-            return json.loads("<!doctype html>")
+    @pytest.fixture
+    def jwks_no_keys(self, clerk_env):
+        clerk_env.serve_json({"keys": []})
 
-        monkeypatch.setattr("jwt.PyJWKClient.get_signing_key_from_jwt", _html)
+    @pytest.fixture
+    def schemeless_issuer(self, clerk_env, monkeypatch):
+        monkeypatch.setenv("CLERK_ISSUER_URL", "test.clerk.test")
 
     @pytest.mark.eval_unit
-    @pytest.mark.parametrize("fault", ["no_issuer", "jwks_down", "jwks_not_json"])
+    @pytest.mark.parametrize(
+        "fault", ["no_issuer", "jwks_down", "jwks_not_json", "jwks_no_keys", "schemeless_issuer"]
+    )
     async def test_rest_token_gets_503_and_an_error_log(
         self, fault, request, rsa_keypair, caplog
     ):
@@ -1173,7 +1165,7 @@ class TestClerkMisconfiguration:
         assert any(r.levelname == "ERROR" for r in caplog.records)
 
     @pytest.mark.eval_unit
-    @pytest.mark.parametrize("fault", ["no_issuer", "jwks_down"])
+    @pytest.mark.parametrize("fault", ["no_issuer", "jwks_down", "jwks_no_keys"])
     def test_ws_token_gets_an_error_reason(self, fault, request, rsa_keypair):
         request.getfixturevalue(fault)
         priv, _ = rsa_keypair
@@ -1235,3 +1227,43 @@ class TestClerkTokenWithoutBackendClerk:
         with caplog.at_level("WARNING", logger="api.dependencies"):
             await get_api_keys(x_user_id=None, x_clerk_session_token="some.jwt.token")
         assert self._token_warnings(caplog) == []
+
+
+# ---------------------------------------------------------------------------
+# Free-trial caps read at import: a blank or malformed value must not crash it.
+# ---------------------------------------------------------------------------
+
+_ANON_CAPS = ("ANON_FREE_QUERIES", "ANON_FREE_DAILY_CAP", "ANON_FREE_SEARCH_DAILY_CAP")
+
+
+def _import_anon_caps(value: str):
+    """Import api.dependencies in a fresh interpreter (the caps are read once at
+    import) with every free-trial cap set to `value`; return the caps it read."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    env = {**os.environ, **{name: value for name in _ANON_CAPS}}
+    code = "import api.dependencies as d; print(" + ", ".join(f"d.{n}" for n in _ANON_CAPS) + ")"
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=Path(__file__).resolve().parent.parent,
+        env=env, capture_output=True, text=True, timeout=180,
+    )
+    assert result.returncode == 0, result.stderr
+    return tuple(map(int, result.stdout.split()[-3:])), result.stderr
+
+
+@pytest.mark.eval_unit
+@pytest.mark.parametrize("raw", ["", "abc", "3.5", "-1"])
+def test_malformed_anon_caps_fall_back_to_defaults(raw):
+    caps, stderr = _import_anon_caps(raw)
+    assert caps == (3, 200, 25)
+    if raw:
+        assert all(f"{name}=" in stderr for name in _ANON_CAPS)
+
+
+@pytest.mark.eval_unit
+def test_anon_caps_accept_zero_to_disable():
+    caps, _ = _import_anon_caps("0")
+    assert caps == (0, 0, 0)

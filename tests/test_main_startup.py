@@ -389,3 +389,42 @@ def test_log_levels_set_in_dotenv_apply(monkeypatch):
     assert result.returncode == 0, result.stderr
     root_level, edgar_level = map(int, result.stdout.split()[-2:])
     assert (root_level, edgar_level) == (logging.DEBUG, logging.ERROR)
+
+
+# ---------------------------------------------------------------------------
+# OTEL_* span limits: the SDK validates one at import, so a malformed value
+# must be cleaned before the routers import it (even with tracing off)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", ["abc", "128x", "", "-5"])
+def test_app_imports_with_malformed_otel_span_limit(raw):
+    result = _import_main_with_env(
+        prelude="os.environ.pop('OTEL_EXPORTER_OTLP_ENDPOINT', None); ",
+        OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT=raw,
+    )
+    assert result.returncode == 0, result.stderr
+    if raw:
+        assert f"OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT={raw!r}" in result.stderr
+
+
+def test_sanitize_otel_limit_env_drops_only_invalid_values(monkeypatch, caplog):
+    from api.main import sanitize_otel_limit_env
+
+    monkeypatch.setenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "lots")
+    monkeypatch.setenv("OTEL_SPAN_EVENT_COUNT_LIMIT", "-1")
+    monkeypatch.setenv("OTEL_SPAN_LINK_COUNT_LIMIT", " 64 ")
+    # Blank is the SDK's own "no limit" value, so it stays.
+    monkeypatch.setenv("OTEL_EVENT_ATTRIBUTE_COUNT_LIMIT", "  ")
+    caplog.set_level(logging.WARNING, logger="api.main")
+
+    sanitize_otel_limit_env()
+
+    assert "OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT" not in os.environ
+    assert "OTEL_SPAN_EVENT_COUNT_LIMIT" not in os.environ
+    assert os.environ["OTEL_SPAN_LINK_COUNT_LIMIT"] == " 64 "
+    assert os.environ["OTEL_EVENT_ATTRIBUTE_COUNT_LIMIT"] == "  "
+    warned = sorted(r.getMessage() for r in caplog.records if r.name == "api.main")
+    assert len(warned) == 2
+    assert "OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT='lots'" in warned[0]
+    assert "OTEL_SPAN_EVENT_COUNT_LIMIT='-1'" in warned[1]

@@ -189,6 +189,21 @@ NEXT_PUBLIC_DISABLE_AUTH=true
 
 With both set, `<Show>`/`<UserButton>`/`<SignInButton>` become no-ops, the middleware lets every route through, and per-user data (watchlist, sessions) is keyed on a stable local-dev user id.
 
+### Deploying with Clerk
+
+The backend verifies Clerk session tokens against Clerk's published signing keys (JWKS). Set on the backend:
+
+```bash
+ENV=production
+CLERK_SECRET_KEY=sk_live_...   # turns verification on
+# The token issuer (`iss`). With the frontend proxying Clerk at /__clerk (the
+# production setup in frontend/proxy.ts), it is the proxied Frontend API URL:
+CLERK_ISSUER_URL=https://your-frontend.example.com/__clerk
+# CLERK_JWKS_URL=...           # optional; defaults to $CLERK_ISSUER_URL/.well-known/jwks.json
+```
+
+With `ENV=production` and `CLERK_SECRET_KEY` set, the backend refuses to start without `CLERK_ISSUER_URL`. If the JWKS can't be fetched or isn't a usable key set (wrong URL, outage), signed-in requests whose signing key isn't already known get `503` rather than being treated as signed out; keys already fetched keep working through an outage.
+
 ## API Documentation
 
 Interactive API docs are available at `http://localhost:8000/docs` when running locally.

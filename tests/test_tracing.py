@@ -238,6 +238,21 @@ class TestAttributeLengthLimit:
         assert any("Tracing: OFF" in r.getMessage() for r in caplog.records)
         assert tracing._provider is None
 
+    @pytest.mark.parametrize("env", [
+        {"OTEL_BSP_MAX_EXPORT_BATCH_SIZE": "4096"},  # larger than the default queue
+        {"OTEL_BSP_MAX_QUEUE_SIZE": "0"},
+    ])
+    def test_invalid_batch_processor_settings_turn_tracing_off_not_startup(
+        self, otlp_endpoint, monkeypatch, caplog, env
+    ):
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        with caplog.at_level(logging.WARNING, logger="api.tracing"):
+            assert setup_tracing() is None
+        assert any("Tracing: OFF" in r.getMessage() for r in caplog.records)
+        assert tracing._provider is None
+        assert not LangChainInstrumentor().is_instrumented_by_opentelemetry
+
     def test_capture_spans_applies_the_same_cap(self):
         with capture_spans() as captured:
             with get_tracer().start_as_current_span("s") as span:

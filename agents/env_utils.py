@@ -30,7 +30,9 @@ def _env_number(name: str, default: _N, parse: Callable[[str], _N], minimum: _N 
         value = parse(raw.strip())
     except ValueError:
         value = None
-    if value is None or not math.isfinite(value) or (minimum is not None and value < minimum):
+    # Only floats can be non-finite; math.isfinite would overflow on a huge int.
+    non_finite = isinstance(value, float) and not math.isfinite(value)
+    if value is None or non_finite or (minimum is not None and value < minimum):
         with _warned_lock:
             first = (name, raw) not in _warned
             _warned.add((name, raw))
