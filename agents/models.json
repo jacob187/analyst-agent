@@ -6,7 +6,7 @@
     "max_context": 1000000,
     "thinking_capable": true,
     "default": false,
-    "operator_lendable": true,
+    "operator_lendable": false,
     "input_price_per_mtok": 0.75,
     "output_price_per_mtok": 3.75,
     "prices_as_of": "2026-11-13"
