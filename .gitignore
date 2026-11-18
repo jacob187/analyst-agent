@@ -21,7 +21,8 @@ htmlcov/
 
 # Project specific
 /data/
-/docs/
+/docs/*
+!/docs/DECISIONS.md
 CLAUDE.md
 AGENTS.md
 
