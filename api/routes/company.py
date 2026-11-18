@@ -37,6 +37,8 @@ from api.llm_concurrency import (
     LLMBudgetExceeded,
     LLMCallCharger,
     llm_slot,
+    read_budget_usage,
+    refusal_message,
 )
 from api.rate_limit import check_rest_rate_limit, client_ip, rate_limit_key
 from api.validators import TICKER_RE
@@ -467,8 +469,10 @@ def _plan_sections(filing_data: dict[str, Any]) -> list[dict[str, Any]]:
     ``section``/``key`` place the result in the response; ``atype`` is the cache
     analysis_type (== key except 8-K, where atype is the 8-K kind). Conditional
     10-K sections (Item 1/1C/3/7A, XBRL) appear only when their raw text was
-    extracted and found, so a keyless fetch (``fetch_raw=False`` → empty raw)
-    yields just the always-present core sections.
+    extracted and found. A keyless fetch (``fetch_raw=False`` → no raw) plans
+    the always-present core sections normally and those conditional 10-K
+    sections ``cache_only`` (the filing may not contain them, so a miss must
+    not surface ``needs_key``).
 
     Core sections whose raw text *was* fetched but failed to extract
     (``found: False``, an empty 20-F balance sheet, an 8-K without parseable
@@ -504,13 +508,24 @@ def _plan_sections(filing_data: dict[str, Any]) -> list[dict[str, Any]]:
             balance_input["tenq"] = filing_data["tenq"]["balance_sheet_raw"]
         plan.append({"section": "tenk", "key": "balance", "form": "10-K", **_keyed_by(form_meta, read_meta(tenk, "balance_sheet_raw")), "atype": "balance", "input": balance_input, "cache_only": balance_raw is not None and not balance_raw})
 
+        # Conditional 10-K sections. A keyless fetch extracted no raw text, so
+        # there is nothing to learn about whether the filing has them: plan each
+        # as a cache-only lookup (served if a keyed caller already analysed it,
+        # silently omitted otherwise — never a needs_key placeholder).
+        # 20-F filers have none of these sections.
+        keyless_10k = "risk_raw" not in tenk and form_meta.get("form_type") == "10-K"
+
         for atype, raw_key in [("business", "business_raw"), ("cybersecurity", "cyber_raw"), ("legal", "legal_raw"), ("market_risk", "market_risk_raw")]:
             raw = tenk.get(raw_key)
             if raw and raw.get("found"):
                 plan.append({"section": "tenk", "key": atype, "form": "10-K", **_keyed_by(form_meta, section_meta(raw)), "atype": atype, "input": raw, "cache_only": False})
+            elif keyless_10k:
+                plan.append({"section": "tenk", "key": atype, "form": "10-K", **_keyed_by(form_meta, None), "atype": atype, "input": {}, "cache_only": True})
 
         for atype, raw_key in [("income_stmt", "income_stmt_raw"), ("cashflow", "cashflow_raw")]:
             if not tenk.get(raw_key):
+                if keyless_10k:
+                    plan.append({"section": "tenk", "key": atype, "form": "10-K", **_keyed_by(form_meta, None), "atype": atype, "input": {}, "cache_only": True})
                 continue
             tenk_meta = read_meta(tenk, raw_key)
             statement_input: dict[str, Any] = {"tenk": tenk[raw_key], "tenk_metadata": tenk_meta}
@@ -577,9 +592,11 @@ async def _analyze_or_cache(
     but cached/done. ``cache_only`` (input failed to extract) serves a cache
     hit but returns 'unavailable' on a miss, silently.
     ``on_progress(status, extra)`` (optional) is called as the state advances so the SSE endpoint can stream progress; the
-    JSON endpoint passes None. ``charger`` (operator-paid requests only, from
+    JSON endpoint passes one only for the 8-K, to read its refusal message.
+    ``charger`` (operator-paid requests only, from
     `_budget_charger`) charges the daily budget as this section's LLM call
-    starts and refuses the call the budget can't cover ('budget_exceeded');
+    starts and refuses the call the budget can't cover ('budget_exceeded',
+    with the user-facing `refusal_message` as the progress ``message``);
     cache hits and skipped sections cost nothing.
     """
     form_type = filing.form
@@ -611,7 +628,7 @@ async def _analyze_or_cache(
         )
     except LLMBudgetExceeded as e:
         logger.info("[%s] BUDGET     %s/%s refused: %s", ticker, form_type, analysis_type, e)
-        progress("budget_exceeded", message=str(e))
+        progress("budget_exceeded", message=refusal_message(e))
         return "budget_exceeded", None
     except Exception as e:
         logger.error("[%s] LLM FAILED %s/%s: %s", ticker, form_type, analysis_type, e)
@@ -656,12 +673,7 @@ async def _budget_charger(charge_user_id: str | None) -> LLMCallCharger | None:
     """
     if charge_user_id is None:
         return None
-    from api.db import get_llm_usage
-    return LLMCallCharger(charge_user_id, used=await get_llm_usage(charge_user_id))
-
-
-# The 8-K `reason` in the JSON response when its analysis was refused.
-_EIGHTK_BUDGET_REASON = "Not analyzed: daily LLM budget exceeded"
+    return LLMCallCharger(charge_user_id, used=await read_budget_usage(charge_user_id))
 
 
 @router.get("/{ticker}/filings")
@@ -721,11 +733,19 @@ async def get_company_filings(
     # `budget_exceeded`. Cache hits / BYOK / keyless reads cost nothing.
     charger = await _budget_charger(_budget_user(keys, api_key, model.provider))
 
+    # The refusal message a refused 8-K reports as its `reason`.
+    eightk_refusal: list[str] = []
+
+    def on_eightk_progress(status: str, extra: dict[str, Any]) -> None:
+        if status == "budget_exceeded":
+            eightk_refusal.append(extra["message"])
+
     # Resolve every section concurrently — cache hits return instantly, misses
     # with a key run their LLM calls concurrently.
     results = await asyncio.gather(*[
         _analyze_or_cache(
             ticker, _filing_ref(p), p["atype"], p["input"], model.id, api_key,
+            on_progress=on_eightk_progress if p["section"] == "eightk" else None,
             cache_only=p["cache_only"], charger=charger,
         )
         for p in plan
@@ -755,7 +775,7 @@ async def get_company_filings(
             response["eightk"] = {
                 "kind": eightk_kind,
                 "metadata": eightk.get("metadata", {}),
-                "reason": _EIGHTK_BUDGET_REASON,
+                "reason": eightk_refusal[0],
             }
         if data is None:
             continue

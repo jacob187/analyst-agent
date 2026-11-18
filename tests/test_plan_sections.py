@@ -5,7 +5,7 @@ Pure logic over plain dicts shaped like ``_fetch_filing_data`` output.
 
 from api.routes.company import _plan_sections
 
-TENK_META = {"accession": "0000320193-25-000001"}
+TENK_META = {"accession": "0000320193-25-000001", "form_type": "10-K"}
 TENQ_META = {"accession": "0000320193-25-000002"}
 
 FOUND = {"text": "Real section text", "found": True}
@@ -112,17 +112,40 @@ class TestFailedExtractionIsCacheOnly:
 class TestKeylessStillPlansCoreSections:
     """Keyless callers skip raw extraction but must still look up cached analyses."""
 
+    CONDITIONAL = [
+        ("10-K", "business"), ("10-K", "cybersecurity"), ("10-K", "legal"),
+        ("10-K", "market_risk"), ("10-K", "income_stmt"), ("10-K", "cashflow"),
+    ]
+
     def test_keyless_plans_core_and_8k(self):
-        assert _atypes(_plan_sections(_keyless())) == [
+        plan = _plan_sections(_keyless())
+        assert [a for a in _atypes(plan) if a not in self.CONDITIONAL] == [
             ("10-K", "risk_10k"), ("10-K", "mda_10k"), ("10-K", "balance"),
             ("10-Q", "risk_10q"), ("10-Q", "mda_10q"), ("8-K", "earnings"),
         ]
 
-    def test_keyless_is_never_cache_only(self):
+    def test_keyless_core_is_never_cache_only(self):
         # Keyless input is unfetched, not failed — a miss must surface needs_key.
-        assert _cache_only(_plan_sections(_keyless())) == set()
+        plan = _plan_sections(_keyless())
+        assert _cache_only([p for p in plan if (p["form"], p["atype"]) not in self.CONDITIONAL]) == set()
+
+    def test_keyless_plans_conditional_10k_sections_cache_only(self):
+        # The filing may not contain them, so a miss is silent (no needs_key).
+        plan = _plan_sections(_keyless())
+        assert [a for a in _atypes(plan) if a in self.CONDITIONAL] == self.CONDITIONAL
+        assert _cache_only(plan) == set(self.CONDITIONAL)
+        assert all(p["accession"] == TENK_META["accession"] for p in plan if p["form"] == "10-K")
+
+    def test_keyless_foreign_filer_plans_no_conditional_sections(self):
+        data = _keyless()
+        data["tenk"] = {"metadata": {"accession": "20f-acc", "form_type": "20-F"}}
+        assert not set(_atypes(_plan_sections(data))) & set(self.CONDITIONAL)
+
+    def test_fetched_but_missing_sections_are_not_planned(self):
+        # Keyed fetch found no Item 1 etc.: nothing to look up, nothing to generate.
+        assert not set(_atypes(_plan_sections(_fetched()))) & set(self.CONDITIONAL)
 
     def test_keyless_event_is_never_cache_only(self):
         data = _keyless()
         data["eightk"] = {"kind": "event", "raw": {}, "metadata": {"accession": "8k-acc"}}
-        assert _cache_only(_plan_sections(data)) == set()
+        assert ("8-K", "event") not in _cache_only(_plan_sections(data))

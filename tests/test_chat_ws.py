@@ -1290,6 +1290,47 @@ class TestPerCallBudget:
 
             assert _wait_for_usage(_SIGNED_IN, 3) == 3
 
+    def test_query_refused_when_everyones_budget_is_spent(self, client, temp_db, monkeypatch):
+        import api.db as db_module
+        from api import llm_concurrency
+
+        _wire_real_graph(monkeypatch)
+        set_operator_key(monkeypatch, _LENDABLE_MODEL)
+        monkeypatch.setattr(llm_concurrency, "LLM_GLOBAL_DAILY_BUDGET", 3)
+        asyncio.run(db_module.increment_llm_usage(llm_concurrency.OPERATOR_GLOBAL_USAGE_KEY, 3))
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE}))
+            _drain_until(ws, "auth_success")
+            err = _trial_query(ws)
+            assert err["type"] == "error"
+            assert err["message"] == llm_concurrency.GLOBAL_BUDGET_REACHED
+
+        assert llm_usage(_SIGNED_IN) == 0
+
+    def test_run_stops_once_everyones_budget_is_spent_mid_query(self, client, temp_db, monkeypatch):
+        import api.db as db_module
+        from api import llm_concurrency
+
+        _wire_real_graph(monkeypatch)
+        set_operator_key(monkeypatch, _LENDABLE_MODEL)
+        units = llm_concurrency.call_units(_LENDABLE)
+        monkeypatch.setattr(llm_concurrency, "LLM_GLOBAL_DAILY_BUDGET", 3 * units)
+        # The whole (tiny) pool is this user's to spend, so it's the global cap that stops them.
+        monkeypatch.setattr(llm_concurrency, "LLM_USER_GLOBAL_SHARE", 1.0)
+        asyncio.run(db_module.increment_llm_usage(llm_concurrency.OPERATOR_GLOBAL_USAGE_KEY, 2 * units))
+
+        with client.websocket_connect("/ws/chat/AAPL") as ws:
+            ws.send_text(json.dumps({"type": "auth", "user_id": _SIGNED_IN, "model_id": _LENDABLE}))
+            _drain_until(ws, "auth_success")
+            # The first call spends the last global units; the second is
+            # refused with the global message though this user made one call.
+            err = _trial_query(ws)
+            assert err["type"] == "error"
+            assert err["message"] == llm_concurrency.GLOBAL_BUDGET_REACHED
+
+            assert _wait_for_usage(_SIGNED_IN, units) == units
+
     def test_byok_query_charges_nothing(self, client, temp_db, monkeypatch):
         _wire_real_graph(monkeypatch)
         set_operator_key(monkeypatch, _LENDABLE_MODEL)

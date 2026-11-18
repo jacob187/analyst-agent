@@ -402,8 +402,50 @@ class TestBriefingOperatorKeyGuard:
         asyncio.run(db_module.increment_llm_usage(CLERK_USER))
         resp = client.get("/watchlist/briefing", headers={**SIGNED_IN, "X-Model-Id": lendable.id})
         assert resp.status_code == 429
+        assert resp.json()["detail"] == llm_concurrency.BUDGET_REACHED
         assert budget_env.created == 0
         assert llm_usage(CLERK_USER) == 1
+
+    @pytest.mark.eval_unit
+    def test_global_budget_spent_refuses_with_add_your_key_message(
+        self, budget_env, clerk_on, monkeypatch, lendable,
+    ):
+        monkeypatch.setattr(llm_concurrency, "LLM_GLOBAL_DAILY_BUDGET", 1)
+        asyncio.run(db_module.increment_llm_usage(llm_concurrency.OPERATOR_GLOBAL_USAGE_KEY))
+        resp = client.get("/watchlist/briefing", headers={**SIGNED_IN, "X-Model-Id": lendable.id})
+        assert resp.status_code == 429
+        assert resp.json()["detail"] == llm_concurrency.GLOBAL_BUDGET_REACHED
+        assert budget_env.created == 0
+        assert llm_usage(CLERK_USER) == 0
+
+    @pytest.mark.eval_unit
+    def test_global_budget_refusing_the_briefing_call_returns_429_not_500(
+        self, budget_env, clerk_on, monkeypatch,
+    ):
+        """The pre-flight passes with one global unit left, but the briefing's
+        call costs more than one: the charger refuses it mid-run, and the
+        caller still gets the add-your-key 429."""
+        import agents.llm_factory as llm_factory
+        from tests.test_llm_budget import _NamedFakeChatModel, pricier_lendable_model
+
+        model = pricier_lendable_model()
+        set_operator_key(monkeypatch, model, "operator-key")
+        made_by_fixture = llm_factory.create_llm
+        monkeypatch.setattr(
+            llm_factory, "create_llm",
+            lambda model_id, api_key, thinking=None: _NamedFakeChatModel(
+                model=model_id, responses=made_by_fixture(model_id, api_key, thinking).responses,
+            ),
+        )
+        monkeypatch.setattr(llm_concurrency, "LLM_GLOBAL_DAILY_BUDGET", 10)
+        monkeypatch.setattr(llm_concurrency, "LLM_USER_GLOBAL_SHARE", 1.0)
+        asyncio.run(db_module.increment_llm_usage(llm_concurrency.OPERATOR_GLOBAL_USAGE_KEY, 9))
+
+        resp = client.get("/watchlist/briefing", headers={**SIGNED_IN, "X-Model-Id": model.id})
+        assert resp.status_code == 429
+        assert resp.json()["detail"] == llm_concurrency.GLOBAL_BUDGET_REACHED
+        assert budget_env.created == 1  # reached the LLM call, which was refused
+        assert llm_usage(CLERK_USER) == 0
 
     @pytest.mark.eval_unit
     def test_byok_ignores_spent_budget(self, budget_env, clerk_on, monkeypatch, lendable):

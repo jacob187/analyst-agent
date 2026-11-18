@@ -555,7 +555,7 @@ class TestFilingsLLMBudget:
         )
         refused = [e for e in events if e.get("status") == "budget_exceeded"]
         assert len(refused) == 6
-        assert all("budget" in e["message"].lower() for e in refused)
+        assert {e["message"] for e in refused} == {llm_concurrency.BUDGET_REACHED}
         assert events[-1]["type"] == "complete"
         assert mock_filings_deps["llm"].calls == 0
         assert llm_usage("user_streamover") == 1
@@ -617,10 +617,10 @@ class TestSpentBudgetServesCache:
         body = client.get(
             "/api/company/AAPL/filings", headers={"X-User-Id": "user_spent8k"}
         ).json()
+        from api import llm_concurrency
         eightk = body["eightk"]
         assert eightk["kind"] == "earnings"
-        assert "budget" in eightk["reason"].lower()
-        assert "no 8-k" not in eightk["reason"].lower()
+        assert eightk["reason"] == llm_concurrency.BUDGET_REACHED
         assert eightk["metadata"]["accession"] == _MOCK_8K_METADATA["accession"]
         assert "analysis" not in eightk
 
@@ -628,6 +628,51 @@ class TestSpentBudgetServesCache:
         _core_only(mock_filings_deps)
         body = client.get("/api/company/AAPL/filings", headers=_KEYED).json()
         assert body["budget_exceeded"] == []
+
+
+def _spent_global_budget(deps, monkeypatch):
+    """Operator-paid caller under their own budget, with everyone's spent."""
+    import asyncio as _asyncio
+    import api.db as db_module
+    from api import llm_concurrency
+    _core_only(deps)
+    monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+    monkeypatch.setattr(llm_concurrency, "LLM_GLOBAL_DAILY_BUDGET", 3)
+    _asyncio.run(db_module.increment_llm_usage(llm_concurrency.OPERATOR_GLOBAL_USAGE_KEY, 3))
+
+
+class TestSpentGlobalBudget:
+    def test_json_refuses_uncached_sections_with_the_global_message(
+        self, client, mock_filings_deps, budget_db, monkeypatch
+    ):
+        from api import llm_concurrency
+        _spent_global_budget(mock_filings_deps, monkeypatch)
+        _cached_only(mock_filings_deps, {"risk_10k", "mda_10k"})
+
+        body = client.get("/api/company/AAPL/filings", headers={"X-User-Id": "user_globaljson"}).json()
+        assert set(body["tenk"]) == {"metadata", "risk_10k", "mda_10k"}
+        assert set(body["budget_exceeded"]) == _UNCACHED_STEPS
+        assert body["eightk"]["reason"] == llm_concurrency.GLOBAL_BUDGET_REACHED
+        assert mock_filings_deps["llm"].calls == 0
+        assert llm_usage("user_globaljson") == 0
+
+    def test_stream_refuses_uncached_sections_with_the_global_message(
+        self, client, mock_filings_deps, budget_db, monkeypatch
+    ):
+        from api import llm_concurrency
+        _spent_global_budget(mock_filings_deps, monkeypatch)
+        _cached_only(mock_filings_deps, {"risk_10k", "mda_10k"})
+
+        events = _stream_events(
+            client, "/api/company/AAPL/filings/stream", {"X-User-Id": "user_globalstream"}
+        )
+        refused = [e for e in events if e.get("status") == "budget_exceeded"]
+        assert {e["step"] for e in refused} == _UNCACHED_STEPS
+        assert {e["message"] for e in refused} == {llm_concurrency.GLOBAL_BUDGET_REACHED}
+        assert {e["key"] for e in events if e.get("type") == "section"} == {"risk_10k", "mda_10k"}
+        assert events[-1]["type"] == "complete"
+        assert mock_filings_deps["llm"].calls == 0
+        assert llm_usage("user_globalstream") == 0
 
 
 # ── Process-wide LLM dispatch concurrency cap ────────────────────────────
