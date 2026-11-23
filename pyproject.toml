@@ -10,8 +10,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 
 dependencies = [
-    "fastapi==0.136.1",
-    "uvicorn[standard]==0.46.0",
+    "fastapi==0.165.0",
+    "uvicorn[standard]==0.54.0",
     "edgartools>=5.61.1",
     "langchain==1.3.9",
     "langchain-google-genai==4.2.2",
@@ -19,18 +19,18 @@ dependencies = [
     "langchain-anthropic==1.4.6",
     "langchain-tavily==0.2.18",
     "langgraph==1.2.4",
-    "tavily-python==0.7.23",
-    "yfinance==1.3.0",
-    "pydantic==2.13.3",
+    "tavily-python==0.8.5",
+    "yfinance==1.8.0",
+    "pydantic==2.14.4",
     "aiosqlite==0.22.1",
-    "python-dotenv==1.2.2",
-    "langsmith==0.8.18",
+    "python-dotenv==1.2.4",
+    "langsmith==0.15.0",
     "pyjwt[crypto]>=2.15.0",
     "cachetools>=5.3",
     "opentelemetry-sdk==1.45.2",
     "opentelemetry-exporter-otlp-proto-http==1.45.2",
-    "openinference-instrumentation-langchain==0.1.86",
-    "openinference-semantic-conventions==0.1.44",
+    "openinference-instrumentation-langchain==0.1.88",
+    "openinference-semantic-conventions==0.1.46",
 ]
 
 [tool.pytest.ini_options]
@@ -51,11 +51,11 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
-    "pytest==9.0.3",
+    "pytest==9.2.0",
     "pytest-cov==7.1.0",
-    "pytest-asyncio==1.3.0",
-    "pytest-mock==3.15.1",
-    "fpdf2==2.8.8",
+    "pytest-asyncio==1.5.0",
+    "pytest-mock==3.17.0",
+    "fpdf2==2.9.0",
 ]
 
 [tool.hatch.build.targets.wheel]
