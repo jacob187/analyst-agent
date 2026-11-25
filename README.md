@@ -74,7 +74,7 @@ since the last briefing, and a technical outlook for each ticker with the day's 
 briefings are saved, and the agent can look them up when you chat.
 
 <p align="center">
-  <img src=".github/assets/briefing.png" alt="AI Market Briefing for AAPL, NVDA and MSFT: what changed since the last briefing, the market regime, and per-ticker technical outlooks with news links" width="100%">
+  <img src=".github/assets/briefing.gif" alt="Generate AI Briefing is clicked, then the briefing scrolls by: what changed since the last briefing, the market regime, technical outlooks and news links for AAPL, NVDA and MSFT, and closing alerts" width="100%">
 </p>
 
 ---
